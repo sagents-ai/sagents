@@ -571,7 +571,7 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
                })
     end
 
-    test "handles empty interrupt_on map" do
+    test "handles empty interrupt_on map by not adding middleware" do
       assert {:ok, agent} =
                Agent.new(
                  %{
@@ -581,8 +581,8 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
                  interrupt_on: %{}
                )
 
-      # HITL middleware should still be added even with empty config
-      assert Enum.any?(agent.middleware, fn %MiddlewareEntry{module: module} ->
+      # Empty interrupt_on map means no tools need approval, so no middleware added
+      refute Enum.any?(agent.middleware, fn %MiddlewareEntry{module: module} ->
                module == HumanInTheLoop
              end)
     end

@@ -204,6 +204,60 @@ defmodule Sagents.Middleware.HumanInTheLoop do
 
   @default_decisions [:approve, :edit, :reject]
 
+  @doc """
+  Conditionally append HumanInTheLoop middleware to a middleware list.
+
+  This is a convenience function for building middleware stacks. It only adds
+  the HumanInTheLoop middleware if the `interrupt_on` configuration is provided
+  and contains at least one tool configuration.
+
+  ## Parameters
+
+  - `middleware` - The existing middleware list
+  - `interrupt_on` - Map of tool names to interrupt configuration, or `nil`
+
+  ## Returns
+
+  The middleware list, either unchanged or with HumanInTheLoop appended.
+
+  ## Examples
+
+      # With interrupt configuration - adds HumanInTheLoop
+      middleware = [TodoList, FileSystem]
+      |> HumanInTheLoop.maybe_append(%{"write_file" => true})
+      # => [TodoList, FileSystem, {HumanInTheLoop, [interrupt_on: %{...}]}]
+
+      # Without configuration - returns unchanged
+      middleware = [TodoList, FileSystem]
+      |> HumanInTheLoop.maybe_append(nil)
+      # => [TodoList, FileSystem]
+
+      # Empty map - returns unchanged
+      middleware = [TodoList, FileSystem]
+      |> HumanInTheLoop.maybe_append(%{})
+      # => [TodoList, FileSystem]
+
+  ## Usage in Factory
+
+      defp build_middleware(interrupt_on) do
+        [
+          Sagents.Middleware.TodoList,
+          Sagents.Middleware.FileSystem,
+          Sagents.Middleware.SubAgent,
+          Sagents.Middleware.Summarization,
+          Sagents.Middleware.PatchToolCalls
+        ]
+        |> Sagents.Middleware.HumanInTheLoop.maybe_append(interrupt_on)
+      end
+  """
+  @spec maybe_append(list(), interrupt_on_config() | nil) :: list()
+  def maybe_append(middleware, nil), do: middleware
+  def maybe_append(middleware, interrupt_on) when interrupt_on == %{}, do: middleware
+
+  def maybe_append(middleware, interrupt_on) when is_map(interrupt_on) do
+    middleware ++ [{__MODULE__, [interrupt_on: interrupt_on]}]
+  end
+
   @impl true
   def init(opts) do
     interrupt_on = Keyword.get(opts, :interrupt_on, %{})

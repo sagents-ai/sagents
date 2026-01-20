@@ -48,6 +48,7 @@ defmodule Sagents.Agent do
   alias LangChain.Message
   alias LangChain.Chains.LLMChain
   alias Sagents.MiddlewareEntry
+  alias Sagents.Middleware.HumanInTheLoop
 
   @primary_key false
   embedded_schema do
@@ -303,7 +304,7 @@ defmodule Sagents.Agent do
     # Build middleware stack Note: SubAgent middleware accesses parent
     # middleware/tools via runtime context, not via init configuration. See
     # execute_loop/3 where custom_context is set.
-    base_middleware = [
+    [
       # TodoList middleware for task management
       {Sagents.Middleware.TodoList, Keyword.get(opts, :todo_opts, [])},
       # Filesystem middleware for mock file operations
@@ -321,16 +322,8 @@ defmodule Sagents.Agent do
       # PatchToolCalls middleware to fix dangling tool calls
       {Sagents.Middleware.PatchToolCalls, []}
     ]
-
     # Conditionally add HumanInTheLoop middleware if interrupt_on is configured
-    case Keyword.get(opts, :interrupt_on) do
-      nil ->
-        base_middleware
-
-      interrupt_on when is_map(interrupt_on) ->
-        base_middleware ++
-          [{Sagents.Middleware.HumanInTheLoop, [interrupt_on: interrupt_on]}]
-    end
+    |> HumanInTheLoop.maybe_append(Keyword.get(opts, :interrupt_on))
   end
 
   defp initialize_middleware_list(middleware_list) do
@@ -493,7 +486,7 @@ defmodule Sagents.Agent do
     # Find the HumanInTheLoop middleware in the stack
     hitl_middleware =
       Enum.find(agent.middleware, fn %MiddlewareEntry{module: module} ->
-        module == Sagents.Middleware.HumanInTheLoop
+        module == HumanInTheLoop
       end)
 
     case hitl_middleware do
@@ -718,7 +711,7 @@ defmodule Sagents.Agent do
 
   defp execute_chain(chain, middleware) do
     # Check if we should use HITL execution mode
-    if has_middleware?(middleware, Sagents.Middleware.HumanInTheLoop) do
+    if has_middleware?(middleware, HumanInTheLoop) do
       execute_chain_with_hitl(chain, middleware)
     else
       # Normal execution without interrupts
@@ -834,7 +827,7 @@ defmodule Sagents.Agent do
     # Find the HumanInTheLoop middleware
     hitl_middleware =
       Enum.find(middleware_list, fn %MiddlewareEntry{module: module} ->
-        module == Sagents.Middleware.HumanInTheLoop
+        module == HumanInTheLoop
       end)
 
     case hitl_middleware do
