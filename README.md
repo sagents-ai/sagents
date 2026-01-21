@@ -285,7 +285,28 @@ defmodule MyApp.CustomMiddleware do
 end
 ```
 
-## Persistence
+## Code Generators
+
+Sagents provides code generators to scaffold the database layer, agent factory, and coordinator for your application. Run these generators in order:
+
+```bash
+# Step 1: Generate database persistence layer
+mix sagents.gen.persistence MyApp.Conversations \
+  --scope MyApp.Accounts.Scope \
+  --owner-type user \
+  --owner-field user_id
+
+# Step 2: Generate agent factory
+mix sagents.gen.factory --module MyApp.Agents.Factory
+
+# Step 3: Generate coordinator
+mix sagents.gen.coordinator \
+  --module MyApp.Agents.Coordinator \
+  --factory MyApp.Agents.Factory \
+  --conversations MyApp.Conversations \
+  --pubsub MyApp.PubSub \
+  --presence MyAppWeb.Presence
+```
 
 ### Persistence Code Generator
 
@@ -304,6 +325,31 @@ This generates:
 - **AgentState schema** - Serialized agent state (messages, middleware state)
 - **DisplayMessage schema** - UI-friendly message representations
 - **Database migration**
+
+### Factory Code Generator
+
+Generate a Factory module for creating agents with consistent configuration:
+
+```bash
+mix sagents.gen.factory
+mix sagents.gen.factory --module MyApp.Agents.Factory
+```
+
+This generates a Factory module that:
+- Centralizes agent creation with consistent model and middleware configuration
+- Provides a single source of truth for all agent capabilities
+- Includes default middleware stack (TodoList, FileSystem, SubAgent, Summarization, etc.)
+- Configures Human-in-the-Loop approval workflows
+- Supports model fallbacks for resilience
+- Uses a lighter model (Haiku) for title generation to optimize speed and costs
+
+The generated Factory is a **starting template** designed to be customized for your application. Key functions to customize:
+
+- `get_model_config/0` - Change LLM provider (OpenAI, Ollama, etc.)
+- `get_fallback_models/0` - Configure model fallbacks for resilience
+- `base_system_prompt/0` - Define your agent's personality and capabilities
+- `build_middleware/2` - Add/remove middleware from the stack
+- `default_interrupt_on/0` - Configure which tools require human approval
 
 ### Coordinator Code Generator
 
