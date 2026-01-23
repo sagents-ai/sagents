@@ -28,10 +28,8 @@ defmodule Mix.Sagents.Gen.Persistence.Generator do
     factory_file = generate_factory(config)
     files = [factory_file | files]
 
-    # Print generated files
-    print_files(files)
-
-    :ok
+    # Return files list for caller to print
+    files
   end
 
   defp ensure_directories(config) do
@@ -49,14 +47,6 @@ defmodule Mix.Sagents.Gen.Persistence.Generator do
     |> Enum.map(&Macro.underscore/1)
     |> Path.join()
     |> then(&"lib/#{&1}")
-  end
-
-  defp print_files(files) do
-    Mix.shell().info("\nGenerated files:")
-
-    Enum.each(files, fn file ->
-      Mix.shell().info("  * #{IO.ANSI.green()}#{file}#{IO.ANSI.reset()}")
-    end)
   end
 
   defp generate_factory(config) do

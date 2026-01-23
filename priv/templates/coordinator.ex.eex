@@ -37,10 +37,10 @@ defmodule <%= module %> do
 
   # PubSub configuration - single source of truth
   @pubsub_module Phoenix.PubSub
-  @pubsub_name <%= inspect(pubsub_module) %>
+  @pubsub_name <%= pubsub_module %>
 
   # Presence configuration for tracking conversation viewers
-  @presence_module <%= inspect(presence_module) %>
+  @presence_module <%= presence_module %>
 
   # Default inactivity timeout (can be overridden per session)
   @inactivity_timeout_minutes 10

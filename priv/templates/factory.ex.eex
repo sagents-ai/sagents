@@ -1,4 +1,4 @@
-defmodule <%= @module %> do
+defmodule <%= module %> do
   @moduledoc """
   Factory for creating agents with consistent configuration.
 
@@ -7,14 +7,14 @@ defmodule <%= @module %> do
   `create_agent/1` when starting a conversation session.
 
   This Factory is automatically configured for your persistence layer:
-  - Owner type: :<%= @owner_type %>
-  - Owner field: <%= @owner_field %>
-  - Conversations context: <%= @conversations_module %>
+  - Owner type: :<%= owner_type %>
+  - Owner field: <%= owner_field %>
+  - Conversations context: <%= conversations_module %>
 
   ## Customization
 
   - Change model provider in `get_model_config/0`
-  - Configure fallbacks in `get_fallback_models/0`
+  - Configure fallbacks in `get_fallback_models/0` (TODO: wire into Agent.new)
   - Configure title generation model in `get_title_model/0`
   - Modify system prompt in `base_system_prompt/0`
   - Add/remove middleware in `build_middleware/3`
@@ -65,7 +65,8 @@ defmodule <%= @module %> do
   alias LangChain.ChatModels.ChatAnthropic
   # Uncomment for OpenAI:
   # alias LangChain.ChatModels.ChatOpenAI
-  alias LangChain.Utils.BedrockConfig
+  # Uncomment for Bedrock:
+  # alias LangChain.Utils.BedrockConfig
   alias Sagents.Agent
   alias Sagents.Middleware.ConversationTitle
   alias Sagents.Middleware.HumanInTheLoop
@@ -81,7 +82,8 @@ defmodule <%= @module %> do
   # Title generation uses a lighter/faster model for cost efficiency
   # Haiku is ~10x cheaper than Sonnet and sufficient for generating titles
   @title_model "claude-3-5-haiku-latest"
-  @title_fallback_model "us.anthropic.claude-3-5-haiku-20241022-v1:0"
+  # Uncomment when using Bedrock fallback:
+  # @title_fallback_model "us.anthropic.claude-3-5-haiku-20241022-v1:0"
 
   # For OpenAI, uncomment and use:
   # @main_model "gpt-4o"
@@ -95,9 +97,9 @@ defmodule <%= @module %> do
   - `:agent_id` - Required. Unique identifier for this agent.
   - `:conversation_id` - Optional. Conversation ID to automatically load filesystem scope.
     When provided, calls `get_filesystem_scope/1` to determine the scope based on the
-    conversation's <%= @owner_field %>.
+    conversation's <%= owner_field %>.
   - `:filesystem_scope` - Optional. Explicit scope tuple for filesystem isolation.
-    Examples: `{:<%= @owner_type %>, <%= @owner_field %>}`, `{:project, 456}`, `{:team, 789}`.
+    Examples: `{:<%= owner_type %>, <%= owner_field %>}`, `{:project, 456}`, `{:team, 789}`.
     If neither `:conversation_id` nor `:filesystem_scope` is provided, defaults to `{:agent, agent_id}`.
   - `:timezone` - Optional. IANA timezone string (default: "UTC").
   - `:interrupt_on` - Optional. Map of tool names requiring approval.
@@ -114,7 +116,7 @@ defmodule <%= @module %> do
       # Explicit filesystem scope (bypasses get_filesystem_scope/1)
       {:ok, agent} = Factory.create_agent(
         agent_id: "conv-123",
-        filesystem_scope: {:<%= @owner_type %>, current_<%= @owner_type %>.id}
+        filesystem_scope: {:<%= owner_type %>, current_<%= owner_type %>.id}
       )
 
       # Agent-scoped (isolated per conversation - typically too limiting)
@@ -180,10 +182,10 @@ defmodule <%= @module %> do
 
   This function is called automatically when `:conversation_id` is passed to
   `create_agent/1`. It looks up the conversation in the database and returns
-  a scope tuple based on the conversation's <%= @owner_field %>.
+  a scope tuple based on the conversation's <%= owner_field %>.
 
-  For user-facing agents, this returns `{:<%= @owner_type %>, <%= @owner_field %>}` to enable
-  persistent memory across conversations for the same <%= @owner_type %>.
+  For user-facing agents, this returns `{:<%= owner_type %>, <%= owner_field %>}` to enable
+  persistent memory across conversations for the same <%= owner_type %>.
 
   ## Customization
 
@@ -191,15 +193,15 @@ defmodule <%= @module %> do
 
       # Current implementation (user-scoped by default)
       def get_filesystem_scope(conversation_id) do
-        case <%= @conversations_module %>.get_conversation(conversation_id) do
+        case <%= conversations_module %>.get_conversation(conversation_id) do
           nil -> nil
-          conversation -> {:<%= @owner_type %>, conversation.<%= @owner_field %>}
+          conversation -> {:<%= owner_type %>, conversation.<%= owner_field %>}
         end
       end
 
       # Project-scoped alternative
       def get_filesystem_scope(conversation_id) do
-        case <%= @conversations_module %>.get_conversation_project(conversation_id) do
+        case <%= conversations_module %>.get_conversation_project(conversation_id) do
           nil -> nil
           project_id -> {:project, project_id}
         end
@@ -208,14 +210,14 @@ defmodule <%= @module %> do
       # Agent-scoped (isolated per conversation)
       def get_filesystem_scope(_conversation_id), do: nil
 
-  Returns a scope tuple like `{:<%= @owner_type %>, <%= @owner_field %>}` or `nil` for agent-scoped.
+  Returns a scope tuple like `{:<%= owner_type %>, <%= owner_field %>}` or `nil` for agent-scoped.
   """
   def get_filesystem_scope(conversation_id) do
-    # Default: <%= String.capitalize(@owner_type) %>-scoped filesystem for persistent memory across conversations
-    # Load the conversation and extract the <%= @owner_field %>
-    case <%= @repo_module %>.get(<%= @conversations_module %>.Conversation, conversation_id) do
+    # Default: <%= String.capitalize(owner_type) %>-scoped filesystem for persistent memory across conversations
+    # Load the conversation and extract the <%= owner_field %>
+    case <%= repo_module %>.get(<%= conversations_module %>.Conversation, conversation_id) do
       nil -> nil
-      conversation -> {:<%= @owner_type %>, conversation.<%= @owner_field %>}
+      conversation -> {:<%= owner_type %>, conversation.<%= owner_field %>}
     end
   end
 
@@ -243,6 +245,9 @@ defmodule <%= @module %> do
   # Fallback models - same model on different infrastructure for resilience.
   # These are used when the primary provider is unavailable.
   #
+  # TODO: Wire this into Agent.new when fallback support is added.
+  # Currently this function is defined for future use.
+  #
   # Note: To use Bedrock fallback, configure AWS credentials in config.exs:
   #
   #   config :langchain, :bedrock,
@@ -250,7 +255,10 @@ defmodule <%= @module %> do
   #     aws_secret_access_key: System.get_env("AWS_SECRET_ACCESS_KEY"),
   #     aws_region: System.get_env("AWS_REGION", "us-east-1")
   #
-  defp get_fallback_models do
+  # Then uncomment the BedrockConfig alias at the top of this file.
+  #
+  @doc false
+  def get_fallback_models do
     [
       # Anthropic via AWS Bedrock (same Claude model, different provider)
       # Uncomment when Bedrock is configured:
@@ -288,7 +296,7 @@ defmodule <%= @module %> do
   # Fallback models for title generation
   defp get_title_fallbacks do
     [
-      # Uncomment when Bedrock is configured:
+      # Uncomment when Bedrock is configured (also uncomment BedrockConfig alias):
       # ChatAnthropic.new!(%{
       #   model: @title_fallback_model,
       #   bedrock: BedrockConfig.from_application_env!(),

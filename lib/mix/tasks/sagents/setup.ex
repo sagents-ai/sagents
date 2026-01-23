@@ -78,11 +78,15 @@ defmodule Mix.Tasks.Sagents.Setup do
     # Build configuration
     config = build_config(context_module, opts)
 
-    # Generate persistence files
-    Generator.generate(config)
+    # Generate persistence files (returns list of generated file paths)
+    persistence_files = Generator.generate(config)
 
     # Generate coordinator
-    generate_coordinator(config)
+    coordinator_path = generate_coordinator(config)
+
+    # Print all generated files
+    all_files = [coordinator_path | persistence_files]
+    print_generated_files(all_files)
 
     # Print instructions
     print_instructions(config)
@@ -124,8 +128,8 @@ defmodule Mix.Tasks.Sagents.Setup do
       web: opts[:web] || "#{app_module(app)}Web",
       factory_module: opts[:factory] || "#{app_module(app)}.Agents.Factory",
       coordinator_module: opts[:coordinator] || "#{app_module(app)}.Agents.Coordinator",
-      pubsub_module: String.to_atom(opts[:pubsub] || "#{app_module(app)}.PubSub"),
-      presence_module: String.to_atom(opts[:presence] || "#{app_module(app)}Web.Presence")
+      pubsub_module: opts[:pubsub] || "#{app_module(app)}.PubSub",
+      presence_module: opts[:presence] || "#{app_module(app)}Web.Presence"
     }
   end
 
@@ -191,20 +195,22 @@ defmodule Mix.Tasks.Sagents.Setup do
     coordinator_path
   end
 
+  defp print_generated_files(files) do
+    Mix.shell().info("\nGenerated files:")
+
+    Enum.each(files, fn file ->
+      Mix.shell().info("  * #{IO.ANSI.green()}#{file}#{IO.ANSI.reset()}")
+    end)
+  end
+
   defp print_instructions(config) do
     factory_path = module_to_path(config.factory_module)
-    coordinator_path = module_to_path(config.coordinator_module)
 
     Mix.shell().info([
       :green,
       """
 
       🎉 Sagents setup complete!
-
-      Generated files:
-        * Persistence layer (context, schemas, migration)
-        * Factory: #{factory_path}
-        * Coordinator: #{coordinator_path}
 
       Next steps:
 
@@ -260,14 +266,6 @@ defmodule Mix.Tasks.Sagents.Setup do
 
   defp module_to_path(module) when is_binary(module) do
     module
-    |> String.split(".")
-    |> Enum.map(&Macro.underscore/1)
-    |> Path.join()
-    |> then(&"lib/#{&1}.ex")
-  end
-
-  defp context_module_path(config) do
-    config.context_module
     |> String.split(".")
     |> Enum.map(&Macro.underscore/1)
     |> Path.join()

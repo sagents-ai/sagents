@@ -762,18 +762,15 @@ defmodule <%= @context_module %> do
     from q in query, where: q.<%= @owner_field %> == ^owner_id
   end
 
-  # TODO: Customize this based on YOUR scope struct fields
+  # Extracts the owner ID from the scope struct.
+  #
+  # This default assumes your Scope has a `<%= @owner_type %>` field containing
+  # a struct with an `id` field. Customize if your Scope has a different structure:
   #
   # Examples:
-  # defp get_owner_id(%Scope{user: user}), do: user.id
-  # defp get_owner_id(%Scope{organization_id: id}), do: id
-  # defp get_owner_id(%Scope{team_id: id}), do: id
+  # defp get_owner_id(%Scope{<%= @owner_type %>: <%= @owner_type %>}), do: <%= @owner_type %>.id  # struct with id
+  # defp get_owner_id(%Scope{<%= @owner_field %>: id}), do: id                    # direct ID field
+  # defp get_owner_id(%Scope{current_<%= @owner_field %>: id}), do: id            # current_ prefix
   #
-  defp get_owner_id(%Scope{} = _scope) do
-    # CUSTOMIZE THIS: Extract the owner ID from your scope struct
-    # Pattern match on your scope's specific fields above this function
-    raise "Not implemented: Extract owner ID from your scope struct. " <>
-          "Update this function to pattern match on your scope's fields " <>
-          "(e.g., %Scope{user_id: id} -> id)"
-  end
+  defp get_owner_id(%Scope{<%= @owner_type %>: <%= @owner_type %>}), do: <%= @owner_type %>.id
 end
