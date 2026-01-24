@@ -32,7 +32,7 @@ defmodule <%= module %> do
 
   alias Sagents.{State, AgentServer, AgentSupervisor}
   alias LangChain.Message
-  alias LangChain.Message.DisplayHelpers
+  alias Sagents.Message.DisplayHelpers
   require Logger
 
   # PubSub configuration - single source of truth

@@ -12,6 +12,7 @@ defmodule Sagents.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
+      docs: docs(),
       name: "Sagents",
       description: """
       Agent orchestration framework for Elixir, built on top of LangChain.
@@ -48,6 +49,9 @@ defmodule Sagents.MixProject do
       # Optional dependencies
       {:phoenix, "~> 1.7", optional: true},
 
+      # Development dependencies
+      {:ex_doc, "~> 0.40", only: :dev, runtime: false},
+
       # Test dependencies
       {:mimic, "~> 1.8", only: :test}
     ]
@@ -58,4 +62,66 @@ defmodule Sagents.MixProject do
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
     ]
   end
+
+  defp docs do
+    [
+      main: "readme",
+      extras: extras(),
+      groups_for_extras: [
+        Docs: Path.wildcard("docs/*.md")
+      ],
+      before_closing_head_tag: &before_closing_head_tag/1,
+      before_closing_body_tag: &before_closing_body_tag/1
+    ]
+  end
+
+  defp extras do
+    [
+      "README.md",
+      "docs/middleware_messaging.md"
+    ]
+  end
+
+  defp before_closing_head_tag(:html) do
+    """
+    <!-- HTML injected at the end of the <head> element -->
+    """
+  end
+
+  defp before_closing_head_tag(:epub), do: ""
+
+  defp before_closing_body_tag(:html) do
+    """
+    <script defer src="https://cdn.jsdelivr.net/npm/mermaid@10.2.3/dist/mermaid.min.js"></script>
+    <script>
+      let initialized = false;
+
+      window.addEventListener("exdoc:loaded", () => {
+        if (!initialized) {
+          mermaid.initialize({
+            startOnLoad: false,
+            theme: document.body.className.includes("dark") ? "dark" : "default"
+          });
+          initialized = true;
+        }
+
+        let id = 0;
+        for (const codeEl of document.querySelectorAll("pre code.mermaid")) {
+          const preEl = codeEl.parentElement;
+          const graphDefinition = codeEl.textContent;
+          const graphEl = document.createElement("div");
+          const graphId = "mermaid-graph-" + id++;
+          mermaid.render(graphId, graphDefinition).then(({svg, bindFunctions}) => {
+            graphEl.innerHTML = svg;
+            bindFunctions?.(graphEl);
+            preEl.insertAdjacentElement("afterend", graphEl);
+            preEl.remove();
+          });
+        }
+      });
+    </script>
+    """
+  end
+
+  defp before_closing_body_tag(:epub), do: ""
 end

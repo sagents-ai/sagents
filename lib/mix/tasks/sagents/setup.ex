@@ -78,6 +78,9 @@ defmodule Mix.Tasks.Sagents.Setup do
     # Build configuration
     config = build_config(context_module, opts)
 
+    # Check for existing files before generating
+    check_existing_files!(config)
+
     # Generate persistence files (returns list of generated file paths)
     persistence_files = Generator.generate(config)
 
@@ -131,6 +134,48 @@ defmodule Mix.Tasks.Sagents.Setup do
       pubsub_module: opts[:pubsub] || "#{app_module(app)}.PubSub",
       presence_module: opts[:presence] || "#{app_module(app)}Web.Presence"
     }
+  end
+
+  defp check_existing_files!(config) do
+    # Get list of all files that will be generated
+    files_to_generate = [
+      module_to_path(config.factory_module),
+      module_to_path(config.coordinator_module),
+      module_to_path(config.context_module),
+      module_to_path("#{config.context_module}.Conversation"),
+      module_to_path("#{config.context_module}.AgentState"),
+      module_to_path("#{config.context_module}.DisplayMessage")
+    ]
+
+    # Check which files already exist
+    existing_files = Enum.filter(files_to_generate, &File.exists?/1)
+
+    if Enum.any?(existing_files) do
+      Mix.shell().info(
+        "\n#{IO.ANSI.yellow()}Warning: The following files already exist:#{IO.ANSI.reset()}\n"
+      )
+
+      Enum.each(existing_files, fn file ->
+        Mix.shell().info("  * #{IO.ANSI.red()}#{file}#{IO.ANSI.reset()}")
+      end)
+
+      Mix.shell().info("")
+
+      response =
+        Mix.shell().yes?(
+          "Do you want to overwrite these files? This cannot be undone unless you have them in git."
+        )
+
+      unless response do
+        Mix.shell().info(
+          "\n#{IO.ANSI.yellow()}Aborted. No files were modified.#{IO.ANSI.reset()}"
+        )
+
+        System.halt(0)
+      end
+
+      Mix.shell().info("")
+    end
   end
 
   defp prompt_scope do
