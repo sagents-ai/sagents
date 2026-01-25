@@ -1,6 +1,6 @@
 # Middleware Messaging Guide
 
-This guide explains the middleware messaging pattern in LangChain, which enables middleware components to spawn asynchronous processes, communicate with the AgentServer, and receive results back for state updates.
+This guide explains the middleware messaging pattern in Sagents, which enables middleware components to spawn asynchronous processes, communicate with the AgentServer, and receive results back for state updates.
 
 ## Table of Contents
 
@@ -43,7 +43,7 @@ sequenceDiagram
 
     U->>AS: Send Message
     AS->>M: after_model(state, config)
-    M->>M: Capture self() as server_pid
+    M->>M: Capture agent_id from state
     M->>T: Task.start(fn -> ...)
     M-->>AS: {:ok, state}
     AS-->>U: Response (execution continues)
@@ -51,10 +51,11 @@ sequenceDiagram
     Note over T: Async work happens here
 
     T->>T: Complete work
-    T->>AS: send(server_pid, {:middleware_message, id, result})
-    AS->>M: handle_message(result, state, config)
-    M-->>AS: {:ok, updated_state, broadcast: true}
-    AS->>PS: Broadcast state update
+    T->>PS: AgentServer.publish_event_from(agent_id, event)
+    T->>AS: AgentServer.send_middleware_message(agent_id, id, message)
+    AS->>M: handle_message(message, state, config)
+    M-->>AS: {:ok, updated_state}
+    AS->>PS: Broadcast debug event (state update)
     PS->>U: Notify of changes
 ```
 
@@ -102,7 +103,7 @@ stateDiagram-v2
 
 Each middleware instance has a unique identifier used for message routing:
 
-- **Default ID**: The module name (e.g., `LangChain.Agents.Middleware.ConversationTitle`)
+- **Default ID**: The module name (e.g., `Sagents.Middleware.ConversationTitle`)
 - **Custom ID**: Specified via `:id` option to support multiple instances
 
 ```elixir
@@ -134,14 +135,15 @@ Middleware callbacks execute **in the AgentServer process context**, so `self()`
 
 ```elixir
 def after_model(state, config) do
-  # self() here IS the AgentServer PID
-  server_pid = self()
+  # Capture agent_id before spawning task
+  agent_id = state.agent_id
+  middleware_id = Map.get(config, :id, __MODULE__)
 
   Task.start(fn ->
     # This runs in a different process
     result = do_work()
-    # Send back to the AgentServer
-    send(server_pid, {:middleware_message, config.middleware_id, {:result, result}})
+    # Send back to the AgentServer using public API
+    AgentServer.send_middleware_message(agent_id, middleware_id, {:result, result})
   end)
 
   {:ok, state}
@@ -162,20 +164,28 @@ Where:
 
 ### 4. State Updates and Broadcasting
 
-The `handle_message/3` callback can request state broadcasts:
+The `handle_message/3` callback updates state and can trigger broadcasts manually:
 
 ```elixir
-def handle_message(message, state, config) do
-  updated_state = State.put_metadata(state, "key", value)
+def handle_message({:result, data}, state, _config) do
+  updated_state = State.put_metadata(state, "key", data)
 
-  # Request broadcast to subscribers
-  {:ok, updated_state, broadcast: true}
+  # The state update is automatically applied by AgentServer
+  # To broadcast events to subscribers, use AgentServer.publish_event_from/2
+  # (typically done in the async task before sending the message)
+  {:ok, updated_state}
 end
 ```
 
-This triggers two PubSub events:
-1. `{:middleware_state_update, middleware_id, updated_state}` - Generic update
-2. Custom events (e.g., `{:conversation_title_generated, title, agent_id}`) - For backward compatibility
+Middleware can broadcast custom events using `AgentServer.publish_event_from/2`:
+```elixir
+# In async task after work completes
+AgentServer.publish_event_from(agent_id, {:custom_event, data})
+AgentServer.send_middleware_message(agent_id, middleware_id, {:result, data})
+```
+
+When state is updated via `handle_message/3`, a debug event is automatically broadcast:
+- `{:agent_state_update, middleware_id, updated_state}` - For debugging/monitoring
 
 ## Implementation Guide
 
@@ -183,10 +193,10 @@ This triggers two PubSub events:
 
 ```elixir
 defmodule MyApp.Middleware.CustomMiddleware do
-  @behaviour LangChain.Agents.Middleware
+  @behaviour Sagents.Middleware
 
   require Logger
-  alias LangChain.Agents.State
+  alias Sagents.State
 
   @impl true
   def init(opts) do
@@ -225,8 +235,8 @@ end
 
 ```elixir
 defp spawn_async_task(state, config) do
-  # IMPORTANT: Capture AgentServer PID before spawning
-  server_pid = self()
+  # IMPORTANT: Capture variables from parent context before spawning
+  agent_id = state.agent_id
 
   # Get middleware ID for routing
   middleware_id = Map.get(config, :id, __MODULE__)
@@ -236,7 +246,7 @@ defp spawn_async_task(state, config) do
 
   # Emit telemetry
   :telemetry.execute(
-    [:middleware, :task, :spawned],
+    [:sagents, :middleware, :task, :spawned],
     %{count: 1},
     %{middleware: middleware_id, task_type: :custom_processing}
   )
@@ -248,26 +258,29 @@ defp spawn_async_task(state, config) do
 
       # Emit success telemetry
       :telemetry.execute(
-        [:middleware, :task, :completed],
+        [:sagents, :middleware, :task, :completed],
         %{count: 1},
         %{middleware: middleware_id, task_type: :custom_processing}
       )
 
-      # Send success message back
-      send(server_pid, {:middleware_message, middleware_id, {:success, result}})
+      # Broadcast events to subscribers (if needed)
+      AgentServer.publish_event_from(agent_id, {:custom_event, result})
+
+      # Send success message back to AgentServer
+      AgentServer.send_middleware_message(agent_id, middleware_id, {:success, result})
     rescue
       error ->
         Logger.error("Processing failed: #{inspect(error)}")
 
         # Emit failure telemetry
         :telemetry.execute(
-          [:middleware, :task, :failed],
+          [:sagents, :middleware, :task, :failed],
           %{count: 1},
-          %{middleware: middleware_id, task_type: :custom_processing}
+          %{middleware: middleware_id, task_type: :custom_processing, error: inspect(error)}
         )
 
         # Send failure message back
-        send(server_pid, {:middleware_message, middleware_id, {:error, error}})
+        AgentServer.send_middleware_message(agent_id, middleware_id, {:error, error})
     end
   end)
 end
@@ -286,8 +299,9 @@ def handle_message({:success, result}, state, _config) do
     |> State.put_metadata("processed", true)
     |> State.put_metadata("result", result)
 
-  # Request broadcast to notify subscribers
-  {:ok, updated_state, broadcast: true}
+  # State is automatically updated by AgentServer
+  # Events should be broadcast from the async task using AgentServer.publish_event_from/2
+  {:ok, updated_state}
 end
 
 def handle_message({:error, error}, state, _config) do
@@ -338,7 +352,6 @@ Initialize the middleware with configuration options. Called once during agent c
 ```elixir
 @callback handle_message(message :: term(), State.t(), config :: map()) ::
   {:ok, State.t()}
-  | {:ok, State.t(), opts :: keyword()}
   | {:error, reason :: term()}
 ```
 
@@ -350,54 +363,91 @@ Handle messages sent from async tasks.
 - `config` - Middleware configuration from `init/1`
 
 **Returns:**
-- `{:ok, state}` - Updated state (no broadcast)
-- `{:ok, state, broadcast: true}` - Updated state with broadcast request
-- `{:error, reason}` - Message handling failed
+- `{:ok, state}` - Updated state
+- `{:error, reason}` - Message handling failed (error is logged but does not halt agent execution)
+
+**Note:** To broadcast events to subscribers, use `AgentServer.publish_event_from/2` from within the async task before sending the message, rather than attempting to broadcast from `handle_message/3`.
+
+#### `on_server_start/2`
+
+```elixir
+@callback on_server_start(State.t(), config :: map()) ::
+  {:ok, State.t()}
+  | {:error, reason :: term()}
+```
+
+Called when the AgentServer starts or restarts.
+
+This allows middleware to perform initialization actions that require the AgentServer to be running, such as broadcasting initial state to subscribers (e.g., TODOs for UI display).
+
+**Parameters:**
+- `state` - The current agent state
+- `config` - Middleware configuration from `init/1`
+
+**Returns:**
+- `{:ok, state}` - Success (state typically unchanged but can be modified)
+- `{:error, reason}` - Error (logged but does not halt agent startup)
+
+**Example:**
+```elixir
+@impl true
+def on_server_start(state, _config) do
+  # Broadcast initial todos when AgentServer starts
+  AgentServer.publish_event_from(state.agent_id, {:todos_updated, state.todos})
+  {:ok, state}
+end
+```
 
 ### Message Sending
 
-Send messages to the AgentServer from async tasks:
+Send messages to the AgentServer from async tasks using the public API:
 
 ```elixir
-send(server_pid, {:middleware_message, middleware_id, message})
+AgentServer.send_middleware_message(agent_id, middleware_id, message)
 ```
 
 **Parameters:**
-- `server_pid` - PID captured via `self()` in middleware callback
+- `agent_id` - The agent ID (captured from `state.agent_id`)
 - `middleware_id` - Module name or custom ID from config
 - `message` - Any term to be handled by `handle_message/3`
+
+**Note:** The public API `AgentServer.send_middleware_message/3` is strongly preferred over raw `send/2` because it:
+- Provides a clearer, more maintainable interface
+- Handles the case where the AgentServer may not be running
+- Is consistent with other AgentServer operations
+- Makes testing easier by providing a clear seam for mocking
 
 ### Telemetry Events
 
 The following telemetry events are emitted:
 
-#### `[:middleware, :task, :spawned]`
+#### `[:sagents, :middleware, :task, :spawned]`
 
 Emitted when an async task is spawned.
 
 **Measurements:** `%{count: 1}`
 **Metadata:** `%{middleware: id, task_type: atom}`
 
-#### `[:middleware, :task, :completed]`
+#### `[:sagents, :middleware, :task, :completed]`
 
 Emitted when a task completes successfully.
 
 **Measurements:** `%{count: 1}`
 **Metadata:** `%{middleware: id, task_type: atom}`
 
-#### `[:middleware, :task, :failed]`
+#### `[:sagents, :middleware, :task, :failed]`
 
 Emitted when a task fails.
 
 **Measurements:** `%{count: 1}`
 **Metadata:** `%{middleware: id, task_type: atom, error: string}`
 
-#### `[:middleware, :message, :received]`
+#### `[:sagents, :middleware, :message, :received]`
 
 Emitted when AgentServer receives a middleware message.
 
 **Measurements:** `%{count: 1}`
-**Metadata:** `%{middleware: id}`
+**Metadata:** `%{middleware_id: id, agent_id: string}`
 
 ## Examples
 
@@ -406,11 +456,11 @@ Emitted when AgentServer receives a middleware message.
 The built-in `ConversationTitle` middleware demonstrates the complete pattern:
 
 ```elixir
-defmodule LangChain.Agents.Middleware.ConversationTitle do
-  @behaviour LangChain.Agents.Middleware
+defmodule Sagents.Middleware.ConversationTitle do
+  @behaviour Sagents.Middleware
 
   require Logger
-  alias LangChain.Agents.State
+  alias Sagents.{State, AgentServer}
   alias LangChain.Chains.TextToTitleChain
 
   @impl true
@@ -432,7 +482,7 @@ defmodule LangChain.Agents.Middleware.ConversationTitle do
   def after_model(state, config) do
     # Only generate title if we don't have one yet
     if State.get_metadata(state, "conversation_title") == nil do
-      spawn_title_generation(state, config)
+      spawn_title_generation_task(state, config)
     end
 
     {:ok, state}
@@ -440,8 +490,9 @@ defmodule LangChain.Agents.Middleware.ConversationTitle do
 
   @impl true
   def handle_message({:title_generated, title}, state, _config) do
+    Logger.debug("Received title: #{title}")
     updated_state = State.put_metadata(state, "conversation_title", title)
-    {:ok, updated_state, broadcast: true}
+    {:ok, updated_state}
   end
 
   def handle_message({:title_generation_failed, reason}, state, _config) do
@@ -449,18 +500,47 @@ defmodule LangChain.Agents.Middleware.ConversationTitle do
     {:ok, state}
   end
 
-  defp spawn_title_generation(state, config) do
-    server_pid = self()
+  defp spawn_title_generation_task(state, config) do
+    # Capture agent_id for API calls
+    agent_id = state.agent_id
     middleware_id = Map.get(config, :id, __MODULE__)
-    user_text = extract_user_message(state)
+    user_text = extract_last_user_message_text(state)
+
+    # Emit telemetry
+    :telemetry.execute(
+      [:sagents, :middleware, :task, :spawned],
+      %{count: 1},
+      %{middleware: middleware_id, task_type: :title_generation}
+    )
 
     Task.start(fn ->
       try do
+        # Generate title
         title = generate_title(user_text, config)
-        send(server_pid, {:middleware_message, middleware_id, {:title_generated, title}})
+
+        # Emit telemetry
+        :telemetry.execute(
+          [:sagents, :middleware, :task, :completed],
+          %{count: 1},
+          %{middleware: middleware_id, task_type: :title_generation}
+        )
+
+        # Broadcast event to subscribers
+        AgentServer.publish_event_from(agent_id, {:conversation_title_generated, title, agent_id})
+
+        # Send message to AgentServer for state update
+        AgentServer.send_middleware_message(agent_id, middleware_id, {:title_generated, title})
       rescue
         error ->
-          send(server_pid, {:middleware_message, middleware_id, {:title_generation_failed, error}})
+          Logger.error("Title generation failed: #{inspect(error)}")
+
+          :telemetry.execute(
+            [:sagents, :middleware, :task, :failed],
+            %{count: 1},
+            %{middleware: middleware_id, task_type: :title_generation, error: inspect(error)}
+          )
+
+          AgentServer.send_middleware_message(agent_id, middleware_id, {:title_generation_failed, error})
       end
     end)
   end
@@ -473,17 +553,27 @@ defmodule LangChain.Agents.Middleware.ConversationTitle do
     })
     |> TextToTitleChain.evaluate(with_fallbacks: config.fallbacks)
   end
+
+  defp extract_last_user_message_text(state) do
+    # Extract text from the last user message
+    state.messages
+    |> Enum.reverse()
+    |> Enum.find(fn msg -> msg.role == :user end)
+    |> case do
+      nil -> ""
+      message -> LangChain.Message.ContentPart.parts_to_string(message.content)
+    end
+  end
 end
 ```
 
 **Usage:**
 
 ```elixir
-{:ok, agent} = Agent.new(
-  agent_id: "chat-agent",
+{:ok, agent} = Sagents.new(
   model: main_model,
   middleware: [
-    {LangChain.Agents.Middleware.ConversationTitle, [
+    {Sagents.Middleware.ConversationTitle, [
       chat_model: ChatAnthropic.new!(%{model: "claude-3-5-haiku-latest"}),
       fallbacks: [backup_model]
     ]}
@@ -497,10 +587,10 @@ Track conversation analytics asynchronously:
 
 ```elixir
 defmodule MyApp.Middleware.Analytics do
-  @behaviour LangChain.Agents.Middleware
+  @behaviour Sagents.Middleware
 
   require Logger
-  alias LangChain.Agents.State
+  alias Sagents.{State, AgentServer}
 
   @impl true
   def init(opts) do
@@ -529,20 +619,19 @@ defmodule MyApp.Middleware.Analytics do
   end
 
   defp spawn_analytics_task(state, config) do
-    server_pid = self()
+    agent_id = state.agent_id
     middleware_id = Map.get(config, :id, __MODULE__)
 
     # Extract analytics data
     message_count = length(state.messages)
-    agent_id = State.get_metadata(state, "agent_id")
 
     Task.start(fn ->
       try do
         event_id = send_analytics(agent_id, message_count, config)
-        send(server_pid, {:middleware_message, middleware_id, {:analytics_sent, event_id}})
+        AgentServer.send_middleware_message(agent_id, middleware_id, {:analytics_sent, event_id})
       rescue
         error ->
-          send(server_pid, {:middleware_message, middleware_id, {:analytics_failed, error}})
+          AgentServer.send_middleware_message(agent_id, middleware_id, {:analytics_failed, error})
       end
     end)
   end
@@ -564,10 +653,10 @@ Generate embeddings for conversation history:
 
 ```elixir
 defmodule MyApp.Middleware.Embeddings do
-  @behaviour LangChain.Agents.Middleware
+  @behaviour Sagents.Middleware
 
   require Logger
-  alias LangChain.Agents.State
+  alias Sagents.{State, AgentServer}
 
   @impl true
   def init(opts) do
@@ -594,7 +683,7 @@ defmodule MyApp.Middleware.Embeddings do
     Logger.info("Generated #{length(embeddings)} embeddings")
 
     updated_state = State.put_metadata(state, "embeddings", embeddings)
-    {:ok, updated_state, broadcast: true}
+    {:ok, updated_state}
   end
 
   def handle_message({:embeddings_failed, reason}, state, _config) do
@@ -603,7 +692,7 @@ defmodule MyApp.Middleware.Embeddings do
   end
 
   defp spawn_embedding_task(state, config) do
-    server_pid = self()
+    agent_id = state.agent_id
     middleware_id = Map.get(config, :id, __MODULE__)
 
     # Extract text from messages
@@ -612,10 +701,10 @@ defmodule MyApp.Middleware.Embeddings do
     Task.start(fn ->
       try do
         embeddings = generate_embeddings(texts, config)
-        send(server_pid, {:middleware_message, middleware_id, {:embeddings_generated, embeddings}})
+        AgentServer.send_middleware_message(agent_id, middleware_id, {:embeddings_generated, embeddings})
       rescue
         error ->
-          send(server_pid, {:middleware_message, middleware_id, {:embeddings_failed, error}})
+          AgentServer.send_middleware_message(agent_id, middleware_id, {:embeddings_failed, error})
       end
     end)
   end
@@ -635,26 +724,27 @@ end
 
 ## Best Practices
 
-### 1. Always Capture Server PID Early
+### 1. Always Capture agent_id Early
 
 ```elixir
-# ✅ GOOD - Capture immediately
+# ✅ GOOD - Capture agent_id from state
 def after_model(state, config) do
-  server_pid = self()  # Captured in AgentServer context
+  agent_id = state.agent_id  # Captured before spawning task
+  middleware_id = Map.get(config, :id, __MODULE__)
 
   Task.start(fn ->
-    # Use server_pid here
-    send(server_pid, {...})
+    # Use agent_id with public API
+    AgentServer.send_middleware_message(agent_id, middleware_id, {:result, data})
   end)
 
   {:ok, state}
 end
 
-# ❌ BAD - self() in task is the task's PID
+# ❌ BAD - Trying to access state inside task
 def after_model(state, config) do
   Task.start(fn ->
-    server_pid = self()  # Wrong! This is the task's PID
-    send(server_pid, {...})
+    agent_id = state.agent_id  # state is not in task closure!
+    AgentServer.send_middleware_message(agent_id, ...)
   end)
 
   {:ok, state}
@@ -665,12 +755,12 @@ end
 
 ```elixir
 # ✅ GOOD - Clear message intent
-send(server_pid, {:middleware_message, id, {:title_generated, title}})
-send(server_pid, {:middleware_message, id, {:title_generation_failed, error}})
+AgentServer.send_middleware_message(agent_id, id, {:title_generated, title})
+AgentServer.send_middleware_message(agent_id, id, {:title_generation_failed, error})
 
 # ❌ BAD - Ambiguous messages
-send(server_pid, {:middleware_message, id, title})
-send(server_pid, {:middleware_message, id, {:error, error}})
+AgentServer.send_middleware_message(agent_id, id, title)
+AgentServer.send_middleware_message(agent_id, id, {:error, error})
 ```
 
 ### 3. Include Error Handling
@@ -680,18 +770,18 @@ send(server_pid, {:middleware_message, id, {:error, error}})
 Task.start(fn ->
   try do
     result = do_work()
-    send(server_pid, {:middleware_message, id, {:success, result}})
+    AgentServer.send_middleware_message(agent_id, id, {:success, result})
   rescue
     error ->
       Logger.error("Task failed: #{inspect(error)}")
-      send(server_pid, {:middleware_message, id, {:error, error}})
+      AgentServer.send_middleware_message(agent_id, id, {:error, error})
   end
 end)
 
 # ❌ BAD - No error handling
 Task.start(fn ->
   result = do_work()  # Crash if this fails!
-  send(server_pid, {:middleware_message, id, {:success, result}})
+  AgentServer.send_middleware_message(agent_id, id, {:success, result})
 end)
 ```
 
@@ -699,24 +789,31 @@ end)
 
 ```elixir
 # ✅ GOOD - Track task lifecycle
-:telemetry.execute([:middleware, :task, :spawned], %{count: 1}, metadata)
+:telemetry.execute([:sagents, :middleware, :task, :spawned], %{count: 1}, metadata)
 # ... do work ...
-:telemetry.execute([:middleware, :task, :completed], %{count: 1}, metadata)
+:telemetry.execute([:sagents, :middleware, :task, :completed], %{count: 1}, metadata)
 
 # This enables monitoring, alerting, and debugging
 ```
 
-### 5. Use Conditional Broadcasting
+### 5. Broadcast Events Strategically
 
 ```elixir
-# ✅ GOOD - Only broadcast when needed
-def handle_message({:result, data}, state, _config) do
-  if significant_change?(data) do
-    {:ok, update_state(state, data), broadcast: true}
-  else
-    {:ok, update_state(state, data)}
+# ✅ GOOD - Broadcast from async task when event is significant
+Task.start(fn ->
+  result = do_work()
+
+  # Broadcast to subscribers if this is a significant event
+  if significant_change?(result) do
+    AgentServer.publish_event_from(agent_id, {:important_update, result})
   end
-end
+
+  # Always send message to update state
+  AgentServer.send_middleware_message(agent_id, middleware_id, {:result, result})
+end)
+
+# State updates via handle_message/3 automatically trigger debug events
+# Custom events for user-facing updates should be published explicitly
 ```
 
 ### 6. Handle Task Timeouts
@@ -724,15 +821,15 @@ end
 Consider using `Task.Supervisor` for production deployments:
 
 ```elixir
-defp spawn_with_timeout(server_pid, middleware_id, work_fn) do
+defp spawn_with_timeout(agent_id, middleware_id, work_fn) do
   Task.Supervisor.start_child(MyApp.TaskSupervisor, fn ->
     try do
       # Work with timeout
-      result = :timer.tc(work_fn)
-      send(server_pid, {:middleware_message, middleware_id, {:success, result}})
+      result = work_fn.()
+      AgentServer.send_middleware_message(agent_id, middleware_id, {:success, result})
     catch
       :exit, {:timeout, _} ->
-        send(server_pid, {:middleware_message, middleware_id, {:timeout, "Task exceeded timeout"}})
+        AgentServer.send_middleware_message(agent_id, middleware_id, {:timeout, "Task exceeded timeout"})
     end
   end)
 end
@@ -759,9 +856,14 @@ def init(opts) do
 end
 
 defp spawn_task(state, config) do
+  agent_id = state.agent_id
   # Use custom ID if available, otherwise module name
   middleware_id = Map.get(config, :id, __MODULE__)
-  # ...
+
+  Task.start(fn ->
+    result = do_work()
+    AgentServer.send_middleware_message(agent_id, middleware_id, {:result, result})
+  end)
 end
 ```
 
@@ -772,20 +874,22 @@ end
 **Problem:** Async task completes but `handle_message/3` is never called.
 
 **Solutions:**
-1. Verify you captured `server_pid = self()` **before** spawning the task
-2. Check the middleware ID matches between spawn and send
-3. Ensure the message format is `{:middleware_message, id, message}`
-4. Check logs for any crashes in the AgentServer
+1. Verify you captured `agent_id = state.agent_id` **before** spawning the task
+2. Check the middleware ID matches between spawn and message send
+3. Ensure you're using `AgentServer.send_middleware_message(agent_id, middleware_id, message)`
+4. Verify the AgentServer is still running (check with `AgentServer.get_status/1`)
+5. Check logs for any crashes in the AgentServer or task
 
-### State Updates Not Broadcasting
+### Events Not Broadcasting
 
 **Problem:** State updates but subscribers don't receive notifications.
 
 **Solutions:**
-1. Return `{:ok, state, broadcast: true}` from `handle_message/3`
-2. Verify PubSub is configured on the agent
-3. Check subscribers are properly subscribed to the agent's topic
-4. Look for broadcast errors in logs
+1. Ensure you're calling `AgentServer.publish_event_from/2` from the async task (not from `handle_message/3`)
+2. Verify the AgentServer was started with PubSub configured
+3. Check subscribers are properly subscribed using `AgentServer.subscribe/1`
+4. Verify `agent_id` is correct when calling `publish_event_from/2`
+5. Look for broadcast errors in logs
 
 ### Tasks Hanging or Not Completing
 
@@ -821,6 +925,8 @@ end
 
 ## See Also
 
-- [ConversationTitle Middleware Implementation](../lib/agents/middleware/conversation_title.ex)
-- [Middleware Behavior Definition](../lib/agents/middleware.ex)
-- [AgentServer Implementation](../lib/agents/agent_server.ex)
+- [ConversationTitle Middleware Implementation](../lib/sagents/middleware/conversation_title.ex)
+- [TodoList Middleware Implementation](../lib/sagents/middleware/todo_list.ex)
+- [Middleware Behavior Definition](../lib/sagents/middleware.ex)
+- [MiddlewareEntry Struct](../lib/sagents/middleware_entry.ex)
+- [AgentServer Implementation](../lib/sagents/agent_server.ex)
