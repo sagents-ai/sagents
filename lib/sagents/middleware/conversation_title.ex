@@ -218,7 +218,7 @@ defmodule Sagents.Middleware.ConversationTitle do
 
     # Emit telemetry for task spawn
     :telemetry.execute(
-      [:middleware, :task, :spawned],
+      [:sagents, :middleware, :task, :spawned],
       %{count: 1},
       %{middleware: middleware_id, task_type: :title_generation}
     )
@@ -243,7 +243,7 @@ defmodule Sagents.Middleware.ConversationTitle do
 
         # Emit telemetry for successful completion
         :telemetry.execute(
-          [:middleware, :task, :completed],
+          [:sagents, :middleware, :task, :completed],
           %{count: 1},
           %{middleware: middleware_id, task_type: :title_generation}
         )
@@ -269,7 +269,7 @@ defmodule Sagents.Middleware.ConversationTitle do
 
           # Emit telemetry for failure
           :telemetry.execute(
-            [:middleware, :task, :failed],
+            [:sagents, :middleware, :task, :failed],
             %{count: 1},
             %{middleware: middleware_id, task_type: :title_generation, error: inspect(error)}
           )
@@ -295,7 +295,7 @@ defmodule Sagents.Middleware.ConversationTitle do
           )
 
           :telemetry.execute(
-            [:middleware, :task, :failed],
+            [:sagents, :middleware, :task, :failed],
             %{count: 1},
             %{
               middleware: middleware_id,

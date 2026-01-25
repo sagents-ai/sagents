@@ -1722,7 +1722,7 @@ defmodule Sagents.AgentServer do
   def handle_info({:middleware_message, middleware_id, message}, server_state) do
     # Emit telemetry event
     :telemetry.execute(
-      [:langchain, :middleware, :message, :received],
+      [:sagents, :middleware, :message, :received],
       %{count: 1},
       %{middleware_id: middleware_id, agent_id: server_state.agent.agent_id}
     )
