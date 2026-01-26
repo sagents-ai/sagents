@@ -8,8 +8,12 @@ defmodule <%= module %> do
 
   ## Usage
 
-      # Start or resume a conversation agent
-      {:ok, session} = <%= module %>.start_conversation_session(conversation_id)
+      # Start or resume a conversation agent with explicit scope
+      scope = {:<%= owner_type %>, current_<%= owner_type %>.id}
+      {:ok, session} = <%= module %>.start_conversation_session(
+        conversation_id,
+        scope: scope
+      )
 
       # Subscribe to agent events
       AgentServer.subscribe(session.agent_id)
@@ -20,13 +24,83 @@ defmodule <%= module %> do
       # Stop agent (optional - agents auto-timeout)
       <%= module %>.stop_conversation_session(conversation_id)
 
+  ## LiveView Integration
+
+  The agents_demo application demonstrates the correct integration pattern.
+  See `agents_demo/lib/agents_demo_web/live/chat_live.ex` for a complete example.
+
+  ### Key Integration Points
+
+  **1. In mount - Initialize filesystem scope:**
+
+      def mount(_params, _session, socket) do
+        <%= owner_type %>_id = socket.assigns.current_scope.<%= owner_type %>.id
+        filesystem_scope = {:<%= owner_type %>, <%= owner_type %>_id}
+
+        # Optional: Initialize <%= owner_type %>'s filesystem server (if using FileSystemServer)
+        if connected?(socket) do
+          case DemoSetup.ensure_<%= owner_type %>_filesystem(<%= owner_type %>_id) do
+            {:ok, _fs_scope} ->
+              FileSystemServer.subscribe(filesystem_scope)
+            {:error, reason} ->
+              Logger.warning("Failed to start <%= owner_type %> filesystem: \#{inspect(reason)}")
+          end
+        end
+
+        {:ok,
+         socket
+         |> assign(:filesystem_scope, filesystem_scope)
+         # ... other assigns
+        }
+      end
+
+  **2. When sending messages - Pass scope explicitly:**
+
+      def handle_event("send_message", %%{"message" => message_text}, socket) do
+        conversation_id = socket.assigns.conversation_id
+        filesystem_scope = socket.assigns.filesystem_scope
+
+        # Start agent session with explicit scope
+        case <%= module %>.start_conversation_session(conversation_id,
+               scope: filesystem_scope
+             ) do
+          {:ok, session} ->
+            # Create and add message to agent
+            message = Message.new_user!(message_text)
+            AgentServer.add_message(session.agent_id, message)
+
+          {:error, reason} ->
+            # Handle error...
+        end
+      end
+
+  **3. When creating new conversations - Scope already known:**
+
+      defp create_new_conversation(socket, first_message_text) do
+        scope = socket.assigns.current_scope
+
+        case Conversations.create_conversation(scope, %%{title: title}) do
+          {:ok, conversation} ->
+            # Conversation created - filesystem_scope already in socket assigns
+            # Will be used when start_conversation_session is called
+
+          {:error, changeset} ->
+            # Handle error...
+        end
+      end
+
+  **Key Points:**
+  - Filesystem scope is determined at mount time from <%= owner_type %> context
+  - Scope is stored in socket assigns and passed explicitly to Coordinator
+  - No database lookups needed to determine scope - it flows from the top down
+  - First-time users work perfectly because scope comes from session, not DB
+
   ## Configuration
 
   Customize this module for your application:
   - Change agent_id mapping strategy in `conversation_agent_id/1`
   - Modify inactivity timeout in `start_conversation_session/2`
   - Add custom lifecycle hooks (telemetry, logging, permissions)
-  - Customize filesystem scoping in your Factory module's `get_filesystem_scope/1`
 
   """
 
@@ -53,21 +127,61 @@ defmodule <%= module %> do
 
   ## Options
 
-  - `:inactivity_timeout` - Milliseconds before agent stops (default: 1 hour)
-  - `:factory_opts` - Options passed to your Factory module
+  - `:scope` - Required. Filesystem scope tuple (e.g., `{:<%= owner_type %>, <%= owner_field %>}`)
+  - `:inactivity_timeout` - Milliseconds before agent stops (default: 10 minutes)
+  - `:factory_opts` - Additional options passed to your Factory module (e.g., `:timezone` for custom middleware)
 
   ## Returns
 
   - `{:ok, session}` - Session info (whether just started or already running)
   - `{:error, reason}` - Failed to start
 
+  ## Examples
+
+      # Standard usage - pass the scope explicitly
+      scope = {:<%= owner_type %>, current_<%= owner_type %>.id}
+      {:ok, session} = <%= module %>.start_conversation_session(
+        conversation_id,
+        scope: scope
+      )
+
+      # Custom inactivity timeout (30 minutes)
+      {:ok, session} = <%= module %>.start_conversation_session(
+        conversation_id,
+        scope: {:<%= owner_type %>, <%= owner_field %>},
+        inactivity_timeout: :timer.minutes(30)
+      )
+
+      # With custom factory options (e.g., for timezone-aware middleware)
+      {:ok, session} = <%= module %>.start_conversation_session(
+        conversation_id,
+        scope: scope,
+        factory_opts: [timezone: "America/New_York"]
+      )
+
   """
   def start_conversation_session(conversation_id, opts \\ []) do
+    # Validate required scope
+    scope = case Keyword.fetch(opts, :scope) do
+      {:ok, scope_value} -> scope_value
+      :error ->
+        raise ArgumentError, """
+        Missing required :scope option.
+
+        Please pass the scope to use for the filesystem when starting a session:
+
+            <%= module %>.start_conversation_session(
+              conversation_id,
+              scope: {:<%= owner_type %>, <%= owner_field %>}
+            )
+        """
+    end
+
     agent_id = conversation_agent_id(conversation_id)
 
     case AgentServer.get_pid(agent_id) do
       nil ->
-        do_start_session(conversation_id, agent_id, opts)
+        do_start_session(conversation_id, agent_id, scope, opts)
 
       pid ->
         Logger.debug("Agent session already running for conversation #{conversation_id}")
@@ -377,20 +491,18 @@ defmodule <%= module %> do
     "conversation:#{conversation_id}"
   end
 
-  defp do_start_session(conversation_id, agent_id, opts) do
-    Logger.info("Starting agent session for conversation #{conversation_id}")
+  defp do_start_session(conversation_id, agent_id, scope, opts) do
+    Logger.info("Starting agent session for conversation #{conversation_id} with scope #{inspect(scope)}")
 
     # 1. Extract options
-    timezone = Keyword.get(opts, :timezone, "UTC")
     factory_opts = Keyword.get(opts, :factory_opts, [])
 
     # 2. Create agent from factory (configuration from code)
-    # The Factory will automatically load the filesystem scope from the conversation
+    # Pass the explicit filesystem scope to the Factory
     merged_factory_opts =
       factory_opts
       |> Keyword.put(:agent_id, agent_id)
-      |> Keyword.put(:conversation_id, conversation_id)
-      |> Keyword.put(:timezone, timezone)
+      |> Keyword.put(:filesystem_scope, scope)
 
     {:ok, agent} = <%= factory_module %>.create_agent(merged_factory_opts)
 

@@ -225,7 +225,9 @@ defmodule Mix.Tasks.Sagents.Setup do
       factory_module: config.factory_module,
       conversations_module: config.context_module,
       pubsub_module: config.pubsub_module,
-      presence_module: config.presence_module
+      presence_module: config.presence_module,
+      owner_type: config.owner_type,
+      owner_field: config.owner_field
     ]
 
     # Load and evaluate template
@@ -269,7 +271,8 @@ defmodule Mix.Tasks.Sagents.Setup do
 
         3. Customize the Factory (#{factory_path}):
            * Modify base_system_prompt/0 for your agent's purpose
-           * Add/remove middleware in build_middleware/3
+           * Add/remove middleware in build_middleware/2
+           * Add custom tools under the :tools key in create_agent/1
            * Configure HITL in default_interrupt_on/0
            * Change model provider in get_model_config/0 if needed
 
@@ -279,14 +282,18 @@ defmodule Mix.Tasks.Sagents.Setup do
              alias #{config.coordinator_module}
 
              def mount(%{"id" => conversation_id}, _session, socket) do
+               # Get #{config.owner_type}_id from session/assigns
+               #{config.owner_type}_id = socket.assigns.current_#{config.owner_type}.id
+               scope = {:#{config.owner_type}, #{config.owner_type}_id}
+
                if connected?(socket) do
                  # Subscribe to agent events
                  Coordinator.ensure_subscribed_to_conversation(conversation_id)
 
-                 # Start agent session
+                 # Start agent session with explicit scope
                  {:ok, session} = Coordinator.start_conversation_session(
                    conversation_id,
-                   timezone: get_connect_params(socket)["timezone"] || "UTC"
+                   scope: scope
                  )
                end
 
