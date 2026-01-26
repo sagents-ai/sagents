@@ -3,8 +3,9 @@ defmodule <%= @repo %>.Migrations.Create<%= Macro.camelize(@table_prefix) %>Pers
 
   def change do
     # Conversations table
-    create table(:<%= @table_prefix %>conversations) do
-<%= if @owner_type != "none" do %>      add :<%= @owner_field %>, references(:<%= @owner_type %>s, on_delete: :delete_all), null: false
+    create table(:<%= @table_prefix %>conversations, primary_key: false) do
+      add :id, :binary_id, primary_key: true
+<%= if @owner_type != "none" do %>      add :<%= @owner_field %>, references(:<%= @owner_type %>s, on_delete: :delete_all, type: :binary_id), null: false
 <% end %>      add :title, :string
       add :version, :integer, default: 1, null: false
       add :metadata, :map, default: %{}
@@ -16,8 +17,9 @@ defmodule <%= @repo %>.Migrations.Create<%= Macro.camelize(@table_prefix) %>Pers
 <% end %>    create index(:<%= @table_prefix %>conversations, [:updated_at])
 
     # Agent states table (one per conversation)
-    create table(:<%= @table_prefix %>agent_states) do
-      add :conversation_id, references(:<%= @table_prefix %>conversations, on_delete: :delete_all), null: false
+    create table(:<%= @table_prefix %>agent_states, primary_key: false) do
+      add :id, :binary_id, primary_key: true
+      add :conversation_id, references(:<%= @table_prefix %>conversations, on_delete: :delete_all, type: :binary_id), null: false
       add :state_data, :map, null: false
       add :version, :integer, null: false
 
@@ -27,8 +29,9 @@ defmodule <%= @repo %>.Migrations.Create<%= Macro.camelize(@table_prefix) %>Pers
     create unique_index(:<%= @table_prefix %>agent_states, [:conversation_id])
 
     # Display messages table (multi-content type support)
-    create table(:<%= @table_prefix %>display_messages) do
-      add :conversation_id, references(:<%= @table_prefix %>conversations, on_delete: :delete_all), null: false
+    create table(:<%= @table_prefix %>display_messages, primary_key: false) do
+      add :id, :binary_id, primary_key: true
+      add :conversation_id, references(:<%= @table_prefix %>conversations, on_delete: :delete_all, type: :binary_id), null: false
       add :message_type, :string, null: false  # "user", "assistant", "tool", "system"
       add :content, :map, null: false  # JSONB storage for flexible content
       add :content_type, :string, null: false, default: "text"  # Content type for rendering

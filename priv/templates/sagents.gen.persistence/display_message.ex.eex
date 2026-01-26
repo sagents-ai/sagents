@@ -156,19 +156,19 @@ defmodule <%= @context_module %>.DisplayMessage do
   Returns the text representation of any content type for searching/indexing.
   NOTE: content keys are strings (from JSONB), not atoms
   """
-  def to_text(%__MODULE__{content_type: "text", content: %{"text" => text}}), do: text
-  def to_text(%__MODULE__{content_type: "thinking", content: %{"text" => text}}), do: text
-  def to_text(%__MODULE__{content_type: "image", content: content}) do
+  def to_text(%DisplayMessage{content_type: "text", content: %{"text" => text}}), do: text
+  def to_text(%DisplayMessage{content_type: "thinking", content: %{"text" => text}}), do: text
+  def to_text(%DisplayMessage{content_type: "image", content: content}) do
     Map.get(content, "caption") || Map.get(content, "alt_text") || ""
   end
-  def to_text(%__MODULE__{content_type: "file_reference", content: %{"name" => name}}), do: "File: #{name}"
-  def to_text(%__MODULE__{content_type: "structured_data", content: content}), do: "Data: #{Map.get(content, "format", "")}"
-  def to_text(%__MODULE__{content_type: "notification", content: %{"text" => text}}), do: text
-  def to_text(%__MODULE__{content_type: "error", content: %{"text" => text}}), do: text
-  def to_text(%__MODULE__{content_type: "tool_call", content: %{"name" => name, "arguments" => args}}) do
+  def to_text(%DisplayMessage{content_type: "file_reference", content: %{"name" => name}}), do: "File: #{name}"
+  def to_text(%DisplayMessage{content_type: "structured_data", content: content}), do: "Data: #{Map.get(content, "format", "")}"
+  def to_text(%DisplayMessage{content_type: "notification", content: %{"text" => text}}), do: text
+  def to_text(%DisplayMessage{content_type: "error", content: %{"text" => text}}), do: text
+  def to_text(%DisplayMessage{content_type: "tool_call", content: %{"name" => name, "arguments" => args}}) do
     "Tool call: #{name}(#{inspect(args)})"
   end
-  def to_text(%__MODULE__{content_type: "tool_result", content: %{"name" => name, "content" => content}}) do
+  def to_text(%DisplayMessage{content_type: "tool_result", content: %{"name" => name, "content" => content}}) do
     "Tool result from #{name}: #{content}"
   end
   def to_text(_), do: ""
