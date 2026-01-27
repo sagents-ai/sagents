@@ -140,11 +140,31 @@ defmodule Sagents.Middleware.TodoListTest do
       first_params = %{
         merge: false,
         todos: [
-          %{"id" => "1", "content" => "Create directory structure for the quantum physics curriculum", "status" => "in_progress"},
-          %{"id" => "2", "content" => "Create prerequisite mathematics document covering required topics", "status" => "pending"},
-          %{"id" => "3", "content" => "Create week-by-week study plan (16-week comprehensive curriculum)", "status" => "pending"},
-          %{"id" => "4", "content" => "Create 10 key concept explanation documents (separate files)", "status" => "pending"},
-          %{"id" => "5", "content" => "Create practice problem sets with varying difficulty levels", "status" => "pending"},
+          %{
+            "id" => "1",
+            "content" => "Create directory structure for the quantum physics curriculum",
+            "status" => "in_progress"
+          },
+          %{
+            "id" => "2",
+            "content" => "Create prerequisite mathematics document covering required topics",
+            "status" => "pending"
+          },
+          %{
+            "id" => "3",
+            "content" => "Create week-by-week study plan (16-week comprehensive curriculum)",
+            "status" => "pending"
+          },
+          %{
+            "id" => "4",
+            "content" => "Create 10 key concept explanation documents (separate files)",
+            "status" => "pending"
+          },
+          %{
+            "id" => "5",
+            "content" => "Create practice problem sets with varying difficulty levels",
+            "status" => "pending"
+          },
           %{"id" => "6", "content" => "Create progress tracking sheet", "status" => "pending"}
         ]
       }
@@ -156,18 +176,28 @@ defmodule Sagents.Middleware.TodoListTest do
       second_params = %{
         merge: true,
         todos: [
-          %{"id" => "1", "content" => "Create directory structure for the quantum physics curriculum", "status" => "completed"},
-          %{"id" => "2", "content" => "Create prerequisite mathematics document covering required topics", "status" => "in_progress"}
+          %{
+            "id" => "1",
+            "content" => "Create directory structure for the quantum physics curriculum",
+            "status" => "completed"
+          },
+          %{
+            "id" => "2",
+            "content" => "Create prerequisite mathematics document covering required topics",
+            "status" => "in_progress"
+          }
         ]
       }
 
-      {:ok, msg2, state_after_second_call} = tool.function.(second_params, %{state: state_after_first_call})
+      {:ok, msg2, state_after_second_call} =
+        tool.function.(second_params, %{state: state_after_first_call})
 
       # Step 3: Verify all 6 todos still exist
       assert msg2 =~ "merged"
+
       assert length(state_after_second_call.todos) == 6,
-        "Expected 6 todos after merge, but got #{length(state_after_second_call.todos)}. " <>
-        "IDs present: #{Enum.map(state_after_second_call.todos, & &1.id) |> Enum.join(", ")}"
+             "Expected 6 todos after merge, but got #{length(state_after_second_call.todos)}. " <>
+               "IDs present: #{Enum.map(state_after_second_call.todos, & &1.id) |> Enum.join(", ")}"
 
       # Verify todo 1 was updated to completed
       todo1 = Enum.find(state_after_second_call.todos, &(&1.id == "1"))
