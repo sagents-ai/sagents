@@ -34,6 +34,15 @@ defmodule Sagents.Middleware.TodoList do
   Use this tool for complex objectives to ensure that you are tracking each necessary step and giving the user visibility into your progress.
   This tool is very helpful for planning complex objectives, and for breaking down these larger complex objectives into smaller steps.
 
+  **CRITICAL COMPLETION REQUIREMENT**: Once you create todos, you MUST work through ALL items until they are marked as completed or cancelled.
+  Do not stop execution while todos remain in pending or in_progress status. Continue calling tools and working until the entire list is completed.
+
+  When you have incomplete todos:
+  - Always check your current todo list state before considering your work done
+  - Always work on the next pending/in_progress item
+  - Never stop with unfinished work - this is considered an incomplete response
+  - If you cannot complete a todo, mark it as cancelled and explain why in the todo content
+
   It is critical that you mark todos as completed as soon as you are done with a step. Do not batch up multiple steps before marking them as completed.
   For simple objectives that only require a few steps, it is better to just complete the objective directly and NOT use this tool.
   Writing todos takes time and tokens, use it when it is helpful for managing complex many-step problems! But not for simple few-step requests.
@@ -41,6 +50,7 @@ defmodule Sagents.Middleware.TodoList do
   ## Important To-Do List Usage Notes to Remember
   - The `write_todos` tool should never be called multiple times in parallel.
   - Don't be afraid to revise the To-Do list as you go. New information may reveal new tasks that need to be done, or old tasks that are irrelevant.
+  - Before finishing your work, verify that all todos are either completed or cancelled. Stopping with pending/in_progress todos is an error.
   """
 
   @tool_description """
@@ -82,7 +92,7 @@ defmodule Sagents.Middleware.TodoList do
      - Mark tasks complete IMMEDIATELY after finishing (don't batch completions)
      - Complete current tasks before starting new ones
      - Remove tasks that are no longer relevant from the list entirely
-     - IMPORTANT: When you write this todo list, you should mark your first task (or tasks) as in_progress immediately!.
+     - IMPORTANT: When you write this todo list, you should mark your first task (or tasks) as in_progress immediately!
      - IMPORTANT: Unless all tasks are completed, you should always have at least one task in_progress to show the user that you are working on something.
 
   3. **Task Completion Requirements**:

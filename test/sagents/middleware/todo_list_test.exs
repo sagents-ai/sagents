@@ -126,6 +126,67 @@ defmodule Sagents.Middleware.TodoListTest do
       assert todo3.content == "New task"
     end
 
+    test "preserves all existing todos when merging with only a subset" do
+      # This test reproduces the exact scenario from the bug report:
+      # 1. Create 6 todos with merge=false
+      # 2. Update only 2 of them with merge=true
+      # 3. All 6 todos should still exist (with 2 updated)
+
+      [tool] = TodoList.tools(nil)
+
+      # Step 1: Create initial 6 todos (simulating first write_todos call)
+      initial_state = State.new!()
+
+      first_params = %{
+        merge: false,
+        todos: [
+          %{"id" => "1", "content" => "Create directory structure for the quantum physics curriculum", "status" => "in_progress"},
+          %{"id" => "2", "content" => "Create prerequisite mathematics document covering required topics", "status" => "pending"},
+          %{"id" => "3", "content" => "Create week-by-week study plan (16-week comprehensive curriculum)", "status" => "pending"},
+          %{"id" => "4", "content" => "Create 10 key concept explanation documents (separate files)", "status" => "pending"},
+          %{"id" => "5", "content" => "Create practice problem sets with varying difficulty levels", "status" => "pending"},
+          %{"id" => "6", "content" => "Create progress tracking sheet", "status" => "pending"}
+        ]
+      }
+
+      {:ok, _msg1, state_after_first_call} = tool.function.(first_params, %{state: initial_state})
+      assert length(state_after_first_call.todos) == 6
+
+      # Step 2: Update only todos 1 and 2 with merge=true (simulating second write_todos call)
+      second_params = %{
+        merge: true,
+        todos: [
+          %{"id" => "1", "content" => "Create directory structure for the quantum physics curriculum", "status" => "completed"},
+          %{"id" => "2", "content" => "Create prerequisite mathematics document covering required topics", "status" => "in_progress"}
+        ]
+      }
+
+      {:ok, msg2, state_after_second_call} = tool.function.(second_params, %{state: state_after_first_call})
+
+      # Step 3: Verify all 6 todos still exist
+      assert msg2 =~ "merged"
+      assert length(state_after_second_call.todos) == 6,
+        "Expected 6 todos after merge, but got #{length(state_after_second_call.todos)}. " <>
+        "IDs present: #{Enum.map(state_after_second_call.todos, & &1.id) |> Enum.join(", ")}"
+
+      # Verify todo 1 was updated to completed
+      todo1 = Enum.find(state_after_second_call.todos, &(&1.id == "1"))
+      assert todo1 != nil, "Todo with ID '1' should exist"
+      assert todo1.status == :completed
+
+      # Verify todo 2 was updated to in_progress
+      todo2 = Enum.find(state_after_second_call.todos, &(&1.id == "2"))
+      assert todo2 != nil, "Todo with ID '2' should exist"
+      assert todo2.status == :in_progress
+
+      # Verify todos 3-6 still exist and remain pending
+      for id <- ["3", "4", "5", "6"] do
+        todo = Enum.find(state_after_second_call.todos, &(&1.id == id))
+        assert todo != nil, "Todo with ID '#{id}' should still exist"
+        assert todo.status == :pending
+      end
+    end
+
     test "preserves existing todos when merging with non-overlapping IDs" do
       existing = Todo.new!(%{id: "keep", content: "Keep", status: :completed})
       state = State.new!(%{todos: [existing]})

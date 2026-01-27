@@ -347,5 +347,94 @@ defmodule Sagents.IntegrationTest do
       {:ok, file_content} = FileSystemServer.read_file({:agent, agent.agent_id}, "/existing.txt")
       assert file_content == "content"
     end
+
+    test "todos are preserved when merging with a subset", %{model: model} do
+      # This test reproduces the bug where:
+      # 1. Agent creates 6 todos with merge=false
+      # 2. Agent updates 2 todos with merge=true
+      # 3. Expected: All 6 todos should exist with 2 updated
+      # 4. Actual bug: Only 2 todos exist (the others were lost)
+
+      stub(ChatOpenAI, :call, fn _model, messages, _tools ->
+        case length(messages) do
+          # First LLM call - create 6 todos with merge=false
+          2 ->
+            {:ok,
+             [
+               Message.new_assistant!(%{
+                 tool_calls: [
+                   ToolCall.new!(%{
+                     call_id: "call_1",
+                     name: "write_todos",
+                     arguments: %{
+                       "merge" => false,
+                       "todos" => [
+                         %{"id" => "1", "content" => "Task 1", "status" => "in_progress"},
+                         %{"id" => "2", "content" => "Task 2", "status" => "pending"},
+                         %{"id" => "3", "content" => "Task 3", "status" => "pending"},
+                         %{"id" => "4", "content" => "Task 4", "status" => "pending"},
+                         %{"id" => "5", "content" => "Task 5", "status" => "pending"},
+                         %{"id" => "6", "content" => "Task 6", "status" => "pending"}
+                       ]
+                     }
+                   })
+                 ]
+               })
+             ]}
+
+          # Second LLM call (after first tool execution) - update 2 todos with merge=true
+          4 ->
+            {:ok,
+             [
+               Message.new_assistant!(%{
+                 tool_calls: [
+                   ToolCall.new!(%{
+                     call_id: "call_2",
+                     name: "write_todos",
+                     arguments: %{
+                       "merge" => true,
+                       "todos" => [
+                         %{"id" => "1", "content" => "Task 1", "status" => "completed"},
+                         %{"id" => "2", "content" => "Task 2", "status" => "in_progress"}
+                       ]
+                     }
+                   })
+                 ]
+               })
+             ]}
+
+          # Third LLM call (after second tool execution) - return final response
+          _ ->
+            {:ok, [Message.new_assistant!("Done!")]}
+        end
+      end)
+
+      {:ok, agent} = Agent.new(%{model: model})
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Create todos")]})
+
+      # Execute the agent
+      {:ok, final_state} = Agent.execute(agent, initial_state)
+
+      # This is the bug: final_state.todos should have 6 items, but will only have 2
+      # because the custom_context.state is not updated between tool calls
+      assert length(final_state.todos) == 6,
+             "Expected 6 todos (bug: got #{length(final_state.todos)}). " <>
+               "IDs: #{Enum.map(final_state.todos, & &1.id) |> Enum.join(", ")}"
+
+      # Verify todos 1 and 2 were updated
+      todo1 = Enum.find(final_state.todos, &(&1.id == "1"))
+      assert todo1.status == :completed
+
+      todo2 = Enum.find(final_state.todos, &(&1.id == "2"))
+      assert todo2.status == :in_progress
+
+      # Verify todos 3-6 still exist
+      for id <- ["3", "4", "5", "6"] do
+        todo = Enum.find(final_state.todos, &(&1.id == id))
+        assert todo != nil, "Todo #{id} should still exist"
+        assert todo.status == :pending
+      end
+    end
   end
 end

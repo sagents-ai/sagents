@@ -749,19 +749,37 @@ defmodule Sagents.Agent do
     if has_middleware?(middleware, HumanInTheLoop) do
       execute_chain_with_hitl(chain, middleware, agent)
     else
-      # Normal execution without interrupts
-      run_opts = build_run_options(agent, mode: :while_needs_response)
+      # Use custom execution loop to ensure state is updated between tool calls
+      execute_chain_with_state_updates(chain, agent)
+    end
+  end
 
-      case LLMChain.run(chain, run_opts) do
-        {:ok, updated_chain} ->
-          {:ok, updated_chain}
+  # Custom execution loop for non-HITL agents that updates state between tool calls
+  # This ensures that tools called later in the execution have access to state updates
+  # from earlier tool calls (e.g., TodoList merge operations)
+  defp execute_chain_with_state_updates(chain, agent) do
+    run_opts = build_run_options(agent)
 
-        {:error, _chain, %LangChainError{} = reason} ->
-          {:error, reason.message}
+    case LLMChain.run(chain, run_opts) do
+      {:ok, chain_after_llm} ->
+        # Execute tools and update the chain's custom_context.state with any deltas
+        chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
+        chain_with_updated_state = update_chain_state_from_tools(chain_after_tools)
 
-        {:error, _chain, reason} ->
-          {:error, "Agent execution failed: #{inspect(reason)}"}
-      end
+        # Check if we need to continue (needs_response)
+        if chain_with_updated_state.needs_response do
+          # Continue the loop with updated state
+          execute_chain_with_state_updates(chain_with_updated_state, agent)
+        else
+          # Done
+          {:ok, chain_with_updated_state}
+        end
+
+      {:error, _chain, %LangChainError{} = reason} ->
+        {:error, reason.message}
+
+      {:error, _chain, reason} ->
+        {:error, "Agent execution failed: #{inspect(reason)}"}
     end
   end
 
@@ -770,7 +788,7 @@ defmodule Sagents.Agent do
     # 1. Call LLM to get a response
     # 2. Check if response contains tool calls that need approval
     # 3. If yes, return interrupt WITHOUT executing tools
-    # 4. If no, execute tools and continue loop
+    # 4. If no, execute tools, update state, and continue loop
 
     run_opts = build_run_options(agent)
 
@@ -783,16 +801,17 @@ defmodule Sagents.Agent do
             {:interrupt, chain_after_llm, interrupt_data}
 
           :continue ->
-            # No interrupt needed - execute tools and continue
+            # No interrupt needed - execute tools and update state
             chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
+            chain_with_updated_state = update_chain_state_from_tools(chain_after_tools)
 
             # Check if we need to continue (needs_response)
-            if chain_after_tools.needs_response do
-              # Continue the loop
-              execute_chain_with_hitl(chain_after_tools, middleware, agent)
+            if chain_with_updated_state.needs_response do
+              # Continue the loop with updated state
+              execute_chain_with_hitl(chain_with_updated_state, middleware, agent)
             else
               # Done
-              {:ok, chain_after_tools}
+              {:ok, chain_with_updated_state}
             end
         end
 
@@ -837,6 +856,63 @@ defmodule Sagents.Agent do
     {:ok, final_state}
   rescue
     error -> {:error, "Failed to extract state: #{inspect(error)}"}
+  end
+
+  # Update the chain's custom_context.state with state deltas from recently executed tools.
+  # This is critical for tools like TodoList that use merge operations - they need to see
+  # the updated state from previous tool calls in the same execution loop.
+  defp update_chain_state_from_tools(chain) do
+    # Get the current state from custom_context
+    current_state =
+      case chain.custom_context do
+        %{state: %State{} = state} -> state
+        _ -> State.new!()
+      end
+
+    # Extract state deltas from recent tool results
+    state_deltas = extract_state_deltas_from_chain(chain)
+
+    # If no deltas, return chain unchanged
+    if Enum.empty?(state_deltas) do
+      chain
+    else
+      # Merge deltas into current state
+      updated_state =
+        Enum.reduce(state_deltas, current_state, fn delta, acc ->
+          State.merge_states(acc, delta)
+        end)
+
+      # Update chain's custom_context with the new state
+      LLMChain.update_custom_context(chain, %{state: updated_state})
+    end
+  end
+
+  # Extract state deltas (State structs) from the most recent tool results in the chain.
+  # Only looks at tool messages since the last assistant message to avoid re-processing
+  # old tool results.
+  defp extract_state_deltas_from_chain(chain) do
+    # Get messages in reverse order and take only the most recent tool results
+    # (since the last assistant message that made tool calls)
+    chain.messages
+    |> Enum.reverse()
+    |> Enum.take_while(fn msg ->
+      # Stop when we hit the assistant message that made the tool calls
+      not (msg.role == :assistant and Message.is_tool_call?(msg))
+    end)
+    |> Enum.filter(&(&1.role == :tool))
+    |> Enum.flat_map(fn message ->
+      case message.tool_results do
+        nil ->
+          []
+
+        tool_results when is_list(tool_results) ->
+          tool_results
+          |> Enum.filter(fn result ->
+            is_struct(result.processed_content, State)
+          end)
+          |> Enum.map(& &1.processed_content)
+      end
+    end)
   end
 
   # HITL (Human-in-the-Loop) helper functions
