@@ -78,7 +78,13 @@ defmodule Sagents.MixProject do
   defp extras do
     [
       "README.md",
-      "docs/middleware_messaging.md"
+      "docs/architecture.md",
+      "docs/conversations_architecture.md",
+      "docs/lifecycle.md",
+      "docs/pubsub_presence.md",
+      "docs/middleware.md",
+      "docs/middleware_messaging.md",
+      "docs/persistence.md"
     ]
   end
 

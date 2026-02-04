@@ -601,8 +601,26 @@ end
 
 [View sagents_live_debugger →](https://github.com/sagents-ai/sagents_live_debugger)
 
+## Conversation Architecture
+
+Sagents uses a **dual-view pattern** for conversations:
+
+- **Agent State** - What the LLM thinks with: complete message history, todos, and middleware state stored as a single serialized blob
+- **Display Messages** - What users see: individual UI-friendly records optimized for rendering, streaming, and rich content types
+
+This separation enables:
+- **State optimization**: Agent conversation history can be summarized/compacted to reduce token usage without affecting what users see
+- **Efficient UI queries**: Load display messages without deserializing agent state
+- **Progressive streaming**: Real-time updates as messages arrive via PubSub
+- **Flexible rendering**: Show thinking blocks, tool status, images - content the LLM doesn't need
+
+Both views link through the `conversations` table, which you connect to your application's owner model (users, teams, etc.).
+
+See [Conversations Architecture](docs/conversations_architecture.md) for the complete explanation with diagrams.
+
 ## Documentation
 
+- [Conversations Architecture](docs/conversations_architecture.md) - How the dual-view pattern works with agent state and display messages
 - [Lifecycle Management](docs/lifecycle.md) - Process supervision, timeouts, and shutdown
 - [PubSub & Presence](docs/pubsub_presence.md) - Real-time events and viewer tracking
 - [Middleware Development](docs/middleware.md) - Building custom middleware
