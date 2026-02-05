@@ -1291,6 +1291,10 @@ defmodule Sagents.AgentServer do
       Middleware.apply_on_server_start(server_state.state, entry)
     end)
 
+    # Broadcast initial :idle status so UI knows agent is ready
+    broadcast_event(server_state, {:status_changed, :idle, nil})
+    update_presence_status(server_state, :idle)
+
     # Track presence for agent discovery (unconditional when configured)
     server_state = track_presence(server_state)
 
