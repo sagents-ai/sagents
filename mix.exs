@@ -53,7 +53,10 @@ defmodule Sagents.MixProject do
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
 
       # Test dependencies
-      {:mimic, "~> 1.8", only: :test}
+      {:mimic, "~> 1.8", only: :test},
+
+      # AGENTS.md file maintenance
+      {:usage_rules, "~> 0.1", only: :dev, runtime: false}
     ]
   end
 

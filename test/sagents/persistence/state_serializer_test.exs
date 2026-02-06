@@ -269,6 +269,75 @@ defmodule Sagents.Persistence.StateSerializerTest do
     end
   end
 
+  describe "ToolCall metadata preservation" do
+    test "ToolCall metadata (including display_text) is preserved through serialization" do
+      {:ok, model} = ChatOpenAI.new(%{model: "gpt-4", api_key: "test-key"})
+      {:ok, agent} = Agent.new(%{agent_id: "agent-123", model: model})
+
+      # Create a ToolCall with metadata including display_text
+      # This simulates what LLMChain does when augmenting tool calls
+      {:ok, tool_call} =
+        ToolCall.new(%{
+          call_id: "call-1",
+          type: :function,
+          name: "search_database",
+          arguments: %{"query" => "test"},
+          metadata: %{"display_text" => "Searching the database", "custom_key" => "custom_value"},
+          status: :complete
+        })
+
+      {:ok, msg} = Message.new(%{role: :assistant, content: nil, tool_calls: [tool_call]})
+      state = State.new!(%{messages: [msg]})
+
+      # Serialize
+      serialized = StateSerializer.serialize_server_state(agent, state)
+
+      # Verify metadata is in serialized form
+      assert [message] = serialized["state"]["messages"]
+      assert [serialized_call] = message["tool_calls"]
+      assert serialized_call["metadata"]["display_text"] == "Searching the database"
+      assert serialized_call["metadata"]["custom_key"] == "custom_value"
+
+      # Deserialize
+      {:ok, restored_state} = StateSerializer.deserialize_server_state("agent-123", serialized)
+
+      # Verify metadata is preserved in restored ToolCall
+      assert [restored_msg] = restored_state.messages
+      assert [restored_call] = restored_msg.tool_calls
+      assert restored_call.metadata["display_text"] == "Searching the database"
+      assert restored_call.metadata["custom_key"] == "custom_value"
+    end
+
+    test "ToolCall without metadata still works correctly" do
+      {:ok, model} = ChatOpenAI.new(%{model: "gpt-4", api_key: "test-key"})
+      {:ok, agent} = Agent.new(%{agent_id: "agent-123", model: model})
+
+      # Create a ToolCall without metadata (legacy format)
+      {:ok, tool_call} =
+        ToolCall.new(%{
+          call_id: "call-1",
+          type: :function,
+          name: "calculator",
+          arguments: %{"expression" => "2 + 2"},
+          status: :complete
+        })
+
+      {:ok, msg} = Message.new(%{role: :assistant, content: nil, tool_calls: [tool_call]})
+      state = State.new!(%{messages: [msg]})
+
+      # Serialize and deserialize
+      serialized = StateSerializer.serialize_server_state(agent, state)
+      {:ok, restored_state} = StateSerializer.deserialize_server_state("agent-123", serialized)
+
+      # Should work fine without metadata
+      assert [restored_msg] = restored_state.messages
+      assert [restored_call] = restored_msg.tool_calls
+      assert restored_call.name == "calculator"
+      # metadata can be nil or empty map
+      assert restored_call.metadata == nil or restored_call.metadata == %{}
+    end
+  end
+
   describe "round-trip serialization" do
     test "serialize and deserialize preserves data" do
       {:ok, model} = ChatOpenAI.new(%{model: "gpt-4", api_key: "test-key"})
