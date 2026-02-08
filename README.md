@@ -387,7 +387,7 @@ mix sagents.gen.live_helpers MyAppWeb.AgentLiveHelpers \
 This generates a module with handler functions that follow the LiveView socket-in/socket-out pattern:
 
 - **Status handlers** - `handle_status_running/1`, `handle_status_idle/1`, `handle_status_cancelled/1`, `handle_status_error/2`, `handle_status_interrupted/2`
-- **Message handlers** - `handle_llm_deltas/2`, `handle_llm_message_complete/1`, `handle_display_messages_batch_saved/2`, `handle_display_message_saved/2`
+- **Message handlers** - `handle_llm_deltas/2`, `handle_llm_message_complete/1`, `handle_display_message_saved/2`
 - **Tool execution handlers** - `handle_tool_call_identified/2`, `handle_tool_execution_started/2`, `handle_tool_execution_completed/3`, `handle_tool_execution_failed/3`
 - **Lifecycle handlers** - `handle_conversation_title_generated/3`, `handle_agent_shutdown/2`
 - **Core helpers** - `persist_agent_state/2`, `reload_messages_from_db/1`, `update_streaming_message/2`
@@ -554,7 +554,6 @@ AgentServer broadcasts events on topic `"agent_server:#{agent_id}"`:
 - `{:agent, {:llm_message, %Message{}}}` - Complete message
 - `{:agent, {:llm_token_usage, %TokenUsage{}}}` - Token usage info
 - `{:agent, {:display_message_saved, display_message}}` - Message persisted (requires `save_new_message_fn` callback)
-- `{:agent, {:display_messages_batch_saved, [display_message]}}` - Batch message persistence
 
 ### Tool Events
 - `{:agent, {:tool_call_identified, tool_info}}` - Tool call detected during streaming

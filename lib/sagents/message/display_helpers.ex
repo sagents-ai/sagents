@@ -131,16 +131,15 @@ defmodule Sagents.Message.DisplayHelpers do
   # Extract tool_calls into display items
   defp extract_tool_call_items(%Message{tool_calls: tool_calls, role: role})
        when is_list(tool_calls) and tool_calls != [] do
-    message_type = role_to_message_type(role)
-
     Enum.map(tool_calls, fn tool_call ->
       %{
         type: :tool_call,
-        message_type: message_type,
+        message_type: role_to_message_type(role),
         content: %{
           "call_id" => tool_call.call_id,
           "name" => tool_call.name,
-          "arguments" => tool_call.arguments
+          "arguments" => tool_call.arguments,
+          "display_text" => tool_call.display_text
         }
       }
     end)

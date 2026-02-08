@@ -154,18 +154,6 @@ custom classes must fully style the input
 - Ensure **clean typography, spacing, and layout balance** for a refined, premium look
 - Focus on **delightful details** like hover effects, loading states, and smooth page transitions
 
-<!-- usage-rules-start -->
-<!-- usage-rules-header -->
-# Usage Rules
-
-**IMPORTANT**: Consult these usage rules early and often when working with the packages listed below.
-Before attempting to use any of these packages or to discover if you should use them, review their
-usage rules to understand the correct patterns, conventions, and best practices.
-<!-- usage-rules-header-end -->
-
-
-<!-- phoenix:elixir-start -->
-## phoenix:elixir usage
 ## Elixir guidelines
 
 - Elixir lists **do not support index based access via the access syntax**
@@ -221,8 +209,16 @@ usage rules to understand the correct patterns, conventions, and best practices.
 
    - Instead of sleeping to synchronize before the next call, **always** use `_ = :sys.get_state/1` to ensure the process has handled prior messages
 
+<!-- usage-rules-start -->
+<!-- usage-rules-header -->
+# Usage Rules
 
-<!-- phoenix:elixir-end -->
+**IMPORTANT**: Consult these usage rules early and often when working with the packages listed below.
+Before attempting to use any of these packages or to discover if you should use them, review their
+usage rules to understand the correct patterns, conventions, and best practices.
+<!-- usage-rules-header-end -->
+
+
 
 <!-- usage_rules-start -->
 ## usage_rules usage

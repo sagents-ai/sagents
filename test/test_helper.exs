@@ -1,3 +1,7 @@
+# Load ENV keys for running live tests (optional for local testing)
+Application.put_env(:langchain, :anthropic_key, System.get_env("ANTHROPIC_API_KEY", ""))
+Application.put_env(:langchain, :openai_key, System.get_env("OPENAI_API_KEY", ""))
+
 # Configure Mimic for mocking in tests
 Mimic.copy(Req)
 Mimic.copy(LangChain.ChatModels.ChatAnthropic)

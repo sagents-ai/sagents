@@ -46,6 +46,7 @@ defmodule <%= @context_module %> do
   """
 
   import Ecto.Query, warn: false
+  alias Sagents.Todo
   alias <%= @repo %>
   alias <%= @context_module %>.AgentState
   alias <%= @context_module %>.Conversation
@@ -172,8 +173,6 @@ defmodule <%= @context_module %> do
   `Sagents.Todo.from_map/1`.
   """
   def load_todos(conversation_id) do
-    alias Sagents.Todo
-
     case load_agent_state(conversation_id) do
       {:ok, %{"state" => %{"todos" => todos}}} when is_list(todos) ->
         # Reuse Todo.from_map/1 - same logic as StateSerializer.deserialize_state/2

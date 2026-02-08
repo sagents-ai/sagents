@@ -146,5 +146,33 @@ defmodule Sagents.Message.DisplayHelpersTest do
 
       assert [] = items
     end
+
+    test "preserves display_text from ToolCall field when present" do
+      # ToolCall has a direct display_text field (like ToolResult)
+      tool_call =
+        ToolCall.new!(%{
+          call_id: "call_123",
+          name: "ls",
+          arguments: %{"pattern" => "*.ex"},
+          display_text: "Listing files"
+        })
+
+      message = Message.new_assistant!(%{tool_calls: [tool_call]})
+      items = DisplayHelpers.extract_display_items(message)
+
+      # Expected: display_text should be extracted from ToolCall.display_text field
+      assert [
+               %{
+                 type: :tool_call,
+                 message_type: :assistant,
+                 content: %{
+                   "call_id" => "call_123",
+                   "name" => "ls",
+                   "arguments" => %{"pattern" => "*.ex"},
+                   "display_text" => "Listing files"
+                 }
+               }
+             ] = items
+    end
   end
 end

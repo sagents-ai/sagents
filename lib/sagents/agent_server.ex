@@ -215,6 +215,7 @@ defmodule Sagents.AgentServer do
   alias Sagents.Middleware
   alias Sagents.MiddlewareEntry
   alias Sagents.Persistence.StateSerializer
+  alias LangChain.Message.ContentPart
 
   @registry Sagents.Registry
 
@@ -1838,10 +1839,9 @@ defmodule Sagents.AgentServer do
       end,
 
       # Callback for streaming deltas (tokens as they arrive)
+      # display_text is set on tool calls at the library level by
+      # Utils.rewrap_callbacks_for_model before this callback is invoked.
       on_llm_new_delta: fn _chain, deltas ->
-        # deltas is a list of MessageDelta structs
-        # Some LLM services return blocks of deltas at once, so we broadcast
-        # the entire list in a single PubSub message for efficiency
         broadcast_event(server_state, {:llm_deltas, deltas})
       end,
 
@@ -1857,12 +1857,12 @@ defmodule Sagents.AgentServer do
       end,
 
       # Tool identification callback - fires early when tool name detected during streaming
-      on_tool_call_identified: fn _chain, tool_call, function ->
+      on_tool_call_identified: fn _chain, tool_call, _function ->
         tool_info = %{
           # May be nil during early streaming
           call_id: tool_call.call_id,
           name: tool_call.name,
-          display_text: function.display_text || friendly_name_fallback(tool_call.name),
+          display_text: tool_call.display_text,
           arguments: tool_call.arguments || %{},
           status: :identified
         }
@@ -1873,12 +1873,12 @@ defmodule Sagents.AgentServer do
       # Tool execution lifecycle callbacks
       # Note: This fires when tool execution actually begins (not during detection)
       # The :on_tool_call_identified callback already fired earlier during streaming
-      on_tool_execution_started: fn _chain, tool_call, function ->
+      on_tool_execution_started: fn _chain, tool_call, _function ->
         tool_info = %{
           # Will always have call_id when executing
           call_id: tool_call.call_id,
           name: tool_call.name,
-          display_text: function.display_text || friendly_name_fallback(tool_call.name),
+          display_text: tool_call.display_text,
           arguments: tool_call.arguments
         }
 
@@ -1892,19 +1892,13 @@ defmodule Sagents.AgentServer do
           case error do
             %{message: msg} -> msg
             msg when is_binary(msg) -> msg
+            parts when is_list(parts) -> ContentPart.parts_to_string(parts) || inspect(parts)
             _ -> inspect(error)
           end
 
         broadcast_event(server_state, {:tool_execution_failed, tool_call.call_id, error_msg})
       end
     }
-  end
-
-  # Generate friendly fallback name from technical name
-  defp friendly_name_fallback(tool_name) do
-    tool_name
-    |> String.replace("_", " ")
-    |> String.capitalize()
   end
 
   defp execute_agent(%ServerState{} = server_state, callbacks) do
@@ -2069,23 +2063,13 @@ defmodule Sagents.AgentServer do
       try do
         case server_state.save_new_message_fn.(server_state.conversation_id, message) do
           {:ok, display_messages} when is_list(display_messages) ->
-            Logger.debug(
-              "Successfully saved #{length(display_messages)} display messages, broadcasting..."
-            )
+            # Broadcast individual events
+            Enum.each(display_messages, fn display_msg ->
+              broadcast_event(server_state, {:display_message_saved, display_msg})
+            end)
 
-            # When multiple messages saved (e.g., text + tool_calls), broadcast as batch
-            # to enable efficient single UI reload. Otherwise broadcast individual events.
-            if length(display_messages) > 1 do
-              broadcast_event(server_state, {:display_messages_batch_saved, display_messages})
-            else
-              # Single message - broadcast individual event
-              Enum.each(display_messages, fn display_msg ->
-                broadcast_event(server_state, {:display_message_saved, display_msg})
-              end)
-            end
-
-            # Also broadcast the original message event
-            # This maintains backward compatibility and allows UI to handle message completion
+            # Also broadcast the original message event which allows UI to
+            # handle message completion
             broadcast_event(server_state, {:llm_message, message})
             :ok
 
