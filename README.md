@@ -17,6 +17,10 @@ A sage is a person who has attained wisdom and is often characterized by sound j
 
 **See it in action!** Try the [agents_demo](https://github.com/sagents-ai/agents_demo) application to experience Sagents interactively, or add the [sagents_live_debugger](https://github.com/sagents-ai/sagents_live_debugger) to your app for real-time insights into agent configuration, state, and event flows.
 
+![AgentsDemo Chat Interface](AgentsDemo-Files.png)
+
+*The AgentsDemo chat interface showing the use of a virtual filesystem, tool call execution, composable middleware, supervised Agentic GenServer assistant, and much more!*
+
 ## Who Is This For?
 
 Sagents is designed for Elixir developers building **interactive AI applications** where:
