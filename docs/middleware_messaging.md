@@ -479,7 +479,7 @@ defmodule Sagents.Middleware.ConversationTitle do
   end
 
   @impl true
-  def after_model(state, config) do
+  def before_model(state, config) do
     # Only generate title if we don't have one yet
     if State.get_metadata(state, "conversation_title") == nil do
       spawn_title_generation_task(state, config)

@@ -2,8 +2,10 @@ defmodule Sagents.Middleware.ConversationTitle do
   @moduledoc """
   Middleware that automatically generates conversation titles based on the initial user message.
 
-  Spawns an async task after the first user message to generate a concise title
-  using an LLM. The title is stored in state metadata and broadcast to subscribers.
+  Spawns an async task before the first LLM call to generate a concise title
+  using an LLM. By running in `before_model`, title generation happens in parallel
+  with the main execution, so titles appear quickly even when long-running tools
+  are involved. The title is stored in state metadata and broadcast to subscribers.
 
   ## Usage
 
@@ -114,17 +116,19 @@ defmodule Sagents.Middleware.ConversationTitle do
   end
 
   @doc """
-  Called after the LLM model completes its response.
+  Called before the LLM model call.
 
   Checks if a conversation title has already been generated. If not, spawns
-  an async task to generate one based on the user's message content.
+  an async task to generate one based on the user's message content. Running
+  in `before_model` allows title generation to happen in parallel with the
+  main LLM call and any subsequent tool execution.
 
   The async task will send a message back to the AgentServer when complete,
   which will be handled by `handle_message/3`.
 
   ## Parameters
 
-  - `state` - The current agent state after model completion
+  - `state` - The current agent state before model call
   - `config` - The middleware configuration from `init/1`
 
   ## Returns
@@ -132,8 +136,10 @@ defmodule Sagents.Middleware.ConversationTitle do
   - `{:ok, state}` - Always returns the unchanged state (title generation happens asynchronously)
   """
   @impl true
-  def after_model(state, config) do
-    # Simple logic: if we don't have a title yet, generate one
+  def before_model(state, config) do
+    # Generate title from the user's message before the LLM call starts.
+    # This runs the title generation in parallel with the main execution,
+    # so titles appear quickly even when long-running tools are involved.
     if State.get_metadata(state, "conversation_title") == nil do
       spawn_title_generation_task(state, config)
     end

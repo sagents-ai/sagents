@@ -343,12 +343,12 @@ This is powerful because the state update in `handle_message` is durable—it ge
 
 A concrete use case is the `ConversationTitle` middleware. When a user sends their first message, we want to generate a descriptive title for the conversation. However, calling an LLM to generate the title would block the agent's response. Instead:
 
-1. `after_model` spawns an async task to generate the title
-2. The agent immediately responds to the user (no delay)
+1. `before_model` spawns an async task to generate the title (runs in parallel with the main LLM call and any tool execution)
+2. The agent immediately proceeds to the LLM call (no delay)
 3. When the title is ready, `handle_message` stores it in metadata
 4. A PubSub event notifies the UI to update the conversation title
 
-The user sees a fast response, and the title appears moments later.
+The user sees the title appear quickly, even if the agent triggers long-running tools.
 
 ### handle_message Callback
 
