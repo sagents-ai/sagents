@@ -292,25 +292,61 @@ defmodule Sagents.Persistence.StateSerializer do
         arg -> inspect(arg)
       end
 
-    %{
+    base = %{
       "call_id" => tool_call.call_id,
       "type" => to_string(tool_call.type),
       "name" => tool_call.name,
       "arguments" => arguments,
       "status" => to_string(tool_call.status)
     }
+
+    # Add display_text if present (direct field on ToolCall)
+    base =
+      if tool_call.display_text do
+        Map.put(base, "display_text", tool_call.display_text)
+      else
+        base
+      end
+
+    # Add metadata if present (for model-specific attributes)
+    base =
+      if tool_call.metadata && map_size(tool_call.metadata) > 0 do
+        Map.put(base, "metadata", serialize_map_to_string_keys(tool_call.metadata))
+      else
+        base
+      end
+
+    base
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
   end
 
   defp deserialize_tool_call(data) when is_map(data) do
-    case ToolCall.new(%{
-           call_id: data["call_id"],
-           type: String.to_existing_atom(data["type"] || "function"),
-           name: data["name"],
-           arguments: data["arguments"] || %{},
-           status: String.to_existing_atom(data["status"] || "incomplete")
-         }) do
+    attrs = %{
+      call_id: data["call_id"],
+      type: String.to_existing_atom(data["type"] || "function"),
+      name: data["name"],
+      arguments: data["arguments"] || %{},
+      status: String.to_existing_atom(data["status"] || "incomplete")
+    }
+
+    # Add display_text if present (direct field on ToolCall)
+    attrs =
+      if data["display_text"] do
+        Map.put(attrs, :display_text, data["display_text"])
+      else
+        attrs
+      end
+
+    # Add metadata if present (for model-specific attributes)
+    attrs =
+      if data["metadata"] do
+        Map.put(attrs, :metadata, data["metadata"])
+      else
+        attrs
+      end
+
+    case ToolCall.new(attrs) do
       {:ok, tool_call} -> tool_call
       {:error, _} -> raise "Failed to deserialize tool call: #{inspect(data)}"
     end

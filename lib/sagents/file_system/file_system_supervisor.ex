@@ -160,7 +160,6 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
             # unique.
             child_spec = %{
               id: FileSystemServer,
-
               start: {FileSystemServer, :start_link, [start_opts]},
               restart: :transient
             }

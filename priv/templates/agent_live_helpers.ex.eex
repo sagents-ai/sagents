@@ -77,6 +77,7 @@ defmodule <%= module %> do
   alias <%= coordinator_module %>
   alias Sagents.AgentServer
   alias LangChain.MessageDelta
+  alias LangChain.Message.ToolCall
 
   require Logger
 
@@ -420,43 +421,12 @@ defmodule <%= module %> do
   to stay visible until tools finish executing.
   """
   def handle_llm_message_complete(socket) do
-    # Only clear streaming delta if no tool calls
-    # If there are tool calls, keep delta visible until tools execute
-    current_delta = socket.assigns.streaming_delta
-    tool_calls = get_tool_display_info(current_delta)
-    has_tools = tool_calls != []
-
-    if has_tools do
-      assign(socket, :loading, false)
-    else
-      socket
-      |> assign(:streaming_delta, nil)
-      |> assign(:loading, false)
-    end
-  end
-
-  @doc """
-  Handles batch of display messages saved to database.
-
-  Reloads all messages from database for efficiency, unless there are pending
-  tool calls in the streaming delta (which would cause duplicate display).
-  """
-  def handle_display_messages_batch_saved(socket, _display_messages) do
-    # Check if there are pending tool calls - if so, don't reload yet
-    current_delta = socket.assigns.streaming_delta
-    tool_calls = get_tool_display_info(current_delta)
-    has_pending_tools = tool_calls != []
-
-    if has_pending_tools do
-      # Don't reload messages yet - keep showing streaming delta
-      assign(socket, :has_messages, true)
-    else
-      # No pending tools - reload messages and clear delta
-      socket
-      |> reload_messages_from_db()
-      |> assign(:streaming_delta, nil)
-      |> assign(:has_messages, true)
-    end
+    # Clear streaming_delta - persisted display messages (from display_message_saved)
+    # are now the authoritative display. Tool execution status is tracked via
+    # database updates and stream_inserts in the tool execution handlers.
+    socket
+    |> assign(:streaming_delta, nil)
+    |> assign(:loading, false)
   end
 
   @doc """
@@ -468,7 +438,11 @@ defmodule <%= module %> do
   def handle_display_message_saved(socket, display_msg) do
     socket =
       if socket.assigns[:conversation_id] do
-        reload_messages_from_db(socket)
+        # Clear streaming_delta - persisted messages are now the authoritative display.
+        # All display messages are saved to DB before broadcasting, so reload gets them all.
+        socket
+        |> assign(:streaming_delta, nil)
+        |> reload_messages_from_db()
       else
         stream_insert(socket, :messages, display_msg)
       end
@@ -481,14 +455,29 @@ defmodule <%= module %> do
   @doc """
   Handles tool call identified event.
 
-  Updates streaming delta with proper display_text from Function definition.
-  Early detection may have added a placeholder, this updates with the correct name.
+  Sets display_text directly on the matching ToolCall in the streaming delta
+  and tracks the tool's execution status.
   """
   def handle_tool_call_identified(socket, tool_info) do
     current_delta = socket.assigns[:streaming_delta]
-    display_name = tool_info[:display_text] || tool_info[:name]
 
-    updated_delta = update_or_add_tool_info(current_delta, tool_info, display_name, :identified)
+    updated_delta =
+      if current_delta do
+        current_delta
+        |> set_tool_display_text(tool_info.name, tool_info[:display_text])
+        |> set_tool_execution_status(tool_info.name, "identified")
+      else
+        # Non-streaming or delta not yet received — create minimal delta
+        tc = %ToolCall{
+          name: tool_info.name,
+          call_id: tool_info[:call_id],
+          display_text: tool_info[:display_text],
+          status: :incomplete,
+          metadata: %{"execution_status" => "identified"}
+        }
+
+        %MessageDelta{role: :assistant, status: :incomplete, tool_calls: [tc]}
+      end
 
     assign(socket, :streaming_delta, updated_delta)
   end
@@ -496,11 +485,9 @@ defmodule <%= module %> do
   @doc """
   Handles tool execution started event.
 
-  Updates database status to :executing and updates streaming delta status.
+  Updates database status to :executing and tracks the tool's execution status.
   """
   def handle_tool_execution_started(socket, tool_info) do
-    display_name = tool_info[:display_text] || tool_info[:name]
-
     # Update database status
     socket =
       case <%= conversations_alias %>.mark_tool_executing(tool_info.call_id) do
@@ -511,9 +498,17 @@ defmodule <%= module %> do
           socket
       end
 
-    # Update streaming delta
+    # Update delta with display_text and execution status
     current_delta = socket.assigns[:streaming_delta]
-    updated_delta = update_tool_status_in_delta(current_delta, tool_info, display_name, :executing)
+
+    updated_delta =
+      if current_delta do
+        current_delta
+        |> set_tool_display_text(tool_info.name, tool_info[:display_text])
+        |> set_tool_execution_status(tool_info.name, "executing")
+      else
+        current_delta
+      end
 
     assign(socket, :streaming_delta, updated_delta)
   end
@@ -534,9 +529,9 @@ defmodule <%= module %> do
       {:error, reason} -> Logger.error("Failed to complete tool call: #{inspect(reason)}")
     end
 
-    # Reload messages if we had a streaming delta
+    # Always reload to show completed status in the messages stream
     socket =
-      if socket.assigns.streaming_delta && socket.assigns[:conversation_id] do
+      if socket.assigns[:conversation_id] do
         reload_messages_from_db(socket)
       else
         socket
@@ -553,15 +548,17 @@ defmodule <%= module %> do
   """
   def handle_tool_execution_failed(socket, call_id, error) do
     # Update database
-    case <%= conversations_alias %>.fail_tool_call(call_id, %{"error" => inspect(error)}) do
+    error_text = if is_binary(error), do: error, else: inspect(error)
+
+    case <%= conversations_alias %>.fail_tool_call(call_id, %{"error" => error_text}) do
       {:ok, _} -> :ok
       {:error, :not_found} -> :ok
       {:error, reason} -> Logger.error("Failed to mark tool call as failed: #{inspect(reason)}")
     end
 
-    # Reload messages if we had a streaming delta
+    # Always reload to show failed status in the messages stream
     socket =
-      if socket.assigns.streaming_delta && socket.assigns[:conversation_id] do
+      if socket.assigns[:conversation_id] do
         reload_messages_from_db(socket)
       else
         socket
@@ -656,47 +653,16 @@ defmodule <%= module %> do
   end
 
   @doc """
-  Accumulates streaming deltas and enriches with tool display information.
+  Accumulates streaming deltas into the current streaming message.
 
-  Uses early detection pattern:
-  1. Adds placeholder tool display info immediately when tool_calls appear
-  2. Later refined by :tool_call_identified handler with proper display_text
+  Tool display information (display_text) is set on ToolCall structs by
+  LLMChain during merge_delta. The :on_tool_call_identified callback then
+  fires and is handled by `handle_tool_call_identified/2`, which updates
+  the streaming delta's tool calls with display_text directly.
   """
   def update_streaming_message(socket, deltas) do
     current_delta = socket.assigns.streaming_delta
     updated_delta = MessageDelta.merge_deltas(current_delta, deltas)
-
-    # EARLY DETECTION: Add placeholder display info for new tool calls
-    updated_delta =
-      if updated_delta && updated_delta.tool_calls && updated_delta.tool_calls != [] do
-        existing_tools = MessageDelta.get_tool_display_info(updated_delta)
-
-        existing_indices =
-          MapSet.new(Enum.with_index(existing_tools) |> Enum.map(fn {_, idx} -> idx end))
-
-        # Find new tool calls that need enrichment
-        new_tool_calls =
-          updated_delta.tool_calls
-          |> Enum.with_index()
-          |> Enum.filter(fn {tc, idx} ->
-            tc.name != nil && !MapSet.member?(existing_indices, idx)
-          end)
-
-        Enum.reduce(new_tool_calls, updated_delta, fn {tc, _idx}, delta_acc ->
-          display_name = tc.name |> String.replace("_", " ") |> String.capitalize()
-
-          tool_info = %{
-            name: tc.name,
-            call_id: tc.call_id,
-            display_name: display_name,
-            status: :identified
-          }
-
-          MessageDelta.add_tool_display_info(delta_acc, tool_info)
-        end)
-      else
-        updated_delta
-      end
 
     assign(socket, :streaming_delta, updated_delta)
   end
@@ -767,80 +733,32 @@ defmodule <%= module %> do
     "Sorry, I encountered an error: #{error_display}"
   end
 
-  defp get_tool_display_info(nil), do: []
-
-  defp get_tool_display_info(delta) do
-    LangChain.MessageDelta.get_tool_display_info(delta)
-  end
-
-  defp update_or_add_tool_info(current_delta, tool_info, display_name, status) do
-    if current_delta do
-      tool_calls = get_tool_display_info(current_delta)
-
-      updated_tool_calls =
-        Enum.map(tool_calls, fn tool ->
-          if tool.name == tool_info.name do
-            %{tool | display_name: display_name}
-          else
-            tool
-          end
-        end)
-
-      updated_tool_calls =
-        if Enum.any?(updated_tool_calls, fn t -> t.name == tool_info.name end) do
-          updated_tool_calls
+  # Set display_text on matching ToolCall(s) in a delta's tool_calls list.
+  # Only updates tool calls that don't already have display_text set.
+  defp set_tool_display_text(delta, tool_name, display_text) do
+    updated_tool_calls =
+      Enum.map(delta.tool_calls || [], fn tc ->
+        if tc.name == tool_name && tc.display_text == nil do
+          %{tc | display_text: display_text}
         else
-          display_info = %{
-            call_id: tool_info.call_id,
-            name: tool_info.name,
-            display_name: display_name,
-            arguments: tool_info.arguments || %{},
-            status: status
-          }
-
-          updated_tool_calls ++ [display_info]
+          tc
         end
+      end)
 
-      updated_metadata = Map.put(current_delta.metadata || %{}, :streaming_tool_calls, updated_tool_calls)
-      %{current_delta | metadata: updated_metadata}
-    else
-      display_info = %{
-        call_id: tool_info.call_id,
-        name: tool_info.name,
-        display_name: display_name,
-        arguments: tool_info.arguments || %{},
-        status: status
-      }
-
-      LangChain.MessageDelta.add_tool_display_info(current_delta, display_info)
-    end
+    %{delta | tool_calls: updated_tool_calls}
   end
 
-  defp update_tool_status_in_delta(current_delta, tool_info, display_name, status) do
-    if current_delta do
-      tool_calls = get_tool_display_info(current_delta)
+  # Set execution_status on matching ToolCall(s) in a delta's tool_calls list.
+  defp set_tool_execution_status(delta, tool_name, status) do
+    updated_tool_calls =
+      Enum.map(delta.tool_calls || [], fn tc ->
+        if tc.name == tool_name do
+          ToolCall.set_execution_status(tc, status)
+        else
+          tc
+        end
+      end)
 
-      updated_tool_calls =
-        Enum.map(tool_calls, fn tool ->
-          if tool.call_id == tool_info.call_id or tool.name == tool_info.name do
-            %{tool | status: status}
-          else
-            tool
-          end
-        end)
-
-      updated_metadata = Map.put(current_delta.metadata || %{}, :streaming_tool_calls, updated_tool_calls)
-      %{current_delta | metadata: updated_metadata}
-    else
-      display_info = %{
-        call_id: tool_info.call_id,
-        name: tool_info.name,
-        display_name: display_name,
-        arguments: tool_info.arguments || %{},
-        status: status
-      }
-
-      LangChain.MessageDelta.add_tool_display_info(current_delta, display_info)
-    end
+    %{delta | tool_calls: updated_tool_calls}
   end
 end
