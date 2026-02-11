@@ -141,6 +141,7 @@ defmodule Sagents.MixProject do
   defp extras do
     [
       "README.md",
+      "CHANGELOG.md",
       "LICENSE",
       "docs/architecture.md",
       "docs/conversations_architecture.md",
