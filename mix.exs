@@ -1,19 +1,23 @@
 defmodule Sagents.MixProject do
   use Mix.Project
 
+  @source_url "https://github.com/sagents-ai/sagents"
   @version "0.1.0"
 
   def project do
     [
       app: :sagents,
       version: @version,
-      elixir: "~> 1.16",
+      elixir: "~> 1.17",
       elixirc_paths: elixirc_paths(Mix.env()),
+      test_options: [docs: true],
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
+      package: package(),
       docs: docs(),
       name: "Sagents",
+      homepage_url: @source_url,
       description: """
       Agent orchestration framework for Elixir, built on top of LangChain.
       Provides AgentServer, middleware system, state management, and more.
@@ -145,6 +149,17 @@ defmodule Sagents.MixProject do
       "docs/middleware.md",
       "docs/middleware_messaging.md",
       "docs/persistence.md"
+    ]
+  end
+
+    defp package do
+    # Note: the screenshots and guides are not included in the
+    # package.
+    [
+      files: ["lib", "priv", "mix.exs", "README*", "LICENSE*"],
+      maintainers: ["Mark Ericksen"],
+      licenses: ["Apache-2.0"],
+      links: %{"GitHub" => @source_url}
     ]
   end
 
