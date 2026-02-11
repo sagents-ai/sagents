@@ -152,11 +152,19 @@ defmodule Sagents.MixProject do
     ]
   end
 
-    defp package do
-    # Note: the screenshots and guides are not included in the
-    # package.
+  defp package do
     [
-      files: ["lib", "priv", "mix.exs", "README*", "LICENSE*"],
+      files: [
+        "lib",
+        "priv",
+        "screenshots",
+        "docs",
+        ".formatter.exs",
+        "mix.exs",
+        "README*",
+        "CHANGELOG*",
+        "LICENSE*"
+      ],
       maintainers: ["Mark Ericksen"],
       licenses: ["Apache-2.0"],
       links: %{"GitHub" => @source_url}
