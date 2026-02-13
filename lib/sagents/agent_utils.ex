@@ -145,6 +145,65 @@ defmodule Sagents.AgentUtils do
     end
   end
 
+  @doc """
+  Normalize an `until_tool` option into a list of tool names.
+
+  Accepts `nil`, a single string, or a list of strings.
+
+  ## Examples
+
+      normalize_until_tool(nil)          #=> nil
+      normalize_until_tool("submit")     #=> ["submit"]
+      normalize_until_tool(["a", "b"])   #=> ["a", "b"]
+  """
+  def normalize_until_tool(nil), do: nil
+  def normalize_until_tool(name) when is_binary(name), do: [name]
+  def normalize_until_tool(names) when is_list(names), do: names
+
+  @doc """
+  Validate that all `until_tool` names reference registered tools.
+
+  Returns `:ok` if validation passes, or `{:error, message}` if any names are missing.
+
+  ## Parameters
+  - `tool_names` - List of tool name strings (or nil to skip validation)
+  - `tools` - List of tool structs with a `name` field
+  """
+  def validate_until_tool_names(nil, _tools), do: :ok
+
+  def validate_until_tool_names(tool_names, tools) when is_list(tools) do
+    registered_names = MapSet.new(Enum.map(tools, & &1.name))
+    missing = Enum.reject(tool_names, &(&1 in registered_names))
+
+    case missing do
+      [] -> :ok
+      names -> {:error, "until_tool references unknown tools: #{inspect(names)}"}
+    end
+  end
+
+  @doc """
+  Search the chain's last message for a tool result matching one of the target names.
+
+  Returns `{:found, tool_result}` if a match is found, or `:not_found` otherwise.
+
+  ## Parameters
+  - `chain` - LLMChain after tool execution
+  - `until_tool_names` - List of tool name strings to match against
+  """
+  def find_matching_tool_result(%LLMChain{} = chain, until_tool_names)
+      when is_list(until_tool_names) do
+    case chain.last_message do
+      %Message{role: :tool, tool_results: tool_results} when is_list(tool_results) ->
+        case Enum.find(tool_results, &(&1.name in until_tool_names)) do
+          nil -> :not_found
+          result -> {:found, result}
+        end
+
+      _ ->
+        :not_found
+    end
+  end
+
   # Private helpers
 
   defp requires_approval?(tool_name, interrupt_on) do
