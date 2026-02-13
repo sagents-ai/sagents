@@ -465,6 +465,7 @@ defmodule Sagents.Middleware.HumanInTheLoop do
       allowed = tool_config.allowed_decisions || @default_decisions
 
       cond do
+        !is_map(decision) -> {:halt, {:error, "Decision at index #{index} is not a map"}}
         !Map.has_key?(decision, :type) ->
           {:halt,
            {:error,
