@@ -314,7 +314,6 @@ defmodule <%= module %> do
 
     - `conversation_id` - The conversation being viewed
     - `viewer_id` - Unique identifier for the viewer (typically user_id)
-    - `pid` - The process to track (typically self())
     - `metadata` - Optional metadata map (default: empty map)
 
   ## Returns
@@ -326,21 +325,20 @@ defmodule <%= module %> do
 
       # In a LiveView after socket is connected
       if connected?(socket) do
-        {:ok, _ref} = Coordinator.track_conversation_viewer(conversation_id, user.id, self())
+        {:ok, _ref} = Coordinator.track_conversation_viewer(conversation_id, user.id)
       end
 
       # With metadata
       Coordinator.track_conversation_viewer(
         conversation_id,
         user.id,
-        self(),
         %{username: user.name}
       )
   """
-  def track_conversation_viewer(conversation_id, viewer_id, pid, metadata \\ %{}) do
+  def track_conversation_viewer(conversation_id, viewer_id, metadata \\ %{}) do
     topic = presence_topic(conversation_id)
     full_metadata = Map.merge(%{joined_at: System.system_time(:second)}, metadata)
-    Sagents.Presence.track(@presence_module, topic, viewer_id, pid, full_metadata)
+    Sagents.Presence.track(@presence_module, topic, viewer_id, full_metadata)
   end
 
   @doc """
@@ -352,7 +350,6 @@ defmodule <%= module %> do
 
     - `conversation_id` - The conversation to untrack from
     - `viewer_id` - Unique identifier for the viewer (typically user_id)
-    - `pid` - The process to untrack (typically self())
 
   ## Returns
 
@@ -361,11 +358,11 @@ defmodule <%= module %> do
   ## Examples
 
       # When switching conversations
-      <%= module %>.untrack_conversation_viewer(old_conversation_id, user.id, self())
+      <%= module %>.untrack_conversation_viewer(old_conversation_id, user.id)
   """
-  def untrack_conversation_viewer(conversation_id, viewer_id, pid) do
+  def untrack_conversation_viewer(conversation_id, viewer_id) do
     topic = presence_topic(conversation_id)
-    Sagents.Presence.untrack(@presence_module, topic, viewer_id, pid)
+    Sagents.Presence.untrack(@presence_module, topic, viewer_id)
   end
 
   @doc """

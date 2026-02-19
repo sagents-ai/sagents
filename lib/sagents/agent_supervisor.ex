@@ -26,7 +26,8 @@ defmodule Sagents.AgentSupervisor do
   - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` (optional, default: nil)
   - `:shutdown_delay` - Delay in milliseconds to allow the supervisor to gracefully stop all children (optional, default: 5000)
   - `:conversation_id` - Optional conversation identifier for message persistence (optional, default: nil)
-  - `:save_new_message_fn` - Optional callback function for persisting messages (optional, default: nil)
+  - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` (optional, default: nil)
+  - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` (optional, default: nil)
 
   ## Examples
 
@@ -75,10 +76,9 @@ defmodule Sagents.AgentSupervisor do
 
   alias Sagents.Agent
   alias Sagents.AgentServer
+  alias Sagents.ProcessRegistry
   alias Sagents.SubAgentsDynamicSupervisor
   alias Sagents.State
-
-  @registry Sagents.Registry
 
   @doc """
   Get the name of the AgentSupervisor process for a specific agent.
@@ -88,9 +88,9 @@ defmodule Sagents.AgentSupervisor do
       name = AgentSupervisor.get_name("my-agent-1")
       AgentSupervisor.stop(name)
   """
-  @spec get_name(String.t()) :: {:via, Registry, {Registry, String.t()}}
+  @spec get_name(String.t()) :: GenServer.name()
   def get_name(agent_id) when is_binary(agent_id) do
-    {:via, Registry, {@registry, {:agent_supervisor, agent_id}}}
+    ProcessRegistry.via_tuple({:agent_supervisor, agent_id})
   end
 
   @doc """
@@ -103,7 +103,7 @@ defmodule Sagents.AgentSupervisor do
   """
   @spec get_pid(String.t()) :: {:ok, pid()} | {:error, :not_found}
   def get_pid(agent_id) when is_binary(agent_id) do
-    case Registry.lookup(@registry, {:agent_supervisor, agent_id}) do
+    case ProcessRegistry.lookup({:agent_supervisor, agent_id}) do
       [{pid, _}] -> {:ok, pid}
       [] -> {:error, :not_found}
     end
@@ -143,7 +143,8 @@ defmodule Sagents.AgentSupervisor do
   - `:name` - Supervisor name registration (optional)
   - `:shutdown_delay` - Delay in milliseconds to allow the supervisor to gracefully stop all children (optional, default: 5000)
   - `:conversation_id` - Optional conversation identifier for message persistence (optional, default: nil)
-  - `:save_new_message_fn` - Optional callback function for persisting messages (optional, default: nil)
+  - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` (optional, default: nil)
+  - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` (optional, default: nil)
 
   ## Examples
 
@@ -304,7 +305,8 @@ defmodule Sagents.AgentSupervisor do
     shutdown_delay = Keyword.get(config, :shutdown_delay, 5000)
     presence_tracking = Keyword.get(config, :presence_tracking)
     conversation_id = Keyword.get(config, :conversation_id)
-    save_new_message_fn = Keyword.get(config, :save_new_message_fn)
+    agent_persistence = Keyword.get(config, :agent_persistence)
+    display_message_persistence = Keyword.get(config, :display_message_persistence)
     presence_module = Keyword.get(config, :presence_module)
 
     # Build AgentServer options
@@ -339,10 +341,21 @@ defmodule Sagents.AgentSupervisor do
         do: Keyword.put(agent_server_opts, :conversation_id, conversation_id),
         else: agent_server_opts
 
-    # Add save_new_message_fn if provided
+    # Add agent_persistence if provided
     agent_server_opts =
-      if save_new_message_fn,
-        do: Keyword.put(agent_server_opts, :save_new_message_fn, save_new_message_fn),
+      if agent_persistence,
+        do: Keyword.put(agent_server_opts, :agent_persistence, agent_persistence),
+        else: agent_server_opts
+
+    # Add display_message_persistence if provided
+    agent_server_opts =
+      if display_message_persistence,
+        do:
+          Keyword.put(
+            agent_server_opts,
+            :display_message_persistence,
+            display_message_persistence
+          ),
         else: agent_server_opts
 
     # Add presence_module if provided

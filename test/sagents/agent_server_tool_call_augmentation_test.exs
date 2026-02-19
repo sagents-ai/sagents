@@ -16,7 +16,6 @@ defmodule Sagents.AgentServerToolCallAugmentationTest do
   alias LangChain.Message.ToolCall
   alias LangChain.ChatModels.ChatAnthropic
   alias LangChain.Function
-  alias Sagents.Message.DisplayHelpers
 
   require Logger
 
@@ -51,26 +50,8 @@ defmodule Sagents.AgentServerToolCallAugmentationTest do
           tools: [search_tool]
         })
 
-      # Track what gets saved
-      test_pid = self()
-
-      save_fn = fn _conversation_id, %Message{} = message ->
-        Logger.info("=== save_fn called ===")
-        Logger.info("Message role: #{message.role}")
-
-        if message.role == :assistant && message.tool_calls do
-          Logger.info("Tool calls: #{length(message.tool_calls)}")
-
-          for tool_call <- message.tool_calls do
-            Logger.info("  Tool: #{tool_call.name}")
-            Logger.info("  Metadata: #{inspect(tool_call.metadata)}")
-          end
-        end
-
-        display_items = DisplayHelpers.extract_display_items(message)
-        send(test_pid, {:saved_message, message, display_items})
-        {:ok, []}
-      end
+      # Register test process to receive forwarded messages
+      Sagents.TestDisplayMessagePersistenceForwarding.register_test_process(self())
 
       {:ok, _pid} =
         AgentServer.start_link(
@@ -78,7 +59,7 @@ defmodule Sagents.AgentServerToolCallAugmentationTest do
           initial_state: State.new!(),
           pubsub: nil,
           conversation_id: "test-conv",
-          save_new_message_fn: save_fn
+          display_message_persistence: Sagents.TestDisplayMessagePersistenceForwarding
         )
 
       # Mock the LLM to return an assistant message with a tool_call
@@ -106,11 +87,10 @@ defmodule Sagents.AgentServerToolCallAugmentationTest do
       :ok = AgentServer.add_message("augment-test", user_message)
 
       # Wait for user message to be saved
-      assert_receive {:saved_message, %Message{role: :user}, _}, 5000
+      assert_receive {:saved_message, %Message{role: :user}, _}
 
       # Wait for assistant message with tool_call to be saved
-      assert_receive {:saved_message, %Message{role: :assistant} = assistant_msg, display_items},
-                     5000
+      assert_receive {:saved_message, %Message{role: :assistant} = assistant_msg, display_items}
 
       Logger.info("\n=== VERIFICATION ===")
 
@@ -131,8 +111,6 @@ defmodule Sagents.AgentServerToolCallAugmentationTest do
 
       assert tool_call_item.content["display_text"] == "Searching database",
              "DisplayMessage content should include display_text for database persistence"
-
-      Logger.info("✅ SUCCESS: LLMChain augmentation is working correctly")
 
       # Cleanup
       AgentServer.stop("augment-test")
@@ -158,13 +136,8 @@ defmodule Sagents.AgentServerToolCallAugmentationTest do
           tools: [plain_tool]
         })
 
-      test_pid = self()
-
-      save_fn = fn _conversation_id, message ->
-        display_items = DisplayHelpers.extract_display_items(message)
-        send(test_pid, {:saved, message, display_items})
-        {:ok, []}
-      end
+      # Register test process to receive forwarded messages
+      Sagents.TestDisplayMessagePersistenceForwarding.register_test_process(self())
 
       {:ok, _pid} =
         AgentServer.start_link(
@@ -172,7 +145,7 @@ defmodule Sagents.AgentServerToolCallAugmentationTest do
           initial_state: State.new!(),
           pubsub: nil,
           conversation_id: "plain-conv",
-          save_new_message_fn: save_fn
+          display_message_persistence: Sagents.TestDisplayMessagePersistenceForwarding
         )
 
       # Mock LLM to return tool_call without metadata
@@ -190,8 +163,8 @@ defmodule Sagents.AgentServerToolCallAugmentationTest do
 
       :ok = AgentServer.add_message("plain-test", Message.new_user!("Test"))
 
-      assert_receive {:saved, %Message{role: :user}, _}, 5000
-      assert_receive {:saved, %Message{role: :assistant} = msg, items}, 5000
+      assert_receive {:saved_message, %Message{role: :user}, _}
+      assert_receive {:saved_message, %Message{role: :assistant} = msg, items}
 
       # Tool should have a humanized fallback display_text
       [tool_call] = msg.tool_calls

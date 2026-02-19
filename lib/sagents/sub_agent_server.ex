@@ -83,10 +83,9 @@ defmodule Sagents.SubAgentServer do
   require Logger
 
   alias Sagents.AgentServer
+  alias Sagents.ProcessRegistry
   alias Sagents.SubAgent
   alias LangChain.TokenUsage
-
-  @registry Sagents.Registry
 
   defmodule ServerState do
     @moduledoc false
@@ -132,9 +131,9 @@ defmodule Sagents.SubAgentServer do
 
       name = SubAgentServer.get_name("main-agent-sub-1")
   """
-  @spec get_name(String.t()) :: {:via, Registry, {Registry, tuple()}}
+  @spec get_name(String.t()) :: GenServer.name()
   def get_name(sub_agent_id) when is_binary(sub_agent_id) do
-    {:via, Registry, {@registry, {:sub_agent, sub_agent_id}}}
+    ProcessRegistry.via_tuple({:sub_agent, sub_agent_id})
   end
 
   @doc """
@@ -148,7 +147,7 @@ defmodule Sagents.SubAgentServer do
   """
   @spec whereis(String.t()) :: pid() | nil
   def whereis(sub_agent_id) when is_binary(sub_agent_id) do
-    case Registry.lookup(@registry, {:sub_agent, sub_agent_id}) do
+    case ProcessRegistry.lookup({:sub_agent, sub_agent_id}) do
       [{pid, _}] -> pid
       [] -> nil
     end

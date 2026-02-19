@@ -1,8 +1,8 @@
 defmodule Sagents.AgentServerMessageCallbackFocusedTest do
   @moduledoc """
-  Focused unit tests for AgentServer message persistence callback functionality.
+  Focused unit tests for AgentServer display message persistence functionality.
 
-  These tests verify the callback infrastructure without triggering full agent execution.
+  These tests verify the persistence infrastructure without triggering full agent execution.
   """
 
   use Sagents.BaseCase, async: false
@@ -31,7 +31,7 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
     {:ok, pubsub: pubsub_name, agent_id: agent_id}
   end
 
-  describe "callback configuration" do
+  describe "persistence configuration" do
     test "accepts and stores conversation_id", %{agent_id: agent_id, pubsub: pubsub} do
       agent = create_test_agent(agent_id: agent_id)
       conversation_id = "conv-test-123"
@@ -50,16 +50,17 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
       AgentServer.stop(agent_id)
     end
 
-    test "accepts and stores save_new_message_fn", %{agent_id: agent_id, pubsub: pubsub} do
+    test "accepts and stores display_message_persistence", %{
+      agent_id: agent_id,
+      pubsub: pubsub
+    } do
       agent = create_test_agent(agent_id: agent_id)
-
-      callback_fn = fn _conv_id, _message -> {:ok, []} end
 
       {:ok, _pid} =
         AgentServer.start_link(
           agent: agent,
           conversation_id: "conv-123",
-          save_new_message_fn: callback_fn,
+          display_message_persistence: Sagents.TestDisplayMessagePersistence,
           pubsub: {Phoenix.PubSub, pubsub}
         )
 
@@ -70,7 +71,7 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
       AgentServer.stop(agent_id)
     end
 
-    test "works without callback options (backward compatibility)", %{
+    test "works without persistence options (backward compatibility)", %{
       agent_id: agent_id,
       pubsub: pubsub
     } do
@@ -80,7 +81,7 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
         AgentServer.start_link(
           agent: agent,
           pubsub: {Phoenix.PubSub, pubsub}
-          # No conversation_id or save_new_message_fn
+          # No conversation_id or display_message_persistence
         )
 
       # Verify server started successfully
@@ -91,24 +92,22 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
     end
   end
 
-  describe "callback invocation" do
-    test "callback is invoked when adding user message", %{agent_id: agent_id, pubsub: pubsub} do
+  describe "persistence invocation" do
+    test "persistence module is invoked when adding user message", %{
+      agent_id: agent_id,
+      pubsub: pubsub
+    } do
       agent = create_test_agent(agent_id: agent_id)
       conversation_id = "conv-123"
 
-      # Track callback invocations
-      test_pid = self()
-
-      callback_fn = fn conv_id, message ->
-        send(test_pid, {:callback_invoked, conv_id, message.role})
-        {:ok, []}
-      end
+      # Subscribe to events
+      Phoenix.PubSub.subscribe(pubsub, "agent_server:#{agent_id}")
 
       {:ok, _pid} =
         AgentServer.start_link(
           agent: agent,
           conversation_id: conversation_id,
-          save_new_message_fn: callback_fn,
+          display_message_persistence: Sagents.TestDisplayMessagePersistence,
           pubsub: {Phoenix.PubSub, pubsub}
         )
 
@@ -116,93 +115,54 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
       message = Message.new_user!("Test message")
       :ok = AgentServer.add_message(agent_id, message)
 
-      # Verify callback was invoked
-      assert_receive {:callback_invoked, ^conversation_id, :user}, 1000
+      # Verify display_message_saved was broadcast (persistence was invoked)
+      assert_receive {:agent, {:display_message_saved, %{role: "user"}}}
 
       AgentServer.stop(agent_id)
     end
 
-    test "callback receives correct conversation_id", %{agent_id: agent_id, pubsub: pubsub} do
-      agent = create_test_agent(agent_id: agent_id)
-      conversation_id = "conv-unique-12345"
-
-      test_pid = self()
-
-      callback_fn = fn conv_id, _message ->
-        send(test_pid, {:received_conv_id, conv_id})
-        {:ok, []}
-      end
-
-      {:ok, _pid} =
-        AgentServer.start_link(
-          agent: agent,
-          conversation_id: conversation_id,
-          save_new_message_fn: callback_fn,
-          pubsub: {Phoenix.PubSub, pubsub}
-        )
-
-      message = Message.new_user!("Test")
-      :ok = AgentServer.add_message(agent_id, message)
-
-      # Verify exact conversation_id was passed
-      assert_receive {:received_conv_id, ^conversation_id}, 1000
-
-      AgentServer.stop(agent_id)
-    end
-
-    test "callback is not invoked when conversation_id is missing", %{
+    test "persistence is not invoked when conversation_id is missing", %{
       agent_id: agent_id,
       pubsub: pubsub
     } do
       agent = create_test_agent(agent_id: agent_id)
 
-      # This callback should NEVER be called
-      callback_fn = fn _conv_id, _message ->
-        flunk("Callback should not be invoked without conversation_id")
-        {:ok, []}
-      end
+      # Subscribe to events
+      Phoenix.PubSub.subscribe(pubsub, "agent_server:#{agent_id}")
 
       {:ok, _pid} =
         AgentServer.start_link(
           agent: agent,
-          # Has callback
-          save_new_message_fn: callback_fn,
+          # Has persistence module but missing conversation_id
+          display_message_persistence: Sagents.TestDisplayMessagePersistence,
           pubsub: {Phoenix.PubSub, pubsub}
-          # Missing conversation_id - callback won't activate
         )
 
       message = Message.new_user!("Test")
       :ok = AgentServer.add_message(agent_id, message)
 
-      # Give it time to potentially call (it shouldn't)
-      Process.sleep(100)
+      # Should get llm_message (fallback), not display_message_saved
+      assert_receive {:agent, {:llm_message, %{role: :user}}}
+      refute_receive {:agent, {:display_message_saved, _}}
 
       AgentServer.stop(agent_id)
     end
   end
 
   describe "error handling" do
-    test "callback exception doesn't crash server", %{agent_id: agent_id, pubsub: pubsub} do
+    test "persistence exception doesn't crash server", %{agent_id: agent_id, pubsub: pubsub} do
       agent = create_test_agent(agent_id: agent_id)
-
-      # Callback that raises
-      callback_fn = fn _conv_id, _message ->
-        raise "Simulated error"
-      end
 
       {:ok, pid} =
         AgentServer.start_link(
           agent: agent,
           conversation_id: "conv-123",
-          save_new_message_fn: callback_fn,
+          display_message_persistence: Sagents.TestDisplayMessagePersistenceRaising,
           pubsub: {Phoenix.PubSub, pubsub}
         )
 
       message = Message.new_user!("Test")
       :ok = AgentServer.add_message(agent_id, message)
-
-      # Give it time to process
-      Process.sleep(100)
 
       # Server should still be alive (status may be :running or :idle)
       assert Process.alive?(pid)
@@ -211,54 +171,20 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
 
       AgentServer.stop(agent_id)
     end
-
-    test "invalid callback return doesn't crash server", %{agent_id: agent_id, pubsub: pubsub} do
-      agent = create_test_agent(agent_id: agent_id)
-
-      # Callback returns invalid format
-      callback_fn = fn _conv_id, _message ->
-        # Invalid!
-        {:ok, "not a list"}
-      end
-
-      {:ok, pid} =
-        AgentServer.start_link(
-          agent: agent,
-          conversation_id: "conv-123",
-          save_new_message_fn: callback_fn,
-          pubsub: {Phoenix.PubSub, pubsub}
-        )
-
-      message = Message.new_user!("Test")
-      :ok = AgentServer.add_message(agent_id, message)
-
-      # Give it time to process
-      Process.sleep(100)
-
-      # Server should still be alive
-      assert Process.alive?(pid)
-
-      AgentServer.stop(agent_id)
-    end
   end
 
   describe "message state management" do
-    test "messages added to state regardless of callback success", %{
+    test "messages added to state regardless of persistence success", %{
       agent_id: agent_id,
       pubsub: pubsub
     } do
       agent = create_test_agent(agent_id: agent_id)
 
-      # Callback that always fails
-      callback_fn = fn _conv_id, _message ->
-        {:error, :database_error}
-      end
-
       {:ok, _pid} =
         AgentServer.start_link(
           agent: agent,
           conversation_id: "conv-123",
-          save_new_message_fn: callback_fn,
+          display_message_persistence: Sagents.TestDisplayMessagePersistenceRaising,
           pubsub: {Phoenix.PubSub, pubsub}
         )
 
@@ -266,10 +192,7 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
       message = Message.new_user!("Test message")
       :ok = AgentServer.add_message(agent_id, message)
 
-      # Give it time to process
-      Process.sleep(50)
-
-      # Message should still be in state even though callback failed
+      # Message should still be in state even though persistence failed
       state = AgentServer.get_state(agent_id)
       assert length(state.messages) >= 1
 

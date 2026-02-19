@@ -291,7 +291,7 @@ defmodule <%= module %> do
       :ok = <%= coordinator_alias %>.ensure_subscribed_to_conversation(conversation_id)
 
       if user_id do
-        case <%= coordinator_alias %>.track_conversation_viewer(conversation_id, user_id, self()) do
+        case <%= coordinator_alias %>.track_conversation_viewer(conversation_id, user_id) do
           {:ok, _ref} ->
             :ok
 

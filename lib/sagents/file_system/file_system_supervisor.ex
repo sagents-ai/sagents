@@ -38,6 +38,7 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
   require Logger
 
   alias Sagents.FileSystemServer
+  alias Sagents.ProcessRegistry
 
   # ============================================================================
   # Public API
@@ -164,7 +165,7 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
               restart: :transient
             }
 
-            case DynamicSupervisor.start_child(supervisor, child_spec) do
+            case Sagents.ProcessSupervisor.start_child(supervisor, child_spec) do
               {:ok, pid} ->
                 Logger.debug(
                   "Started filesystem for scope #{inspect(scope_key)}, pid: #{inspect(pid)}"
@@ -217,7 +218,7 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
 
     case get_filesystem(scope_key) do
       {:ok, pid} ->
-        case DynamicSupervisor.terminate_child(supervisor, pid) do
+        case Sagents.ProcessSupervisor.terminate_child(supervisor, pid) do
           :ok ->
             Logger.debug("Stopped filesystem for scope #{inspect(scope_key)}")
             :ok
@@ -250,7 +251,7 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
   """
   @spec get_filesystem(tuple()) :: {:ok, pid()} | {:error, :not_found}
   def get_filesystem(scope_key) when is_tuple(scope_key) do
-    case Registry.lookup(Sagents.Registry, {:filesystem_server, scope_key}) do
+    case ProcessRegistry.lookup({:filesystem_server, scope_key}) do
       [{pid, _}] -> {:ok, pid}
       [] -> {:error, :not_found}
     end
@@ -270,7 +271,7 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
   """
   @spec list_filesystems() :: [{tuple(), pid()}]
   def list_filesystems do
-    Registry.select(Sagents.Registry, [
+    ProcessRegistry.select([
       {
         {{:filesystem_server, :"$1"}, :"$2", :_},
         [],

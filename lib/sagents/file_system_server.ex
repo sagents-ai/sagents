@@ -60,6 +60,7 @@ defmodule Sagents.FileSystemServer do
   alias Sagents.FileSystem.FileSystemState
   alias Sagents.FileSystem.FileSystemConfig
   alias Sagents.FileSystem.FileEntry
+  alias Sagents.ProcessRegistry
 
   # ======================================================================
   # Client API
@@ -114,7 +115,9 @@ defmodule Sagents.FileSystemServer do
     %{
       id: {:filesystem_server, scope_key},
       start: {__MODULE__, :start_link, [opts]},
-      restart: :transient
+      restart: :transient,
+      # Allow 5s for graceful shutdown (flushing pending writes)
+      shutdown: 5_000
     }
   end
 
@@ -127,7 +130,7 @@ defmodule Sagents.FileSystemServer do
   """
   @spec whereis(term()) :: pid() | nil
   def whereis(scope_key) do
-    case Registry.lookup(Sagents.Registry, {:filesystem_server, scope_key}) do
+    case ProcessRegistry.lookup({:filesystem_server, scope_key}) do
       [{pid, _}] -> pid
       [] -> nil
     end
@@ -150,7 +153,7 @@ defmodule Sagents.FileSystemServer do
   Common patterns include tuples like `{:user, 123}` or strings like `"agent-abc"`.
   """
   def get_name(scope_key) do
-    {:via, Registry, {Sagents.Registry, {:filesystem_server, scope_key}}}
+    ProcessRegistry.via_tuple({:filesystem_server, scope_key})
   end
 
   @doc """

@@ -27,8 +27,7 @@ defmodule Sagents.MixProject do
 
   def application do
     [
-      extra_applications: [:logger],
-      mod: {Sagents.Application, []}
+      extra_applications: [:logger]
     ]
   end
 
@@ -53,12 +52,14 @@ defmodule Sagents.MixProject do
 
       # Optional dependencies
       {:phoenix, "~> 1.7", optional: true},
+      {:horde, "~> 0.10"},
 
       # Development dependencies
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
 
       # Test dependencies
       {:mimic, "~> 1.8", only: :test},
+      {:local_cluster, "~> 2.0", only: :test},
 
       # AGENTS.md file maintenance
       {:usage_rules, "~> 0.1", only: :dev, runtime: false}

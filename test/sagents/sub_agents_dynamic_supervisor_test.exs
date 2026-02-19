@@ -177,7 +177,7 @@ defmodule Sagents.SubAgentsDynamicSupervisorTest do
 
       # Check Registry lookup
       assert [{^sup_pid, _}] =
-               Registry.lookup(Sagents.Registry, {:sub_agents_supervisor, agent_id})
+               Sagents.ProcessRegistry.lookup({:sub_agents_supervisor, agent_id})
 
       # Clean up
       DynamicSupervisor.stop(sup_pid)
@@ -193,7 +193,7 @@ defmodule Sagents.SubAgentsDynamicSupervisorTest do
       Process.sleep(50)
 
       # Should not be in Registry anymore
-      assert [] = Registry.lookup(Sagents.Registry, {:sub_agents_supervisor, agent_id})
+      assert [] = Sagents.ProcessRegistry.lookup({:sub_agents_supervisor, agent_id})
     end
   end
 end

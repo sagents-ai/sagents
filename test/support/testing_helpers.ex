@@ -69,13 +69,6 @@ defmodule Sagents.TestingHelpers do
     }
   end
 
-  @doc """
-  A basic function compatible for assigning to a test agent's `:save_new_message_fn` callback function.
-  """
-  def basic_process_to_display_data(_conversation_id, %LangChain.Message{} = message) do
-    {:ok, [message_to_display_data(message)]}
-  end
-
   # Helper to create a mock model
   def mock_model do
     ChatAnthropic.new!(%{
@@ -111,7 +104,7 @@ defmodule Sagents.TestingHelpers do
   - `:agent_id` - (required) Unique identifier for the agent
   - `:pubsub` - (required) Tuple of {module, name} for PubSub
   - `:conversation_id` - (optional) Conversation ID for message persistence
-  - `:save_new_message_fn` - (optional) Callback function for message persistence
+  - `:display_message_persistence` - (optional) Module implementing `Sagents.DisplayMessagePersistence`
   - `:initial_state` - (optional) Initial agent state (defaults to empty state)
 
   ## Returns
@@ -124,7 +117,7 @@ defmodule Sagents.TestingHelpers do
         agent_id: "test-123",
         pubsub: {Phoenix.PubSub, :test_pubsub},
         conversation_id: "conv-123",
-        save_new_message_fn: &MyModule.save_message/2
+        display_message_persistence: MyApp.DisplayMessagePersistence
       )
   """
   def start_test_agent(opts) do
@@ -133,7 +126,7 @@ defmodule Sagents.TestingHelpers do
 
     # Optional callback configuration
     conversation_id = Keyword.get(opts, :conversation_id)
-    save_new_message_fn = Keyword.get(opts, :save_new_message_fn)
+    display_message_persistence = Keyword.get(opts, :display_message_persistence)
     initial_state = Keyword.get(opts, :initial_state)
 
     # Subscribe to agent's PubSub topic so test can receive events
@@ -179,8 +172,13 @@ defmodule Sagents.TestingHelpers do
         else: supervisor_config
 
     supervisor_config =
-      if save_new_message_fn,
-        do: Keyword.put(supervisor_config, :save_new_message_fn, save_new_message_fn),
+      if display_message_persistence,
+        do:
+          Keyword.put(
+            supervisor_config,
+            :display_message_persistence,
+            display_message_persistence
+          ),
         else: supervisor_config
 
     # Start supervisor synchronously to ensure agent is ready

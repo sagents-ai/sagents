@@ -2,11 +2,10 @@ defmodule Sagents.AgentServerToolCallbacksTest do
   @moduledoc """
   Tests for AgentServer tool execution callback functionality.
 
-  This verifies that the new tool execution events are properly broadcast:
-  1. tool_execution_started with display_text
-  2. tool_execution_completed
-  3. tool_execution_failed
-  4. Friendly name fallback for tools without display_text
+  This verifies that the consolidated tool execution event is properly broadcast:
+  {:tool_execution_update, status, tool_info}
+
+  Where status is :executing, :completed, or :failed
   """
 
   use Sagents.BaseCase, async: false
@@ -15,7 +14,7 @@ defmodule Sagents.AgentServerToolCallbacksTest do
   alias Sagents.{Agent, AgentServer, AgentSupervisor}
   alias LangChain.ChatModels.ChatAnthropic
   alias LangChain.{Message, Function}
-  alias LangChain.Message.{ToolCall, ToolResult}
+  alias LangChain.Message.ToolCall
 
   setup :set_mimic_global
 
@@ -54,7 +53,7 @@ defmodule Sagents.AgentServerToolCallbacksTest do
     AgentServer.stop(agent_id)
   end
 
-  describe "tool_execution_started event" do
+  describe "tool_execution_update :executing event" do
     test "broadcasts with display_text" do
       agent_id = "test-#{:erlang.unique_integer([:positive])}"
 
@@ -67,8 +66,8 @@ defmodule Sagents.AgentServerToolCallbacksTest do
           function: fn _args, _ctx -> {:ok, "Success"} end
         })
 
-      # Mock LLM to return tool call
-      stub(ChatAnthropic, :call, fn _model, _messages, _callbacks ->
+      # First call: return tool call
+      expect(ChatAnthropic, :call, 1, fn _model, _messages, _callbacks ->
         {:ok,
          [
            Message.new_assistant!(%{
@@ -84,17 +83,25 @@ defmodule Sagents.AgentServerToolCallbacksTest do
          ]}
       end)
 
+      # Second call: return plain message to end the loop
+      expect(ChatAnthropic, :call, 1, fn _model, _messages, _callbacks ->
+        {:ok, [Message.new_assistant!("Done!")]}
+      end)
+
       start_agent_with_tools(agent_id, [tool])
 
       AgentServer.add_message(agent_id, Message.new_user!("Test"))
 
-      # Verify tool_execution_started event
-      assert_receive {:agent, {:tool_execution_started, tool_info}}
+      # Verify consolidated tool_execution_update event
+      assert_receive {:agent, {:tool_execution_update, :executing, tool_info}}
 
       assert tool_info.call_id == "call_123"
       assert tool_info.name == "test_tool"
       assert tool_info.display_text == "Testing something"
       assert tool_info.arguments == %{"arg" => "value"}
+
+      # Wait for execution to complete before stopping
+      assert_receive {:agent, {:status_changed, :idle, _}}, 5_000
 
       stop_agent(agent_id)
     end
@@ -111,7 +118,8 @@ defmodule Sagents.AgentServerToolCallbacksTest do
           function: fn _args, _ctx -> {:ok, "Results"} end
         })
 
-      stub(ChatAnthropic, :call, fn _model, _messages, _callbacks ->
+      # First call: return tool call
+      expect(ChatAnthropic, :call, 1, fn _model, _messages, _callbacks ->
         {:ok,
          [
            Message.new_assistant!(%{
@@ -127,21 +135,29 @@ defmodule Sagents.AgentServerToolCallbacksTest do
          ]}
       end)
 
+      # Second call: return plain message to end the loop
+      expect(ChatAnthropic, :call, 1, fn _model, _messages, _callbacks ->
+        {:ok, [Message.new_assistant!("Done!")]}
+      end)
+
       start_agent_with_tools(agent_id, [tool])
 
       AgentServer.add_message(agent_id, Message.new_user!("Search"))
 
-      assert_receive {:agent, {:tool_execution_started, tool_info}}
+      assert_receive {:agent, {:tool_execution_update, :executing, tool_info}}
 
       assert tool_info.name == "web_search"
       # Fallback: "web_search" -> "Web search"
       assert tool_info.display_text == "Web search"
 
+      # Wait for execution to complete before stopping
+      assert_receive {:agent, {:status_changed, :idle, _}}, 5_000
+
       stop_agent(agent_id)
     end
   end
 
-  describe "tool_execution_completed event" do
+  describe "tool_execution_update :completed event" do
     test "broadcasts when tool succeeds" do
       agent_id = "test-#{:erlang.unique_integer([:positive])}"
 
@@ -154,7 +170,8 @@ defmodule Sagents.AgentServerToolCallbacksTest do
           function: fn _args, _ctx -> {:ok, "Success result"} end
         })
 
-      stub(ChatAnthropic, :call, fn _model, _messages, _callbacks ->
+      # First call: return tool call
+      expect(ChatAnthropic, :call, 1, fn _model, _messages, _callbacks ->
         {:ok,
          [
            Message.new_assistant!(%{
@@ -170,24 +187,31 @@ defmodule Sagents.AgentServerToolCallbacksTest do
          ]}
       end)
 
+      # Second call: return plain message to end the loop
+      expect(ChatAnthropic, :call, 1, fn _model, _messages, _callbacks ->
+        {:ok, [Message.new_assistant!("Done!")]}
+      end)
+
       start_agent_with_tools(agent_id, [tool])
 
       AgentServer.add_message(agent_id, Message.new_user!("Test"))
 
-      # Should get both started and completed
-      assert_receive {:agent, {:tool_execution_started, _}}
-      assert_receive {:agent, {:tool_execution_completed, call_id, tool_result}}
+      # Should get both executing and completed
+      assert_receive {:agent, {:tool_execution_update, :executing, _}}
+      assert_receive {:agent, {:tool_execution_update, :completed, tool_info}}
 
-      assert call_id == "call_789"
-      assert %ToolResult{} = tool_result
-      # Tool result content will be ContentPart list
-      assert tool_result.is_error == false
+      assert tool_info.call_id == "call_789"
+      assert tool_info.name == "success_tool"
+      assert is_binary(tool_info.result)
+
+      # Wait for execution to complete before stopping
+      assert_receive {:agent, {:status_changed, :idle, _}}, 5_000
 
       stop_agent(agent_id)
     end
   end
 
-  describe "tool_execution_failed event" do
+  describe "tool_execution_update :failed event" do
     test "broadcasts when tool fails" do
       agent_id = "test-#{:erlang.unique_integer([:positive])}"
 
@@ -200,7 +224,8 @@ defmodule Sagents.AgentServerToolCallbacksTest do
           function: fn _args, _ctx -> {:error, "Tool error"} end
         })
 
-      stub(ChatAnthropic, :call, fn _model, _messages, _callbacks ->
+      # First call: return tool call
+      expect(ChatAnthropic, :call, 1, fn _model, _messages, _callbacks ->
         {:ok,
          [
            Message.new_assistant!(%{
@@ -216,16 +241,24 @@ defmodule Sagents.AgentServerToolCallbacksTest do
          ]}
       end)
 
+      # Second call: return plain message to end the loop
+      expect(ChatAnthropic, :call, 1, fn _model, _messages, _callbacks ->
+        {:ok, [Message.new_assistant!("Done!")]}
+      end)
+
       start_agent_with_tools(agent_id, [tool])
 
       AgentServer.add_message(agent_id, Message.new_user!("Test"))
 
-      # Should get started but then failed
-      assert_receive {:agent, {:tool_execution_started, _}}
-      assert_receive {:agent, {:tool_execution_failed, call_id, error_msg}}
+      # Should get executing but then failed
+      assert_receive {:agent, {:tool_execution_update, :executing, _}}
+      assert_receive {:agent, {:tool_execution_update, :failed, tool_info}}
 
-      assert call_id == "call_fail"
-      assert is_binary(error_msg)
+      assert tool_info.call_id == "call_fail"
+      assert is_binary(tool_info.error)
+
+      # Wait for execution to complete before stopping
+      assert_receive {:agent, {:status_changed, :idle, _}}, 5_000
 
       stop_agent(agent_id)
     end
@@ -233,7 +266,8 @@ defmodule Sagents.AgentServerToolCallbacksTest do
     test "broadcasts for non-existent tool" do
       agent_id = "test-#{:erlang.unique_integer([:positive])}"
 
-      stub(ChatAnthropic, :call, fn _model, _messages, _callbacks ->
+      # First call: return tool call for non-existent tool
+      expect(ChatAnthropic, :call, 1, fn _model, _messages, _callbacks ->
         {:ok,
          [
            Message.new_assistant!(%{
@@ -249,16 +283,24 @@ defmodule Sagents.AgentServerToolCallbacksTest do
          ]}
       end)
 
+      # Second call: return plain message to end the loop
+      expect(ChatAnthropic, :call, 1, fn _model, _messages, _callbacks ->
+        {:ok, [Message.new_assistant!("Done!")]}
+      end)
+
       # No tools!
       start_agent_with_tools(agent_id, [])
 
       AgentServer.add_message(agent_id, Message.new_user!("Test"))
 
       # Should get failed event for invalid tool
-      assert_receive {:agent, {:tool_execution_failed, call_id, error_msg}}
+      assert_receive {:agent, {:tool_execution_update, :failed, tool_info}}
 
-      assert call_id == "call_invalid"
-      assert error_msg =~ "tool not found"
+      assert tool_info.call_id == "call_invalid"
+      assert tool_info.error =~ "tool not found"
+
+      # Wait for execution to complete before stopping
+      assert_receive {:agent, {:status_changed, :idle, _}}, 5_000
 
       stop_agent(agent_id)
     end

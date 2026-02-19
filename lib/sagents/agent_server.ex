@@ -215,9 +215,8 @@ defmodule Sagents.AgentServer do
   alias Sagents.Middleware
   alias Sagents.MiddlewareEntry
   alias Sagents.Persistence.StateSerializer
+  alias Sagents.ProcessRegistry
   alias LangChain.Message.ContentPart
-
-  @registry Sagents.Registry
 
   @typedoc "Status of the agent server"
   @type status :: :idle | :running | :interrupted | :cancelled | :error
@@ -376,9 +375,9 @@ defmodule Sagents.AgentServer do
       name = AgentServer.get_name("my-agent-1")
       GenServer.call(name, :get_status)
   """
-  @spec get_name(String.t()) :: {:via, Registry, {Registry, String.t()}}
+  @spec get_name(String.t()) :: GenServer.name()
   def get_name(agent_id) when is_binary(agent_id) do
-    {:via, Registry, {@registry, {:agent_server, agent_id}}}
+    ProcessRegistry.via_tuple({:agent_server, agent_id})
   end
 
   @doc """
@@ -615,7 +614,7 @@ defmodule Sagents.AgentServer do
     # Query the Registry for agent_server entries only (not supervisors)
     # Registry stores entries as {key, pid, value}
     # We only want {:agent_server, agent_id} entries
-    Registry.select(Sagents.Registry, [
+    ProcessRegistry.select([
       {{{:agent_server, :"$1"}, :_, :_}, [], [:"$1"]}
     ])
   end
@@ -660,7 +659,7 @@ defmodule Sagents.AgentServer do
   """
   @spec agent_count() :: non_neg_integer()
   def agent_count do
-    Registry.count(Sagents.Registry)
+    ProcessRegistry.count()
   end
 
   @doc """

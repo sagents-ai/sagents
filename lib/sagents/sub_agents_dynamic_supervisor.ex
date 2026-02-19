@@ -30,7 +30,7 @@ defmodule Sagents.SubAgentsDynamicSupervisor do
 
   use DynamicSupervisor
 
-  @registry Sagents.Registry
+  alias Sagents.ProcessRegistry
 
   @doc """
   Start the SubAgentsDynamicSupervisor.
@@ -68,7 +68,7 @@ defmodule Sagents.SubAgentsDynamicSupervisor do
   """
   @spec whereis(String.t()) :: pid() | nil
   def whereis(agent_id) do
-    case Registry.lookup(@registry, {:sub_agents_supervisor, agent_id}) do
+    case ProcessRegistry.lookup({:sub_agents_supervisor, agent_id}) do
       [{pid, _}] -> pid
       [] -> nil
     end
@@ -83,7 +83,7 @@ defmodule Sagents.SubAgentsDynamicSupervisor do
       # => {:via, Registry, {Sagents.Registry, {:sub_agents_supervisor, "agent-123"}}}
   """
   def get_name(agent_id) do
-    {:via, Registry, {@registry, {:sub_agents_supervisor, agent_id}}}
+    ProcessRegistry.via_tuple({:sub_agents_supervisor, agent_id})
   end
 
   @impl true
