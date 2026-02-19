@@ -13,6 +13,11 @@ defmodule Sagents.AgentSupervisorTest do
   setup :set_mimic_global
   setup :verify_on_exit!
 
+  setup_all do
+    Mimic.copy(Agent)
+    :ok
+  end
+
   setup do
     # Mock ChatAnthropic.call to prevent real API calls
     stub(ChatAnthropic, :call, fn _model, _messages, _callbacks ->
@@ -461,6 +466,40 @@ defmodule Sagents.AgentSupervisorTest do
       assert status.inactivity_timeout == 300_000
 
       # Clean up
+      Supervisor.stop(sup_pid)
+    end
+
+    test "supervisor passes extra_callbacks to AgentServer" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+      test_pid = self()
+
+      Agent
+      |> expect(:execute, fn _agent, state, opts ->
+        callbacks = Keyword.get(opts, :callbacks, [])
+        send(test_pid, {:callbacks_received, callbacks})
+        {:ok, state}
+      end)
+
+      {:ok, sup_pid} =
+        AgentSupervisor.start_link(
+          agent: agent,
+          initial_state: State.new!(%{messages: [Message.new_user!("Hello")]}),
+          name: AgentSupervisor.get_name(agent_id),
+          extra_callbacks: %{my_custom_callback: fn _chain, _msg -> :ok end}
+        )
+
+      :ok = AgentServer.execute(agent_id)
+      assert_receive {:callbacks_received, callbacks}, 500
+
+      # Should be a list with both handler maps
+      assert is_list(callbacks)
+      assert length(callbacks) == 2
+
+      [built_in, extra] = callbacks
+      assert Map.has_key?(built_in, :on_llm_new_delta)
+      assert Map.has_key?(extra, :my_custom_callback)
+
       Supervisor.stop(sup_pid)
     end
 

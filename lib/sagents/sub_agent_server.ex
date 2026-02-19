@@ -90,12 +90,13 @@ defmodule Sagents.SubAgentServer do
 
   defmodule ServerState do
     @moduledoc false
-    defstruct [:subagent, :started_at]
+    defstruct [:subagent, :started_at, extra_callbacks: %{}]
 
     @type t :: %__MODULE__{
             subagent: SubAgent.t(),
             # Monotonic time for duration calculation (milliseconds)
-            started_at: integer() | nil
+            started_at: integer() | nil,
+            extra_callbacks: map()
           }
   end
 
@@ -245,11 +246,13 @@ defmodule Sagents.SubAgentServer do
   @impl true
   def init(opts) do
     subagent = Keyword.fetch!(opts, :subagent)
+    extra_callbacks = Keyword.get(opts, :extra_callbacks, %{})
     started_at = System.monotonic_time(:millisecond)
 
     server_state = %ServerState{
       subagent: subagent,
-      started_at: started_at
+      started_at: started_at,
+      extra_callbacks: extra_callbacks
     }
 
     Logger.debug(
@@ -267,8 +270,8 @@ defmodule Sagents.SubAgentServer do
     # Broadcast status change to running
     broadcast_subagent_event(server_state, {:subagent_status_changed, :running})
 
-    # Build callbacks for real-time message broadcasting
-    callbacks = build_llm_callbacks(server_state)
+    # Build callback handler list so both built-in and extra callbacks fire
+    callbacks = [build_llm_callbacks(server_state) | extra_callback_list(server_state)]
 
     # Delegate to SubAgent.execute with callbacks
     case SubAgent.execute(subagent, callbacks: callbacks) do
@@ -329,8 +332,8 @@ defmodule Sagents.SubAgentServer do
     # Broadcast status change to running (resuming)
     broadcast_subagent_event(server_state, {:subagent_status_changed, :running})
 
-    # Build callbacks for real-time message broadcasting
-    callbacks = build_llm_callbacks(server_state)
+    # Build callback handler list so both built-in and extra callbacks fire
+    callbacks = [build_llm_callbacks(server_state) | extra_callback_list(server_state)]
 
     # Delegate to SubAgent.resume with callbacks
     case SubAgent.resume(subagent, decisions, callbacks: callbacks) do
@@ -408,6 +411,9 @@ defmodule Sagents.SubAgentServer do
   end
 
   ## Private Helper Functions
+
+  defp extra_callback_list(%ServerState{extra_callbacks: ec}) when ec == %{}, do: []
+  defp extra_callback_list(%ServerState{extra_callbacks: ec}), do: [ec]
 
   # Build callbacks for LLMChain that broadcast message events to the parent's debug PubSub.
   # This enables real-time visibility into sub-agent execution.

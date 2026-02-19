@@ -640,6 +640,10 @@ defmodule Sagents.SubAgent do
     LLMChain.add_callback(chain, callbacks)
   end
 
+  defp maybe_add_callbacks(chain, callbacks) when is_list(callbacks) do
+    Enum.reduce(callbacks, chain, &LLMChain.add_callback(&2, &1))
+  end
+
   ## Nested Modules (Config and Compiled)
 
   defmodule Config do

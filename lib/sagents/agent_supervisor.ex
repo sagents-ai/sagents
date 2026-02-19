@@ -306,6 +306,7 @@ defmodule Sagents.AgentSupervisor do
     conversation_id = Keyword.get(config, :conversation_id)
     save_new_message_fn = Keyword.get(config, :save_new_message_fn)
     presence_module = Keyword.get(config, :presence_module)
+    extra_callbacks = Keyword.get(config, :extra_callbacks, %{})
 
     # Build AgentServer options
     agent_server_opts = [
@@ -349,6 +350,12 @@ defmodule Sagents.AgentSupervisor do
     agent_server_opts =
       if presence_module,
         do: Keyword.put(agent_server_opts, :presence_module, presence_module),
+        else: agent_server_opts
+
+    # Add extra_callbacks if provided
+    agent_server_opts =
+      if extra_callbacks != %{},
+        do: Keyword.put(agent_server_opts, :extra_callbacks, extra_callbacks),
         else: agent_server_opts
 
     # Build child specifications

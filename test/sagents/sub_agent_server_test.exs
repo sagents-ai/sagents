@@ -12,6 +12,7 @@ defmodule Sagents.SubAgentServerTest do
   setup_all do
     # Copy modules for mocking
     Mimic.copy(LLMChain)
+    Mimic.copy(SubAgent)
     :ok
   end
 
@@ -363,6 +364,97 @@ defmodule Sagents.SubAgentServerTest do
       assert elapsed >= 100
       assert is_binary(result)
       assert result == "Done"
+    end
+  end
+
+  describe "extra_callbacks" do
+    test "passes extra_callbacks as separate handler maps to SubAgent.execute" do
+      agent = create_test_agent()
+      subagent = create_subagent(agent: agent)
+      test_pid = self()
+
+      SubAgent
+      |> expect(:execute, fn ^subagent, opts ->
+        callbacks = Keyword.get(opts, :callbacks, [])
+        send(test_pid, {:callbacks_received, callbacks})
+        {:ok, %{subagent | status: :completed}}
+      end)
+
+      {:ok, _pid} =
+        SubAgentServer.start_link(
+          subagent: subagent,
+          extra_callbacks: %{my_custom_callback: fn _chain, _msg -> :ok end}
+        )
+
+      # execute is synchronous in SubAgentServer (not async like AgentServer)
+      SubAgentServer.execute(subagent.id)
+      assert_receive {:callbacks_received, callbacks}, 500
+
+      assert is_list(callbacks)
+      assert length(callbacks) == 2
+
+      [built_in, extra] = callbacks
+      assert Map.has_key?(built_in, :on_message_processed)
+      assert Map.has_key?(extra, :my_custom_callback)
+    end
+
+    test "passes extra_callbacks as separate handler maps to SubAgent.resume" do
+      agent = create_test_agent()
+      subagent = create_subagent(agent: agent)
+      test_pid = self()
+
+      interrupted_subagent = %{
+        subagent
+        | status: :interrupted,
+          interrupt_data: %{action_requests: [], hitl_tool_call_ids: []}
+      }
+
+      SubAgent
+      |> expect(:resume, fn ^interrupted_subagent, _decisions, opts ->
+        callbacks = Keyword.get(opts, :callbacks, [])
+        send(test_pid, {:resume_callbacks_received, callbacks})
+        {:ok, %{interrupted_subagent | status: :completed}}
+      end)
+
+      {:ok, _pid} =
+        SubAgentServer.start_link(
+          subagent: interrupted_subagent,
+          extra_callbacks: %{my_custom_callback: fn _chain, _msg -> :ok end}
+        )
+
+      SubAgentServer.resume(interrupted_subagent.id, [%{type: :approve}])
+      assert_receive {:resume_callbacks_received, callbacks}, 500
+
+      assert is_list(callbacks)
+      assert length(callbacks) == 2
+
+      [built_in, extra] = callbacks
+      assert Map.has_key?(built_in, :on_message_processed)
+      assert Map.has_key?(extra, :my_custom_callback)
+    end
+
+    test "passes single-element list when no extra_callbacks provided" do
+      agent = create_test_agent()
+      subagent = create_subagent(agent: agent)
+      test_pid = self()
+
+      SubAgent
+      |> expect(:execute, fn ^subagent, opts ->
+        callbacks = Keyword.get(opts, :callbacks, [])
+        send(test_pid, {:callbacks_received, callbacks})
+        {:ok, %{subagent | status: :completed}}
+      end)
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
+
+      SubAgentServer.execute(subagent.id)
+      assert_receive {:callbacks_received, callbacks}, 500
+
+      assert is_list(callbacks)
+      assert length(callbacks) == 1
+
+      [built_in] = callbacks
+      assert Map.has_key?(built_in, :on_message_processed)
     end
   end
 end

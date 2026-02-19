@@ -1018,4 +1018,120 @@ defmodule Sagents.AgentServerTest do
       # But the event should still be broadcast
     end
   end
+
+  describe "extra_callbacks" do
+    test "passes extra_callbacks as separate handler maps to Agent.execute" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+      test_pid = self()
+
+      Agent
+      |> expect(:execute, fn ^agent, state, opts ->
+        callbacks = Keyword.get(opts, :callbacks, [])
+        send(test_pid, {:callbacks_received, callbacks})
+        {:ok, state}
+      end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: State.new!(%{messages: [Message.new_user!("Hello")]}),
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil,
+          extra_callbacks: %{my_custom_callback: fn _chain, _msg -> :ok end}
+        )
+
+      assert :ok = AgentServer.execute(agent_id)
+      assert_receive {:callbacks_received, callbacks}, 500
+
+      # Callbacks should be a list of handler maps (not a single merged map)
+      assert is_list(callbacks)
+      assert length(callbacks) == 2
+
+      [built_in, extra] = callbacks
+      assert Map.has_key?(built_in, :on_llm_new_delta)
+      assert Map.has_key?(extra, :my_custom_callback)
+    end
+
+    test "passes extra_callbacks as separate handler maps to Agent.resume" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+      test_pid = self()
+
+      interrupt_data = %{
+        action_requests: [
+          %{tool_name: "write_file", arguments: %{"path" => "test.txt", "content" => "data"}}
+        ],
+        review_configs: %{}
+      }
+
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        {:interrupt, state, interrupt_data}
+      end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: State.new!(%{messages: [Message.new_user!("Write file")]}),
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil,
+          extra_callbacks: %{my_custom_callback: fn _chain, _msg -> :ok end}
+        )
+
+      :ok = AgentServer.execute(agent_id)
+      Process.sleep(50)
+      assert AgentServer.get_status(agent_id) == :interrupted
+
+      decisions = [%{type: :approve}]
+
+      Agent
+      |> expect(:resume, fn ^agent, state, ^decisions, opts ->
+        callbacks = Keyword.get(opts, :callbacks, [])
+        send(test_pid, {:resume_callbacks_received, callbacks})
+        {:ok, state}
+      end)
+
+      assert :ok = AgentServer.resume(agent_id, decisions)
+      assert_receive {:resume_callbacks_received, callbacks}, 500
+
+      assert is_list(callbacks)
+      assert length(callbacks) == 2
+
+      [built_in, extra] = callbacks
+      assert Map.has_key?(built_in, :on_llm_new_delta)
+      assert Map.has_key?(extra, :my_custom_callback)
+    end
+
+    test "passes single-element list when no extra_callbacks provided" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+      test_pid = self()
+
+      Agent
+      |> expect(:execute, fn ^agent, state, opts ->
+        callbacks = Keyword.get(opts, :callbacks, [])
+        send(test_pid, {:callbacks_received, callbacks})
+        {:ok, state}
+      end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: State.new!(%{messages: [Message.new_user!("Hello")]}),
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      assert :ok = AgentServer.execute(agent_id)
+      assert_receive {:callbacks_received, callbacks}, 500
+
+      # Only built-in handler, no extra
+      assert is_list(callbacks)
+      assert length(callbacks) == 1
+
+      [built_in] = callbacks
+      assert Map.has_key?(built_in, :on_llm_new_delta)
+    end
+  end
 end

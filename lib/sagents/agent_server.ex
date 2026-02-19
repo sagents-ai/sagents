@@ -250,7 +250,11 @@ defmodule Sagents.AgentServer do
       :save_new_message_fn,
       # Presence module for agent discovery (e.g., MyApp.Presence)
       # When set, agent tracks presence on "agent_server:presence" topic
-      :presence_module
+      :presence_module,
+      # Extra LLM callbacks to merge with built-in callbacks during execution.
+      # Allows consumers to inject observability or other callbacks alongside
+      # the built-in UI broadcasting callbacks.
+      extra_callbacks: %{}
     ]
 
     @type t :: %__MODULE__{
@@ -280,7 +284,8 @@ defmodule Sagents.AgentServer do
             conversation_id: String.t() | nil,
             save_new_message_fn:
               (String.t(), LangChain.Message.t() -> {:ok, list()} | {:error, term()}) | nil,
-            presence_module: module() | nil
+            presence_module: module() | nil,
+            extra_callbacks: map()
           }
   end
 
@@ -1266,6 +1271,9 @@ defmodule Sagents.AgentServer do
     # When set, agent will track presence on "agent_server:presence" topic
     presence_module = Keyword.get(opts, :presence_module)
 
+    # Extra LLM callbacks to merge with built-in callbacks during execution
+    extra_callbacks = Keyword.get(opts, :extra_callbacks, %{})
+
     server_state = %ServerState{
       agent: updated_agent,
       state: state,
@@ -1284,7 +1292,8 @@ defmodule Sagents.AgentServer do
       presence_config: presence_config,
       conversation_id: conversation_id,
       save_new_message_fn: save_new_message_fn,
-      presence_module: presence_module
+      presence_module: presence_module,
+      extra_callbacks: extra_callbacks
     }
 
     # Start the inactivity timer
@@ -1348,8 +1357,9 @@ defmodule Sagents.AgentServer do
 
   @impl true
   def handle_call(:execute, _from, %ServerState{status: :idle} = server_state) do
-    # Build callback handlers that will forward events via PubSub
-    callbacks = build_llm_callbacks(server_state)
+    # Build callback handler list for LangChain. Each map is a separate handler
+    # so both built-in UI callbacks and extra callbacks fire on the same event keys.
+    callbacks = [build_llm_callbacks(server_state) | extra_callback_list(server_state)]
 
     # Transition to running
     new_state = %{server_state | status: :running}
@@ -1828,6 +1838,11 @@ defmodule Sagents.AgentServer do
     server_state
   end
 
+  # Returns extra_callbacks as a list (empty list if none provided).
+  # Used to build a list of callback handler maps for LangChain.
+  defp extra_callback_list(%ServerState{extra_callbacks: ec}) when ec == %{}, do: []
+  defp extra_callback_list(%ServerState{extra_callbacks: ec}), do: [ec]
+
   @doc false
   # Build callback handlers that forward LLM events via PubSub
   defp build_llm_callbacks(%ServerState{} = server_state) do
@@ -1920,8 +1935,8 @@ defmodule Sagents.AgentServer do
   end
 
   defp resume_agent(server_state, decisions) do
-    # Build callbacks for resume execution as well
-    callbacks = build_llm_callbacks(server_state)
+    # Build callback handler list for resume execution as well
+    callbacks = [build_llm_callbacks(server_state) | extra_callback_list(server_state)]
 
     case Agent.resume(server_state.agent, server_state.state, decisions, callbacks: callbacks) do
       {:ok, new_state} ->
