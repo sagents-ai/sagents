@@ -440,7 +440,8 @@ defmodule Sagents.Middleware.SubAgent do
                 instructions: instructions,
                 compiled_agent: compiled.agent,
                 initial_messages: compiled.initial_messages || [],
-                until_tool: until_tool
+                until_tool: until_tool,
+                parent_state: context[:state]
               )
 
             agent ->
@@ -449,7 +450,8 @@ defmodule Sagents.Middleware.SubAgent do
                 parent_agent_id: config.agent_id,
                 instructions: instructions,
                 agent_config: agent,
-                until_tool: until_tool
+                until_tool: until_tool,
+                parent_state: context[:state]
               )
           end
 
@@ -537,7 +539,8 @@ defmodule Sagents.Middleware.SubAgent do
           SubAgent.new_from_config(
             parent_agent_id: config.agent_id,
             instructions: instructions,
-            agent_config: agent_config
+            agent_config: agent_config,
+            parent_state: context[:state]
           )
 
         # Fork agent context for the child process, giving middleware a chance

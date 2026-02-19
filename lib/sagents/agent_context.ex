@@ -80,7 +80,7 @@ defmodule Sagents.AgentContext do
   | **Storage** | Process dictionary | Ecto field on `State` |
   | **Persisted to DB?** | No | Yes (serialized to JSONB) |
   | **Survives restart?** | No | Yes |
-  | **Propagated to sub-agents?** | Yes (automatic) | No (intentional isolation) |
+  | **Propagated to sub-agents?** | Yes (automatic via fork) | Yes (inherited from parent) |
   | **Access pattern** | `AgentContext.fetch(:key)` | `State.get_metadata(state, key)` |
   | **Requires state param?** | No | Yes |
   | **Use for** | tenant_id, trace_id, user_id, feature flags | conversation_title, middleware working state |
