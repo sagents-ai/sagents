@@ -1079,6 +1079,78 @@ defmodule Sagents.SubAgentTest do
                "dangerous_tool" => %{allowed_decisions: [:approve, :edit, :reject]}
              }
     end
+
+    test "inherits parent metadata into subagent state" do
+      agent_config = test_agent()
+
+      parent_state =
+        Sagents.State.new!(%{
+          agent_id: "parent-1",
+          metadata: %{"user_id" => "usr-123", "organization_id" => "org-456"}
+        })
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "parent-1",
+          instructions: "Do authorized work",
+          agent_config: agent_config,
+          parent_state: parent_state
+        )
+
+      subagent_state = subagent.chain.custom_context.state
+
+      assert subagent_state.metadata["user_id"] == "usr-123"
+      assert subagent_state.metadata["organization_id"] == "org-456"
+      # State isolation: agent_id should be the sub-agent's own ID, not parent's
+      assert subagent_state.agent_id != "parent-1"
+      assert String.starts_with?(subagent_state.agent_id, "parent-1-sub-")
+    end
+
+    test "handles nil parent_state gracefully" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "parent-1",
+          instructions: "Do work",
+          agent_config: agent_config
+        )
+
+      subagent_state = subagent.chain.custom_context.state
+      assert subagent_state.metadata == %{}
+    end
+
+    test "handles parent_state with empty metadata" do
+      agent_config = test_agent()
+
+      parent_state = Sagents.State.new!(%{agent_id: "parent-1"})
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "parent-1",
+          instructions: "Do work",
+          agent_config: agent_config,
+          parent_state: parent_state
+        )
+
+      subagent_state = subagent.chain.custom_context.state
+      assert subagent_state.metadata == %{}
+    end
+
+    test "handles plain map parent_state without metadata key" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "parent-1",
+          instructions: "Do work",
+          agent_config: agent_config,
+          parent_state: %{messages: []}
+        )
+
+      subagent_state = subagent.chain.custom_context.state
+      assert subagent_state.metadata == %{}
+    end
   end
 
   describe "new_from_compiled/1" do
@@ -1175,6 +1247,45 @@ defmodule Sagents.SubAgentTest do
 
       assert %SubAgent{} = subagent
       assert subagent.chain != nil
+    end
+
+    test "inherits parent metadata into subagent state" do
+      compiled_agent = test_agent()
+
+      parent_state =
+        Sagents.State.new!(%{
+          agent_id: "parent-1",
+          metadata: %{"user_id" => "usr-123", "organization_id" => "org-456"}
+        })
+
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "parent-1",
+          instructions: "Do authorized work",
+          compiled_agent: compiled_agent,
+          parent_state: parent_state
+        )
+
+      subagent_state = subagent.chain.custom_context.state
+
+      assert subagent_state.metadata["user_id"] == "usr-123"
+      assert subagent_state.metadata["organization_id"] == "org-456"
+      assert subagent_state.agent_id != "parent-1"
+      assert String.starts_with?(subagent_state.agent_id, "parent-1-sub-")
+    end
+
+    test "handles nil parent_state gracefully for compiled" do
+      compiled_agent = test_agent()
+
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "parent-1",
+          instructions: "Do work",
+          compiled_agent: compiled_agent
+        )
+
+      subagent_state = subagent.chain.custom_context.state
+      assert subagent_state.metadata == %{}
     end
   end
 

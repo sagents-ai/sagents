@@ -164,7 +164,7 @@ defmodule Sagents.SubAgent do
   - `:parent_agent_id` - Parent's agent ID (required)
   - `:instructions` - Task description (required)
   - `:agent_config` - Agent struct with tools, model, middleware (required)
-  - `:parent_state` - Parent agent's current state (required)
+  - `:parent_state` - Parent agent's current state. Metadata will be inherited by the subagent. (optional, defaults to nil)
 
   ## Examples
 
@@ -179,6 +179,7 @@ defmodule Sagents.SubAgent do
     parent_agent_id = Keyword.fetch!(opts, :parent_agent_id)
     instructions = Keyword.fetch!(opts, :instructions)
     agent_config = Keyword.fetch!(opts, :agent_config)
+    parent_state = Keyword.get(opts, :parent_state)
 
     # Generate unique ID
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
@@ -189,6 +190,7 @@ defmodule Sagents.SubAgent do
     # Create SubAgent's OWN state - fresh and independent from parent
     # This ensures true isolation
     subagent_state = State.new!(%{agent_id: sub_agent_id})
+    subagent_state = inherit_metadata(subagent_state, parent_state)
 
     # Build custom_context with SubAgent's OWN state (not parent's!)
     # Tools in SubAgent will access/modify SubAgent's state, not parent's
@@ -230,7 +232,7 @@ defmodule Sagents.SubAgent do
   - `:parent_agent_id` - Parent's agent ID (required)
   - `:instructions` - Task description (required)
   - `:compiled_agent` - Pre-built Agent struct (required)
-  - `:parent_state` - Parent agent's current state (required)
+  - `:parent_state` - Parent agent's current state. Metadata will be inherited by the subagent. (optional, defaults to nil)
   - `:initial_messages` - Optional initial message sequence (default: [])
 
   ## Examples
@@ -248,6 +250,7 @@ defmodule Sagents.SubAgent do
     instructions = Keyword.fetch!(opts, :instructions)
     compiled_agent = Keyword.fetch!(opts, :compiled_agent)
     initial_messages = Keyword.get(opts, :initial_messages, [])
+    parent_state = Keyword.get(opts, :parent_state)
 
     # Generate unique ID
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
@@ -260,6 +263,7 @@ defmodule Sagents.SubAgent do
     # Create SubAgent's OWN state - fresh and independent from parent
     # This ensures true isolation and prevents memory waste from parent's message history
     subagent_state = State.new!(%{agent_id: sub_agent_id})
+    subagent_state = inherit_metadata(subagent_state, parent_state)
 
     # Build custom_context with SubAgent's OWN state (not parent's!)
     # Tools in SubAgent will access/modify SubAgent's state, not parent's
@@ -566,6 +570,17 @@ defmodule Sagents.SubAgent do
   end
 
   ## Private Helper Functions
+
+  # Inherit metadata from parent state into subagent state.
+  # Only metadata is inherited - messages, todos, and agent_id remain independent.
+  defp inherit_metadata(state, nil), do: state
+
+  defp inherit_metadata(state, %{metadata: parent_meta})
+       when is_map(parent_meta) and map_size(parent_meta) > 0 do
+    %{state | metadata: Map.merge(state.metadata, parent_meta)}
+  end
+
+  defp inherit_metadata(state, _), do: state
 
   defp build_initial_messages(system_prompt, instructions)
        when is_binary(system_prompt) and system_prompt != "" do

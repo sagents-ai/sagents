@@ -213,6 +213,52 @@ defmodule Sagents.Middleware.SubAgentTest do
       assert result == "Hello!"
     end
 
+    test "passes parent state metadata to pre-configured subagent", %{
+      parent_agent_id: parent_agent_id
+    } do
+      subagent_config = build_subagent_config("researcher", "Research agent")
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: parent_agent_id,
+          model: test_model(),
+          middleware: [],
+          subagents: [subagent_config]
+        )
+
+      [task_tool] = SubAgentMiddleware.tools(middleware_config)
+
+      # Mock LLMChain.run to verify metadata was inherited
+      LLMChain
+      |> stub(:run, fn chain ->
+        subagent_state = chain.custom_context.state
+        assert subagent_state.metadata["user_id"] == "usr-123"
+        assert subagent_state.metadata["organization_id"] == "org-456"
+
+        assistant_message = Message.new_assistant!(%{content: "Research done!"})
+
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_message])
+          |> Map.put(:last_message, assistant_message)
+          |> Map.put(:needs_response, false)
+
+        {:ok, updated_chain}
+      end)
+
+      args = %{"instructions" => "Research topic", "subagent_type" => "researcher"}
+
+      parent_state =
+        State.new!(%{
+          metadata: %{"user_id" => "usr-123", "organization_id" => "org-456"}
+        })
+
+      context = %{state: parent_state}
+
+      assert {:ok, result} = task_tool.function.(args, context)
+      assert result == "Research done!"
+    end
+
     test "returns error for unknown subagent type", %{parent_agent_id: parent_agent_id} do
       {:ok, middleware_config} =
         SubAgentMiddleware.init(
@@ -489,6 +535,47 @@ defmodule Sagents.Middleware.SubAgentTest do
       }
 
       # Should succeed with default prompt
+      assert {:ok, _result} = task_tool.function.(args, context)
+    end
+
+    test "passes parent state metadata to dynamic subagent", %{
+      task_tool: task_tool,
+      agent_id: _agent_id
+    } do
+      # Mock LLMChain.run to capture the chain and verify metadata
+      LLMChain
+      |> stub(:run, fn chain ->
+        # Verify the subagent's state has inherited metadata
+        subagent_state = chain.custom_context.state
+        assert subagent_state.metadata["user_id"] == "usr-123"
+
+        assistant_message = Message.new_assistant!(%{content: "Done!"})
+
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_message])
+          |> Map.put(:last_message, assistant_message)
+          |> Map.put(:needs_response, false)
+
+        {:ok, updated_chain}
+      end)
+
+      args = %{
+        "instructions" => "Do authorized work",
+        "subagent_type" => "general-purpose"
+      }
+
+      parent_state =
+        Sagents.State.new!(%{
+          metadata: %{"user_id" => "usr-123", "organization_id" => "org-456"}
+        })
+
+      context = %{
+        state: parent_state,
+        parent_middleware: [],
+        parent_tools: []
+      }
+
       assert {:ok, _result} = task_tool.function.(args, context)
     end
 
