@@ -12,7 +12,8 @@ A sage is a person who has attained wisdom and is often characterized by sound j
 - **Phoenix.Presence Integration** - Smart resource management that knows when to shut down idle agents
 - **PubSub Real-Time Events** - Stream agent state, messages, and events to multiple LiveView subscribers
 - **Middleware System** - Extensible plugin architecture for adding capabilities to agents
-- **State Persistence** - Save and restore agent conversations with code generators for database schemas
+- **Cluster-Aware Distribution** - Optional Horde-based distribution for running agents across a cluster of nodes with automatic state migration, or run locally on a single node (the default)
+- **State Persistence** - Save and restore agent conversations via optional behaviour modules for agent state and display messages
 - **Virtual Filesystem** - Isolated, in-memory file operations with optional persistence
 
 **See it in action!** Try the [agents_demo](https://github.com/sagents-ai/agents_demo) application to experience Sagents interactively, or add the [sagents_live_debugger](https://github.com/sagents-ai/sagents_live_debugger) to your app for real-time insights into agent configuration, state, and event flows.
@@ -42,12 +43,26 @@ Add `sagents` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:sagents, "~> 0.1.0"}
+    {:sagents, "~> 0.2.0"}
   ]
 end
 ```
 
 LangChain is automatically included as a dependency.
+
+### Supervision Tree Setup
+
+Add `Sagents.Supervisor` to your application's supervision tree:
+
+```elixir
+# lib/my_app/application.ex
+children = [
+  # ... your other children (Repo, PubSub, etc.)
+  Sagents.Supervisor
+]
+```
+
+This starts the process registry, dynamic supervisors, and filesystem supervisor that Sagents uses to manage agents.
 
 ## Configuration
 
@@ -468,18 +483,18 @@ Conversations.save_agent_state(conversation.id, state)
 
 ### Process Architecture
 
-Sagents uses a flexible supervision architecture built on OTP principles with Registry-based process discovery:
+Sagents uses a flexible supervision architecture built on OTP principles. Process discovery is handled by `Sagents.ProcessRegistry`, which abstracts over `Registry` (local) and `Horde.Registry` (distributed) based on your distribution config:
 
 ```
-Sagents.Application
-├── Sagents.Registry (keys: :unique)
+Sagents.Supervisor (added to your application's supervision tree)
+├── Sagents.ProcessRegistry (Registry or Horde.Registry)
 │   └── Process Discovery via Registry Keys:
 │       ├── {:agent_supervisor, agent_id}
 │       ├── {:agent_server, agent_id}
 │       ├── {:sub_agents_supervisor, agent_id}
 │       └── {:filesystem_server, scope_key}
 │
-├── AgentsDynamicSupervisor
+├── Sagents.ProcessSupervisor (DynamicSupervisor or Horde.DynamicSupervisor)
 │   ├── AgentSupervisor ("conversation-1")
 │   │   ├── AgentServer (registers as {:agent_server, "conversation-1"})
 │   │   │   └── Broadcasts on topic: "agent_server:conversation-1"
@@ -498,9 +513,9 @@ Sagents.Application
 
 #### Key Design Principles
 
-**Registry-Based Discovery**: All processes register with `Sagents.Registry` using structured tuple keys. Process lookup happens through Registry, not supervision tree traversal. This enables fast, global process discovery.
+**Registry-Based Discovery**: All processes register with `Sagents.ProcessRegistry` using structured tuple keys. Process lookup happens through the registry, not supervision tree traversal. In local mode this uses `Registry`; in distributed mode it uses `Horde.Registry` for cluster-wide discovery.
 
-**Dynamic Agent Lifecycle**: AgentSupervisor instances are started on-demand by the Coordinator via `AgentsDynamicSupervisor.start_agent_sync/1`. The `_sync` variant waits for full registration before returning, preventing race conditions when immediately subscribing to agent events.
+**Dynamic Agent Lifecycle**: AgentSupervisor instances are started on-demand by the Coordinator via `AgentSupervisor.start_link_sync/1`. The `_sync` variant waits for full registration before returning, preventing race conditions when immediately subscribing to agent events.
 
 **Independent Filesystem Scoping**: FileSystemSupervisor is **separate from agent supervision**, allowing flexible lifetime and scope management:
 - User-scoped filesystem shared across multiple conversations
@@ -542,6 +557,45 @@ AgentServer.start_link(
 
 When an agent completes and no viewers are connected, it shuts down to free resources.
 
+### State Persistence
+
+AgentServer supports optional persistence via two behaviour modules:
+
+- **`Sagents.AgentPersistence`** — Persists agent state snapshots at key lifecycle points (completion, error, interrupt, shutdown, title generation)
+- **`Sagents.DisplayMessagePersistence`** — Persists display messages and tool execution status updates
+
+```elixir
+AgentServer.start_link(
+  agent: agent,
+  initial_state: state,
+  pubsub: {Phoenix.PubSub, :my_app_pubsub},
+  agent_persistence: MyApp.AgentPersistenceImpl,
+  display_message_persistence: MyApp.DisplayMessagePersistenceImpl
+)
+```
+
+These behaviours are optional — if not configured, agents run without persistence. The `mix sagents.setup` generator creates implementations for you automatically.
+
+### Cluster Distribution
+
+By default, Sagents runs locally on a single node. For multi-node deployments, enable Horde-based distribution:
+
+```elixir
+# config/config.exs
+config :sagents, :distribution, :horde
+```
+
+When Horde is enabled, `Sagents.ProcessRegistry` and `Sagents.ProcessSupervisor` automatically switch to `Horde.Registry` and `Horde.DynamicSupervisor`, giving you:
+
+- **Automatic agent redistribution** across cluster nodes
+- **State migration** when nodes join or leave the cluster
+- **Regional clustering** for Fly.io deployments via `Sagents.Horde.ClusterConfig`
+- **Node transfer events** broadcast during redistribution so your UI can react
+
+Agents broadcast `{:agent, {:node_transferring, data}}` and `{:agent, {:node_transferred, data}}` events during Horde redistribution, allowing connected clients to follow their agent to a new node.
+
+No code changes are needed beyond the config — the `ProcessRegistry` and `ProcessSupervisor` abstractions handle backend switching transparently.
+
 ## PubSub Events
 
 AgentServer broadcasts events on topic `"agent_server:#{agent_id}"`:
@@ -557,7 +611,7 @@ AgentServer broadcasts events on topic `"agent_server:#{agent_id}"`:
 - `{:agent, {:llm_deltas, [%MessageDelta{}]}}` - Streaming tokens
 - `{:agent, {:llm_message, %Message{}}}` - Complete message
 - `{:agent, {:llm_token_usage, %TokenUsage{}}}` - Token usage info
-- `{:agent, {:display_message_saved, display_message}}` - Message persisted (requires `save_new_message_fn` callback)
+- `{:agent, {:display_message_saved, display_message}}` - Message persisted (requires `DisplayMessagePersistence` behaviour)
 
 ### Tool Events
 - `{:agent, {:tool_call_identified, tool_info}}` - Tool call detected during streaming
@@ -569,6 +623,10 @@ AgentServer broadcasts events on topic `"agent_server:#{agent_id}"`:
 - `{:agent, {:todos_updated, todos}}` - TODO list snapshot
 - `{:agent, {:state_restored, new_state}}` - State restored via `update_agent_and_state/3`
 - `{:agent, {:agent_shutdown, metadata}}` - Shutting down
+
+### Node Transfer Events (Horde only)
+- `{:agent, {:node_transferring, data}}` - Agent migrating to another node
+- `{:agent, {:node_transferred, data}}` - Agent migration completed
 
 ### Debug Events (separate topic)
 
