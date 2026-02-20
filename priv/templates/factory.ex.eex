@@ -77,11 +77,11 @@ defmodule <%= module %> do
 
   # Primary model for agent conversations
   # See: https://docs.anthropic.com/en/docs/models-overview
-  @main_model "claude-sonnet-4-5-20250929"
+  @main_model "claude-sonnet-4-6"
 
   # Title generation uses a lighter/faster model for cost efficiency
   # Haiku is ~10x cheaper than Sonnet and sufficient for generating titles
-  @title_model "claude-3-5-haiku-latest"
+  @title_model "claude-haiku-4-5"
   # Uncomment when using Bedrock fallback:
   # @title_fallback_model "us.anthropic.claude-3-5-haiku-20241022-v1:0"
 

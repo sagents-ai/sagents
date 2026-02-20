@@ -28,6 +28,8 @@ defmodule Mix.Tasks.Sagents.Setup do
     * **Persistence layer**: Context, schemas (Conversation, AgentState, DisplayMessage), migration
     * **Factory module**: Agent creation with model/middleware configuration
     * **Coordinator module**: Session management and agent lifecycle orchestration
+    * **AgentPersistence module**: Behaviour implementation for agent state persistence
+    * **DisplayMessagePersistence module**: Behaviour implementation for display message persistence
 
   ## Options
 
@@ -87,8 +89,12 @@ defmodule Mix.Tasks.Sagents.Setup do
     # Generate coordinator
     coordinator_path = generate_coordinator(config)
 
+    # Generate persistence behaviour modules
+    agent_persistence_path = generate_agent_persistence(config)
+    display_message_persistence_path = generate_display_message_persistence(config)
+
     # Print all generated files
-    all_files = [coordinator_path | persistence_files]
+    all_files = [coordinator_path, agent_persistence_path, display_message_persistence_path | persistence_files]
     print_generated_files(all_files)
 
     # Print instructions
@@ -134,6 +140,8 @@ defmodule Mix.Tasks.Sagents.Setup do
       web: opts[:web] || "#{app_module(app)}Web",
       factory_module: opts[:factory] || "#{app_module(app)}.Agents.Factory",
       coordinator_module: opts[:coordinator] || "#{app_module(app)}.Agents.Coordinator",
+      agent_persistence_module: "#{app_module(app)}.Agents.AgentPersistence",
+      display_message_persistence_module: "#{app_module(app)}.Agents.DisplayMessagePersistence",
       pubsub_module: opts[:pubsub] || "#{app_module(app)}.PubSub",
       presence_module: opts[:presence] || "#{app_module(app)}Web.Presence"
     }
@@ -144,6 +152,8 @@ defmodule Mix.Tasks.Sagents.Setup do
     files_to_generate = [
       module_to_path(config.factory_module),
       module_to_path(config.coordinator_module),
+      module_to_path(config.agent_persistence_module),
+      module_to_path(config.display_message_persistence_module),
       module_to_path(config.context_module),
       module_to_path("#{config.context_module}.Conversation"),
       module_to_path("#{config.context_module}.AgentState"),
@@ -227,6 +237,8 @@ defmodule Mix.Tasks.Sagents.Setup do
       module: config.coordinator_module,
       factory_module: config.factory_module,
       conversations_module: config.context_module,
+      agent_persistence_module: config.agent_persistence_module,
+      display_message_persistence_module: config.display_message_persistence_module,
       pubsub_module: config.pubsub_module,
       presence_module: config.presence_module,
       owner_type: config.owner_type,
@@ -243,6 +255,38 @@ defmodule Mix.Tasks.Sagents.Setup do
     File.write!(coordinator_path, content)
 
     coordinator_path
+  end
+
+  defp generate_agent_persistence(config) do
+    binding = [
+      module: config.agent_persistence_module,
+      conversations_module: config.context_module
+    ]
+
+    template_path = Application.app_dir(:sagents, "priv/templates/agent_persistence.ex.eex")
+    content = EEx.eval_file(template_path, binding)
+
+    file_path = module_to_path(config.agent_persistence_module)
+    File.mkdir_p!(Path.dirname(file_path))
+    File.write!(file_path, content)
+
+    file_path
+  end
+
+  defp generate_display_message_persistence(config) do
+    binding = [
+      module: config.display_message_persistence_module,
+      conversations_module: config.context_module
+    ]
+
+    template_path = Application.app_dir(:sagents, "priv/templates/display_message_persistence.ex.eex")
+    content = EEx.eval_file(template_path, binding)
+
+    file_path = module_to_path(config.display_message_persistence_module)
+    File.mkdir_p!(Path.dirname(file_path))
+    File.write!(file_path, content)
+
+    file_path
   end
 
   defp print_generated_files(files) do
@@ -264,15 +308,27 @@ defmodule Mix.Tasks.Sagents.Setup do
 
       Next steps:
 
-        1. Run migrations:
+        1. Add Sagents.Supervisor to your application supervision tree
+           (after Repo and PubSub, before Endpoint):
+
+           # lib/#{config.app}/application.ex
+           children = [
+             #{config.app_module}.Repo,
+             {Phoenix.PubSub, name: #{config.pubsub_module}},
+             #{config.presence_module},
+             Sagents.Supervisor,    # <-- Add this
+             #{config.web}.Endpoint
+           ]
+
+        2. Run migrations:
 
            mix ecto.migrate
 
-        2. Set environment variables:
+        3. Set environment variables:
 
            export ANTHROPIC_API_KEY=your_api_key
 
-        3. Customize the Factory (#{factory_path}):
+        4. Customize the Factory (#{factory_path}):
            * Modify base_system_prompt/0 for your agent's purpose
            * Add/remove middleware in build_middleware/2
            * Add custom tools under the :tools key in create_agent/1
