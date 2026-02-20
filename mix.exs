@@ -52,7 +52,7 @@ defmodule Sagents.MixProject do
 
       # Optional dependencies
       {:phoenix, "~> 1.7", optional: true},
-      {:horde, "~> 0.10"},
+      {:horde, "~> 0.10", optional: true},
 
       # Development dependencies
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
