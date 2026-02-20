@@ -167,6 +167,13 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
 
             case Sagents.ProcessSupervisor.start_child(supervisor, child_spec) do
               {:ok, pid} ->
+                # Wait for registry propagation before returning.
+                # Horde.Registry is eventually consistent (CRDT-based), so there's
+                # a brief window after start_child where the process is alive but
+                # not yet visible via registry lookup. Callers expect the process
+                # to be callable immediately after this function returns.
+                await_registry_propagation({:filesystem_server, scope_key}, pid)
+
                 Logger.debug(
                   "Started filesystem for scope #{inspect(scope_key)}, pid: #{inspect(pid)}"
                 )
@@ -292,6 +299,29 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
   # ============================================================================
   # Private Helpers
   # ============================================================================
+
+  # Wait for a newly started process to appear in the registry.
+  # With Horde.Registry, there's a brief propagation delay after start_child
+  # before the process is visible via lookup. With local Registry, this
+  # succeeds immediately on the first check.
+  defp await_registry_propagation(registry_key, expected_pid, attempts \\ 50) do
+    case ProcessRegistry.lookup(registry_key) do
+      [{^expected_pid, _}] ->
+        :ok
+
+      _ when attempts > 0 ->
+        Process.sleep(5)
+        await_registry_propagation(registry_key, expected_pid, attempts - 1)
+
+      _ ->
+        Logger.warning(
+          "Registry propagation timeout for #{inspect(registry_key)}, " <>
+            "pid #{inspect(expected_pid)} is alive=#{Process.alive?(expected_pid)}"
+        )
+
+        :ok
+    end
+  end
 
   # Wait for the supervisor to be registered and ready
   # Retries with exponential backoff up to the timeout
