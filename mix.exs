@@ -68,7 +68,12 @@ defmodule Sagents.MixProject do
 
   defp aliases do
     [
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "test --include cluster"
+      ]
     ]
   end
 
