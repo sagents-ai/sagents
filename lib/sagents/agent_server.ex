@@ -2410,12 +2410,13 @@ defmodule Sagents.AgentServer do
     presence_mod = server_state.presence_module
     agent_id = server_state.agent.agent_id
 
-    # Update status AND last_activity_at together
+    # Update status, last_activity_at, and node together
+    # Node is always included to ensure correct metadata after Horde migration
     case Sagents.Presence.update(
            presence_mod,
            @agent_presence_topic,
            agent_id,
-           %{status: new_status, last_activity_at: DateTime.utc_now()}
+           %{status: new_status, last_activity_at: DateTime.utc_now(), node: node()}
          ) do
       {:ok, _ref} ->
         :ok
@@ -2438,11 +2439,12 @@ defmodule Sagents.AgentServer do
     presence_mod = server_state.presence_module
     agent_id = server_state.agent.agent_id
 
+    # Node is always included to ensure correct metadata after Horde migration
     case Sagents.Presence.update(
            presence_mod,
            @agent_presence_topic,
            agent_id,
-           %{last_activity_at: DateTime.utc_now()}
+           %{last_activity_at: DateTime.utc_now(), node: node()}
          ) do
       {:ok, _ref} ->
         :ok
