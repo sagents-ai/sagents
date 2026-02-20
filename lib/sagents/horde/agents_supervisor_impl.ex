@@ -36,7 +36,7 @@ defmodule Sagents.Horde.AgentsSupervisorImpl do
   end
 
   defp members do
-    Sagents.Horde.ClusterConfig.resolve_members(__MODULE__)
+    Sagents.Horde.ClusterConfig.resolve_members(@supervisor_name)
   end
 
   defp distribution_strategy do

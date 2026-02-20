@@ -111,7 +111,7 @@ defmodule Sagents.AgentsDynamicSupervisor do
     child_spec = %{
       id: AgentSupervisor,
       start: {AgentSupervisor, :start_link, [supervisor_opts]},
-      restart: :temporary,
+      restart: :transient,
       type: :supervisor
     }
 

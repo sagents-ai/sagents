@@ -76,6 +76,7 @@ defmodule Sagents.AgentSupervisor do
 
   alias Sagents.Agent
   alias Sagents.AgentServer
+  alias Sagents.Persistence.StateSerializer
   alias Sagents.ProcessRegistry
   alias Sagents.SubAgentsDynamicSupervisor
   alias Sagents.State
@@ -298,7 +299,9 @@ defmodule Sagents.AgentSupervisor do
     end
 
     # Extract remaining configuration
-    initial_state = Keyword.get(config, :initial_state, State.new!(%{agent_id: agent.agent_id}))
+    # Resolve initial state: prefer DB-persisted state over stale child spec state
+    # This is critical for Horde redistribution where the child spec's initial_state is stale
+    {initial_state, restored} = resolve_initial_state(config, agent)
     pubsub = Keyword.get(config, :pubsub)
     debug_pubsub = Keyword.get(config, :debug_pubsub)
     inactivity_timeout = Keyword.get(config, :inactivity_timeout, 300_000)
@@ -313,6 +316,7 @@ defmodule Sagents.AgentSupervisor do
     agent_server_opts = [
       agent: agent,
       initial_state: initial_state,
+      restored: restored,
       inactivity_timeout: inactivity_timeout,
       shutdown_delay: shutdown_delay,
       id: agent_id,
@@ -382,6 +386,46 @@ defmodule Sagents.AgentSupervisor do
   end
 
   ## Private Helpers
+
+  # Resolve the initial state for the AgentServer.
+  #
+  # When agent_persistence is configured, attempts to load fresh state from the
+  # database. This is critical for Horde redistribution: when a node departs and
+  # Horde replays the child spec on a surviving node, the initial_state in the
+  # child spec is stale (captured at first startup). Loading from DB gets the
+  # latest persisted state including all messages and middleware state.
+  #
+  # Returns {state, restored} where restored is true if state was loaded from DB.
+  defp resolve_initial_state(config, agent) do
+    agent_persistence = Keyword.get(config, :agent_persistence)
+    fallback_state = Keyword.get(config, :initial_state, State.new!(%{agent_id: agent.agent_id}))
+
+    if agent_persistence do
+      case agent_persistence.load_state(agent.agent_id) do
+        {:ok, exported_state} ->
+          case StateSerializer.deserialize_state(agent.agent_id, exported_state["state"]) do
+            {:ok, state} ->
+              Logger.info(
+                "Loaded persisted state for #{agent.agent_id} (#{length(state.messages)} messages)"
+              )
+
+              {state, true}
+
+            {:error, _reason} ->
+              Logger.warning(
+                "Failed to deserialize persisted state for #{agent.agent_id}, using initial_state"
+              )
+
+              {fallback_state, false}
+          end
+
+        {:error, :not_found} ->
+          {fallback_state, false}
+      end
+    else
+      {fallback_state, false}
+    end
+  end
 
   # Wait for the AgentServer to be registered and ready
   # Retries with exponential backoff up to the timeout

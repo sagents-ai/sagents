@@ -24,6 +24,6 @@ end
 {:ok, _} = Supervisor.start_link([Sagents.TestPresence], strategy: :one_for_one)
 
 Logger.configure(level: :warning)
-ExUnit.configure(exclude: [live_call: true])
+ExUnit.configure(exclude: [live_call: true, cluster: true])
 
 ExUnit.start(capture_log: true)

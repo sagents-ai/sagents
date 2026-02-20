@@ -88,6 +88,12 @@ defmodule Sagents.AgentServer do
   - `{:agent, {:status_changed, :cancelled, nil}}` - Execution was cancelled by user
   - `{:agent, {:status_changed, :error, reason}}` - Execution failed
 
+  ### Node Transfer Events
+  - `{:agent, {:node_transferring, data}}` - Agent is about to leave this node (broadcast during terminate/2)
+    - `data.from_node` - The node the agent is leaving
+  - `{:agent, {:node_transferred, data}}` - Agent has been restored on a new node (broadcast on startup after restore)
+    - `data.to_node` - The node the agent has been restored to
+
   ### Shutdown Events
   - `{:agent, {:agent_shutdown, shutdown_data}}` - Agent is shutting down
     - `shutdown_data.agent_id` - The agent identifier
@@ -95,20 +101,15 @@ defmodule Sagents.AgentServer do
     - `shutdown_data.last_activity_at` - DateTime of last activity
     - `shutdown_data.shutdown_at` - DateTime when shutdown was initiated
 
-  ### Tool Execution Events
-  - `{:agent, {:tool_execution_started, tool_info}}` - Tool execution began
-    - `tool_info.call_id` - Unique identifier for this tool call
-    - `tool_info.name` - Technical tool name (e.g., "web_search")
-    - `tool_info.display_text` - User-friendly description (e.g., "Searching the web")
-    - `tool_info.arguments` - Tool arguments (for debug view)
+  ### Tool Execution Events (consolidated)
+  - `{:agent, {:tool_execution_update, status, tool_info}}` - Tool execution lifecycle update
+    - `status` is one of: `:executing`, `:completed`, `:failed`
+    - `:executing` → `tool_info` contains `:call_id`, `:name`, `:display_text`, `:arguments`
+    - `:completed` → `tool_info` contains `:call_id`, `:name`, `:result`
+    - `:failed` → `tool_info` contains `:call_id`, `:name`, `:error`
 
-  - `{:agent, {:tool_execution_completed, call_id, tool_result}}` - Tool succeeded
-    - `call_id` - Matches the started event
-    - `tool_result` - ToolResult struct with response
-
-  - `{:agent, {:tool_execution_failed, call_id, error}}` - Tool failed
-    - `call_id` - Matches the started event
-    - `error` - Error reason or message
+  - `{:agent, {:display_message_updated, display_msg}}` - Tool status updated in DB
+    (only when `display_message_persistence` is configured)
 
   ### LLM Streaming Events
   - `{:agent, {:llm_deltas, [%MessageDelta{}]}}` - Streaming tokens/deltas received (list
@@ -118,9 +119,8 @@ defmodule Sagents.AgentServer do
 
   ### Message Persistence Events
   - `{:agent, {:display_message_saved, display_message}}` - Broadcast after message is
-    persisted via save_new_message_fn callback (only when callback is configured
-    and succeeds). The `{:llm_message, ...}` event is also broadcast alongside
-    this event for backward compatibility
+    persisted via `display_message_persistence` behaviour.
+    The `{:llm_message, ...}` event is also broadcast alongside this event
 
   **Note**: File events are NOT broadcast by AgentServer. Files are managed by
   `FileSystemServer` which provides its own event handling mechanism.
@@ -246,10 +246,16 @@ defmodule Sagents.AgentServer do
       :middleware_registry,
       :presence_config,
       :conversation_id,
-      :save_new_message_fn,
+      # Module implementing Sagents.AgentPersistence, or nil
+      :agent_persistence,
+      # Module implementing Sagents.DisplayMessagePersistence, or nil
+      :display_message_persistence,
       # Presence module for agent discovery (e.g., MyApp.Presence)
       # When set, agent tracks presence on "agent_server:presence" topic
-      :presence_module
+      :presence_module,
+      # Whether this server was restored from persisted state (vs fresh start)
+      # Used to broadcast :node_transferred event on startup after Horde migration
+      restored: false
     ]
 
     @type t :: %__MODULE__{
@@ -277,9 +283,10 @@ defmodule Sagents.AgentServer do
               }
               | nil,
             conversation_id: String.t() | nil,
-            save_new_message_fn:
-              (String.t(), LangChain.Message.t() -> {:ok, list()} | {:error, term()}) | nil,
-            presence_module: module() | nil
+            agent_persistence: module() | nil,
+            display_message_persistence: module() | nil,
+            presence_module: module() | nil,
+            restored: boolean()
           }
   end
 
@@ -301,8 +308,8 @@ defmodule Sagents.AgentServer do
     Set to `nil` or `:infinity` to disable automatic shutdown
   - `:shutdown_delay` - Delay in milliseconds to allow the supervisor to gracefully stop all children (default: 5000)
   - `:conversation_id` - Optional conversation identifier for message persistence (default: nil)
-  - `:save_new_message_fn` - Optional callback function for persisting messages (default: nil)
-    Function signature: `(conversation_id :: String.t(), message :: LangChain.Message.t()) -> {:ok, [saved_messages]} | {:error, reason}`
+  - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` for state snapshots (default: nil)
+  - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` for display messages (default: nil)
 
   ## Examples
 
@@ -365,6 +372,18 @@ defmodule Sagents.AgentServer do
     {name, opts} = Keyword.pop(opts, :name, default_name)
 
     GenServer.start_link(__MODULE__, opts, name: name)
+  end
+
+  @doc false
+  def child_spec(opts) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      type: :worker,
+      restart: :transient,
+      # Allow 30s for graceful shutdown (including waiting for active LLM connections)
+      shutdown: 30_000
+    }
   end
 
   @doc """
@@ -839,6 +858,7 @@ defmodule Sagents.AgentServer do
     - `:status` - Current status atom (:idle, :running, :interrupted, :error, :cancelled)
     - `:last_activity_at` - DateTime of last activity (may be nil)
     - `:conversation_id` - Conversation ID (may be nil)
+    - `:node` - The Erlang node where this agent is running
 
   ## Examples
 
@@ -1205,7 +1225,7 @@ defmodule Sagents.AgentServer do
       {:ok, state} ->
         # Update agent_id to match the runtime identifier
         agent = %{agent | agent_id: agent_id}
-        build_server_state(agent, state, opts)
+        build_server_state(agent, state, Keyword.put(opts, :restored, true))
 
       {:error, reason} ->
         {:stop, {:restore_failed, reason}}
@@ -1257,9 +1277,12 @@ defmodule Sagents.AgentServer do
     # Update agent with middleware entries
     updated_agent = %{agent | middleware: middleware_entries}
 
-    # Extract conversation_id and save_new_message_fn from opts
+    # Extract conversation_id from opts
     conversation_id = Keyword.get(opts, :conversation_id)
-    save_new_message_fn = Keyword.get(opts, :save_new_message_fn)
+
+    # Extract persistence behaviour modules
+    agent_persistence = Keyword.get(opts, :agent_persistence)
+    display_message_persistence = Keyword.get(opts, :display_message_persistence)
 
     # Extract presence module for agent discovery
     # When set, agent will track presence on "agent_server:presence" topic
@@ -1282,8 +1305,10 @@ defmodule Sagents.AgentServer do
       middleware_registry: middleware_registry,
       presence_config: presence_config,
       conversation_id: conversation_id,
-      save_new_message_fn: save_new_message_fn,
-      presence_module: presence_module
+      agent_persistence: agent_persistence,
+      display_message_persistence: display_message_persistence,
+      presence_module: presence_module,
+      restored: Keyword.get(opts, :restored, false)
     }
 
     # Start the inactivity timer
@@ -1302,6 +1327,12 @@ defmodule Sagents.AgentServer do
     Enum.each(server_state.agent.middleware, fn entry ->
       Middleware.apply_on_server_start(server_state.state, entry)
     end)
+
+    # If this server was restored from persisted state (e.g., Horde migration),
+    # broadcast a node_transferred event so observers know it landed here
+    if server_state.restored do
+      broadcast_event(server_state, {:node_transferred, %{to_node: node()}})
+    end
 
     # Broadcast initial :idle status so UI knows agent is ready
     broadcast_event(server_state, {:status_changed, :idle, nil})
@@ -1459,7 +1490,8 @@ defmodule Sagents.AgentServer do
     metadata = %{
       status: server_state.status,
       last_activity_at: server_state.last_activity_at,
-      conversation_id: server_state.conversation_id
+      conversation_id: server_state.conversation_id,
+      node: node()
     }
 
     {:reply, {:ok, metadata}, server_state}
@@ -1625,6 +1657,16 @@ defmodule Sagents.AgentServer do
   @impl true
   def handle_cast({:publish_event, event}, server_state) do
     broadcast_event(server_state, event)
+
+    # Persist state when conversation title is generated
+    case event do
+      {:conversation_title_generated, _title, _agent_id} ->
+        maybe_persist_state(server_state, :on_title_generated)
+
+      _ ->
+        :ok
+    end
+
     {:noreply, server_state}
   end
 
@@ -1795,17 +1837,83 @@ defmodule Sagents.AgentServer do
   end
 
   @impl true
-  def terminate(_reason, server_state) do
+  def terminate(reason, server_state) do
+    agent_id = server_state.agent.agent_id
+
+    # If agent is actively running (has an LLM connection), wait for it to finish
+    # This prevents corrupting conversations by killing TCP connections mid-stream
+    if server_state.status == :running and server_state.task != nil do
+      Logger.warning(
+        "AgentServer #{agent_id} terminating while status is :running. " <>
+          "Waiting for active task to complete. Reason: #{inspect(reason)}"
+      )
+
+      # Wait up to 25 seconds for the task to complete naturally
+      # (must be less than the 30s shutdown timeout in child_spec)
+      wait_for_task_completion(server_state.task, 25_000)
+    end
+
     # Cancel timer if present
-    cancel_inactivity_timer(server_state)
+    server_state = cancel_inactivity_timer(server_state)
+
+    # Best-effort persistence on shutdown — DB may also be shutting down
+    try do
+      maybe_persist_state(server_state, :on_shutdown)
+    catch
+      _, _ -> :ok
+    end
+
+    # Explicitly untrack from presence before exiting.
+    # This is a synchronous call to the Tracker, ensuring the presence_diff
+    # is broadcast before this process exits. Without this, the Tracker only
+    # learns about the exit via async :DOWN messages, which may not be processed
+    # before the Presence supervisor itself is terminated during shutdown.
+    try do
+      untrack_presence(server_state)
+    catch
+      _, _ -> :ok
+    end
+
+    # Broadcast node transfer and shutdown events.
+    # PubSub may already be shut down if the application is stopping,
+    # so we rescue any errors from broadcasting.
+    try do
+      broadcast_event(server_state, {:node_transferring, %{from_node: node()}})
+
+      broadcast_event(
+        server_state,
+        {:agent_shutdown, %{reason: reason, status: server_state.status}}
+      )
+    rescue
+      _ -> :ok
+    end
 
     # FileSystemServer traps exits and will flush_all in its own terminate/2
-
     # SubAgentsDynamicSupervisor will be stopped by AgentSupervisor
     # due to rest_for_one strategy
 
     :ok
   end
+
+  # Wait for an active Task to complete, with a timeout
+  defp wait_for_task_completion(%Task{ref: ref}, max_wait_ms) do
+    receive do
+      {^ref, _result} ->
+        # Task completed, clean up the DOWN message
+        Process.demonitor(ref, [:flush])
+        :ok
+
+      {:DOWN, ^ref, :process, _pid, _reason} ->
+        # Task process died
+        :ok
+    after
+      max_wait_ms ->
+        Logger.warning("Timed out waiting for active task during shutdown")
+        :ok
+    end
+  end
+
+  defp wait_for_task_completion(nil, _max_wait_ms), do: :ok
 
   ## Private Functions
 
@@ -1874,17 +1982,22 @@ defmodule Sagents.AgentServer do
       # The :on_tool_call_identified callback already fired earlier during streaming
       on_tool_execution_started: fn _chain, tool_call, _function ->
         tool_info = %{
-          # Will always have call_id when executing
           call_id: tool_call.call_id,
           name: tool_call.name,
           display_text: tool_call.display_text,
           arguments: tool_call.arguments
         }
 
-        broadcast_event(server_state, {:tool_execution_started, tool_info})
+        broadcast_tool_event(server_state, :executing, tool_info)
       end,
       on_tool_execution_completed: fn _chain, tool_call, tool_result ->
-        broadcast_event(server_state, {:tool_execution_completed, tool_call.call_id, tool_result})
+        tool_info = %{
+          call_id: tool_call.call_id,
+          name: tool_call.name,
+          result: inspect(tool_result)
+        }
+
+        broadcast_tool_event(server_state, :completed, tool_info)
       end,
       on_tool_execution_failed: fn _chain, tool_call, error ->
         error_msg =
@@ -1895,7 +2008,13 @@ defmodule Sagents.AgentServer do
             _ -> inspect(error)
           end
 
-        broadcast_event(server_state, {:tool_execution_failed, tool_call.call_id, error_msg})
+        tool_info = %{
+          call_id: tool_call.call_id,
+          name: tool_call.name,
+          error: error_msg
+        }
+
+        broadcast_tool_event(server_state, :failed, tool_info)
       end
     }
   end
@@ -1946,6 +2065,9 @@ defmodule Sagents.AgentServer do
         error: nil
     }
 
+    # Persist agent state on completion
+    maybe_persist_state(updated_state, :on_completion)
+
     broadcast_event(updated_state, {:status_changed, :idle, nil})
     update_presence_status(updated_state, :idle)
 
@@ -1969,6 +2091,9 @@ defmodule Sagents.AgentServer do
         interrupt_data: interrupt_data
     }
 
+    # Persist agent state on interrupt
+    maybe_persist_state(updated_state, :on_interrupt)
+
     broadcast_event(updated_state, {:status_changed, :interrupted, interrupt_data})
     update_presence_status(updated_state, :interrupted)
 
@@ -1987,6 +2112,9 @@ defmodule Sagents.AgentServer do
       | status: :error,
         error: reason
     }
+
+    # Persist agent state on error
+    maybe_persist_state(updated_state, :on_error)
 
     broadcast_event(updated_state, {:status_changed, :error, reason})
     update_presence_status(updated_state, :error)
@@ -2050,51 +2178,73 @@ defmodule Sagents.AgentServer do
     end
   end
 
-  # Save message via callback and broadcast display messages
-  defp maybe_save_and_broadcast_message(server_state, message) do
-    Logger.debug(
-      "maybe_save_and_broadcast_message called - callback: #{inspect(not is_nil(server_state.save_new_message_fn))}, conversation_id: #{inspect(server_state.conversation_id)}, message role: #{message.role}"
-    )
+  # Persist agent state via the AgentPersistence behaviour (if configured)
+  defp maybe_persist_state(%ServerState{} = server_state, context) do
+    case server_state.agent_persistence do
+      nil ->
+        :ok
 
-    if server_state.save_new_message_fn && server_state.conversation_id do
-      Logger.debug("Calling save callback for conversation #{server_state.conversation_id}")
+      module ->
+        state_data =
+          StateSerializer.serialize_server_state(
+            server_state.agent,
+            server_state.state
+          )
+
+        case module.persist_state(server_state.agent.agent_id, state_data, context) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.error(
+              "Agent persistence failed for #{server_state.agent.agent_id} (#{context}): #{inspect(reason)}"
+            )
+
+            :ok
+        end
+    end
+  end
+
+  # Broadcast tool event and persist via DisplayMessagePersistence (if configured)
+  defp broadcast_tool_event(%ServerState{} = server_state, status, tool_info) do
+    # Broadcast consolidated event
+    broadcast_event(server_state, {:tool_execution_update, status, tool_info})
+
+    # Persist if configured
+    if server_state.display_message_persistence do
+      case server_state.display_message_persistence.update_tool_status(status, tool_info) do
+        {:ok, updated_msg} ->
+          broadcast_event(server_state, {:display_message_updated, updated_msg})
+
+        {:error, _} ->
+          :ok
+      end
+    end
+  end
+
+  # Save message via DisplayMessagePersistence behaviour and broadcast display messages
+  defp maybe_save_and_broadcast_message(server_state, message) do
+    if server_state.display_message_persistence && server_state.conversation_id do
+      module = server_state.display_message_persistence
 
       try do
-        case server_state.save_new_message_fn.(server_state.conversation_id, message) do
+        case module.save_message(server_state.conversation_id, message) do
           {:ok, display_messages} when is_list(display_messages) ->
-            # Broadcast individual events
             Enum.each(display_messages, fn display_msg ->
               broadcast_event(server_state, {:display_message_saved, display_msg})
             end)
 
-            # Also broadcast the original message event which allows UI to
-            # handle message completion
             broadcast_event(server_state, {:llm_message, message})
-            :ok
 
           {:error, reason} ->
-            Logger.error("Failed to save message: #{inspect(reason)}")
-            # When callback fails, don't broadcast any message events
-            # The UI should handle the absence of events appropriately
-            :ok
-
-          other ->
-            Logger.error(
-              "Invalid callback return format: #{inspect(other)}. Expected {:ok, list()} or {:error, term()}"
-            )
-
-            # When callback returns invalid format, don't broadcast any message events
-            :ok
+            Logger.error("Display message persistence failed: #{inspect(reason)}")
         end
       rescue
         exception ->
-          Logger.error("Callback raised exception: #{inspect(exception)}")
-          # When callback raises exception, don't broadcast any message events
-          :ok
+          Logger.error("Display message persistence raised exception: #{inspect(exception)}")
       end
     else
-      Logger.debug("No save callback configured, using original :llm_message event")
-      # No save function configured, use original event
+      # No persistence configured — just broadcast the message event
       broadcast_event(server_state, {:llm_message, message})
     end
   end
@@ -2234,7 +2384,6 @@ defmodule Sagents.AgentServer do
            presence_mod,
            @agent_presence_topic,
            agent_id,
-           self(),
            metadata
          ) do
       {:ok, _ref} ->
@@ -2306,5 +2455,16 @@ defmodule Sagents.AgentServer do
         Logger.warning("Failed to update presence activity for #{agent_id}: #{inspect(reason)}")
         :ok
     end
+  end
+
+  # Explicitly untrack presence during terminate/2.
+  # This is synchronous, ensuring the presence_diff is broadcast before the process exits.
+  defp untrack_presence(%ServerState{presence_module: nil}), do: :ok
+
+  defp untrack_presence(%ServerState{} = server_state) do
+    presence_mod = server_state.presence_module
+    agent_id = server_state.agent.agent_id
+
+    Sagents.Presence.untrack(presence_mod, @agent_presence_topic, agent_id)
   end
 end
