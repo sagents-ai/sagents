@@ -322,10 +322,10 @@ The interrupt pauses execution and broadcasts to subscribers. Resume with:
 
 ```elixir
 # User approves
-AgentServer.resume(agent_id, %{approved: true})
+AgentServer.resume(agent_id, [%{type: :approve}])
 
 # User rejects - execution continues but message is removed
-AgentServer.resume(agent_id, %{approved: false})
+AgentServer.resume(agent_id, [%{type: :reject}])
 ```
 
 ## Async Operations
