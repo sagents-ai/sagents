@@ -111,6 +111,107 @@ defmodule Sagents.Middleware.SubAgentTest do
     end
   end
 
+  describe "init/1 with until_tool" do
+    test "builds until_tool_map from Config with until_tool" do
+      config =
+        SubAgent.Config.new!(%{
+          name: "researcher",
+          description: "Research agent",
+          system_prompt: "Test agent researcher",
+          tools: [test_tool()],
+          until_tool: "submit_findings",
+          until_tool_max_runs: 10
+        })
+
+      opts = [
+        agent_id: "parent",
+        model: test_model(),
+        middleware: [],
+        subagents: [config]
+      ]
+
+      assert {:ok, middleware_config} = SubAgentMiddleware.init(opts)
+      assert is_map(middleware_config.until_tool_map)
+      assert Map.has_key?(middleware_config.until_tool_map, "researcher")
+
+      assert middleware_config.until_tool_map["researcher"] == %{
+               until_tool: "submit_findings",
+               max_runs: 10
+             }
+    end
+
+    test "builds until_tool_map from Compiled with until_tool" do
+      compiled =
+        SubAgent.Compiled.new!(%{
+          name: "coder",
+          description: "Code agent",
+          agent:
+            Sagents.Agent.new!(%{
+              model: test_model(),
+              system_prompt: "Test agent",
+              replace_default_middleware: true,
+              middleware: []
+            }),
+          until_tool: ["submit_code", "done"],
+          until_tool_max_runs: 15
+        })
+
+      opts = [
+        agent_id: "parent",
+        model: test_model(),
+        middleware: [],
+        subagents: [compiled]
+      ]
+
+      assert {:ok, middleware_config} = SubAgentMiddleware.init(opts)
+      assert Map.has_key?(middleware_config.until_tool_map, "coder")
+
+      assert middleware_config.until_tool_map["coder"] == %{
+               until_tool: ["submit_code", "done"],
+               max_runs: 15
+             }
+    end
+
+    test "until_tool_map is empty when no configs have until_tool" do
+      config = build_subagent_config("agent", "Test agent")
+
+      opts = [
+        agent_id: "parent",
+        model: test_model(),
+        middleware: [],
+        subagents: [config]
+      ]
+
+      assert {:ok, middleware_config} = SubAgentMiddleware.init(opts)
+      assert middleware_config.until_tool_map == %{}
+    end
+
+    test "until_tool_map only includes configs with until_tool set" do
+      config_with =
+        SubAgent.Config.new!(%{
+          name: "with_until",
+          description: "Has until_tool",
+          system_prompt: "Test",
+          tools: [test_tool()],
+          until_tool: "submit"
+        })
+
+      config_without = build_subagent_config("without_until", "No until_tool")
+
+      opts = [
+        agent_id: "parent",
+        model: test_model(),
+        middleware: [],
+        subagents: [config_with, config_without]
+      ]
+
+      assert {:ok, middleware_config} = SubAgentMiddleware.init(opts)
+      assert map_size(middleware_config.until_tool_map) == 1
+      assert Map.has_key?(middleware_config.until_tool_map, "with_until")
+      refute Map.has_key?(middleware_config.until_tool_map, "without_until")
+    end
+  end
+
   describe "system_prompt/1" do
     test "returns guidance for using SubAgents" do
       prompt = SubAgentMiddleware.system_prompt(nil)

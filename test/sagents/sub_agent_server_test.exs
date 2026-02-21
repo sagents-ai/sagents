@@ -115,6 +115,76 @@ defmodule Sagents.SubAgentServerTest do
     end
   end
 
+  describe "execute/1 - until_tool 3-tuple" do
+    test "returns {:ok, result, tool_result} when SubAgent has until_tool_names" do
+      submit_tool =
+        LangChain.Function.new!(%{
+          name: "submit",
+          description: "Submit result",
+          function: fn _args, _context -> {:ok, "submit_output"} end
+        })
+
+      agent = create_test_agent(tools: [submit_tool])
+      subagent = create_subagent(agent: agent)
+
+      # Set until_tool_names on the struct (as would happen via new_from_config with until_tool opt)
+      subagent_with_until = %{subagent | until_tool_names: ["submit"], until_tool_max_runs: 25}
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent_with_until)
+
+      # Mock LLMChain.run to return assistant with tool call
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "call_1",
+          name: "submit",
+          arguments: %{"data" => "result"},
+          status: :complete
+        })
+
+      assistant_message = Message.new_assistant!(%{tool_calls: [tool_call]})
+
+      LLMChain
+      |> stub(:run, fn chain ->
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_message])
+          |> Map.put(:last_message, assistant_message)
+          |> Map.put(:needs_response, true)
+
+        {:ok, updated_chain}
+      end)
+
+      assert {:ok, result, tool_result} = SubAgentServer.execute(subagent_with_until.id)
+      assert is_binary(result)
+      assert result == "submit_output"
+      assert %LangChain.Message.ToolResult{name: "submit"} = tool_result
+      assert SubAgentServer.get_status(subagent_with_until.id) == :completed
+    end
+
+    test "backward compat: SubAgent without until_tool_names returns 2-tuple" do
+      agent = create_test_agent()
+      subagent = create_subagent(agent: agent)
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
+
+      assistant_message = Message.new_assistant!(%{content: "Done"})
+
+      updated_chain =
+        subagent.chain
+        |> Map.put(:messages, subagent.chain.messages ++ [assistant_message])
+        |> Map.put(:last_message, assistant_message)
+        |> Map.put(:needs_response, false)
+
+      LLMChain
+      |> stub(:run, fn _chain ->
+        {:ok, updated_chain}
+      end)
+
+      assert {:ok, result} = SubAgentServer.execute(subagent.id)
+      assert result == "Done"
+    end
+  end
+
   describe "execute/1 - error case" do
     test "returns {:error, reason} when chain fails" do
       agent = create_test_agent()
@@ -236,6 +306,69 @@ defmodule Sagents.SubAgentServerTest do
       SubAgentServer.resume(interrupted_subagent.id, [%{type: :approve}])
 
       # Verify final status
+      assert SubAgentServer.get_status(interrupted_subagent.id) == :completed
+    end
+  end
+
+  describe "resume/2 - until_tool 3-tuple" do
+    test "returns {:ok, result, tool_result} after interrupt in until_tool mode" do
+      submit_tool =
+        LangChain.Function.new!(%{
+          name: "submit",
+          description: "Submit result",
+          function: fn _args, _context -> {:ok, "submit_output"} end
+        })
+
+      agent = create_test_agent(tools: [submit_tool])
+      subagent = create_subagent(agent: agent)
+
+      # Simulate an interrupted subagent with until_tool_names set
+      interrupted_subagent = %{
+        subagent
+        | status: :interrupted,
+          interrupt_data: %{action_requests: [], hitl_tool_call_ids: []},
+          until_tool_names: ["submit"],
+          until_tool_max_runs: 25
+      }
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: interrupted_subagent)
+
+      # Mock LLMChain.execute_tool_calls_with_decisions
+      LLMChain
+      |> stub(:execute_tool_calls_with_decisions, fn chain, _tool_calls, _decisions ->
+        chain
+      end)
+
+      # Mock LLMChain.run to return assistant with tool call to "submit"
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "call_1",
+          name: "submit",
+          arguments: %{"data" => "result"},
+          status: :complete
+        })
+
+      assistant_message = Message.new_assistant!(%{tool_calls: [tool_call]})
+
+      LLMChain
+      |> stub(:run, fn chain ->
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_message])
+          |> Map.put(:last_message, assistant_message)
+          |> Map.put(:needs_response, true)
+
+        {:ok, updated_chain}
+      end)
+
+      decisions = [%{type: :approve}]
+
+      assert {:ok, result, tool_result} =
+               SubAgentServer.resume(interrupted_subagent.id, decisions)
+
+      assert is_binary(result)
+      assert result == "submit_output"
+      assert %LangChain.Message.ToolResult{name: "submit"} = tool_result
       assert SubAgentServer.get_status(interrupted_subagent.id) == :completed
     end
   end

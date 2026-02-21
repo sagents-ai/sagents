@@ -180,12 +180,26 @@ defmodule Sagents.Middleware.SubAgent do
               "Use when you need to delegate independent work that can run in isolation."
           )
 
+        # Build until_tool_map from configs that have until_tool set
+        until_tool_map =
+          Enum.reduce(subagents, %{}, fn config, acc ->
+            if config.until_tool do
+              Map.put(acc, config.name, %{
+                until_tool: config.until_tool,
+                max_runs: config.until_tool_max_runs || 25
+              })
+            else
+              acc
+            end
+          end)
+
         config = %{
           agent_map: agent_map_with_general,
           descriptions: descriptions_with_general,
           agent_id: agent_id,
           model: model,
-          block_middleware: block_middleware
+          block_middleware: block_middleware,
+          until_tool_map: until_tool_map
         }
 
         {:ok, config}
@@ -412,6 +426,19 @@ defmodule Sagents.Middleware.SubAgent do
         start_dynamic_subagent(instructions, args, context, config)
 
       {:ok, agent_config} ->
+        # Look up until_tool configuration for this subagent type
+        until_tool_config = Map.get(config[:until_tool_map] || %{}, subagent_type)
+
+        until_tool_opts =
+          if until_tool_config do
+            [
+              until_tool: until_tool_config.until_tool,
+              until_tool_max_runs: until_tool_config.max_runs
+            ]
+          else
+            []
+          end
+
         # Create SubAgent struct from pre-configured agent
         # Check if it's a Compiled struct (with initial_messages) or just an Agent
         subagent =
@@ -419,18 +446,22 @@ defmodule Sagents.Middleware.SubAgent do
             %SubAgent.Compiled{} = compiled ->
               # Use new_from_compiled to include initial_messages
               SubAgent.new_from_compiled(
-                parent_agent_id: config.agent_id,
-                instructions: instructions,
-                compiled_agent: compiled.agent,
-                initial_messages: compiled.initial_messages || []
+                [
+                  parent_agent_id: config.agent_id,
+                  instructions: instructions,
+                  compiled_agent: compiled.agent,
+                  initial_messages: compiled.initial_messages || []
+                ] ++ until_tool_opts
               )
 
             agent ->
               # Regular Agent struct from Config
               SubAgent.new_from_config(
-                parent_agent_id: config.agent_id,
-                instructions: instructions,
-                agent_config: agent
+                [
+                  parent_agent_id: config.agent_id,
+                  instructions: instructions,
+                  agent_config: agent
+                ] ++ until_tool_opts
               )
           end
 
@@ -616,6 +647,11 @@ defmodule Sagents.Middleware.SubAgent do
     Logger.debug("Executing SubAgent: #{sub_agent_id}")
 
     case SubAgentServer.execute(sub_agent_id) do
+      {:ok, final_result, tool_result} ->
+        # until_tool mode: return 3-tuple so LangChain stores processed_content
+        Logger.debug("SubAgent #{sub_agent_id} completed (until_tool matched)")
+        {:ok, final_result, tool_result.processed_content}
+
       {:ok, final_result} ->
         # SubAgent completed successfully
         Logger.debug("SubAgent #{sub_agent_id} completed")
@@ -650,6 +686,11 @@ defmodule Sagents.Middleware.SubAgent do
     subagent_type = Map.get(context.resume_info, :subagent_type, "unknown")
 
     case SubAgentServer.resume(sub_agent_id, decisions) do
+      {:ok, final_result, tool_result} ->
+        # until_tool mode after resume: return 3-tuple so LangChain stores processed_content
+        Logger.debug("SubAgent #{sub_agent_id} completed after resume (until_tool matched)")
+        {:ok, final_result, tool_result.processed_content}
+
       {:ok, final_result} ->
         # SubAgent completed after approval
         Logger.debug("SubAgent #{sub_agent_id} completed after resume")

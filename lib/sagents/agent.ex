@@ -42,6 +42,7 @@ defmodule Sagents.Agent do
   require Logger
 
   alias __MODULE__
+  alias Sagents.AgentUtils
   alias Sagents.Middleware
   alias Sagents.State
   alias LangChain.LangChainError
@@ -387,9 +388,17 @@ defmodule Sagents.Agent do
   2. LLM execution
   3. after_model hooks (in reverse order)
 
+  ## Options
+
+  - `:callbacks` - Map of callback functions
+  - `:until_tool` - Tool name (string) or list of names. When set, the agent loops
+    until one of the named tools is called, then returns `{:ok, state, tool_result}`.
+  - `:max_runs` - Maximum LLM iterations for `:until_tool` mode (default: 25)
+
   ## Returns
 
-  - `{:ok, state}` - Normal completion
+  - `{:ok, state}` - Normal completion (no `:until_tool`)
+  - `{:ok, state, tool_result}` - Target tool was called (`:until_tool` mode)
   - `{:interrupt, state, interrupt_data}` - Execution paused for human approval
   - `{:error, reason}` - Execution failed
 
@@ -418,12 +427,22 @@ defmodule Sagents.Agent do
     state = %{state | agent_id: agent.agent_id}
 
     callbacks = Keyword.get(opts, :callbacks)
+    until_tool_names = AgentUtils.normalize_until_tool(Keyword.get(opts, :until_tool))
+    max_runs = Keyword.get(opts, :max_runs, 25)
 
-    with {:ok, prepared_state} <- apply_before_model_hooks(state, agent.middleware) do
+    with :ok <- AgentUtils.validate_until_tool_names(until_tool_names, agent.tools),
+         {:ok, prepared_state} <- apply_before_model_hooks(state, agent.middleware) do
       # Fire callback with post-middleware state (before LLM call)
       fire_callback(callbacks, :on_after_middleware, [prepared_state])
 
-      case execute_model(agent, prepared_state, callbacks) do
+      case execute_model(agent, prepared_state, callbacks, until_tool_names, max_runs) do
+        {:ok, response_state, tool_result} ->
+          # until_tool completion - run after_model hooks then re-attach tool_result
+          case apply_after_model_hooks(response_state, agent.middleware) do
+            {:ok, final_state} -> {:ok, final_state, tool_result}
+            other -> other
+          end
+
         {:ok, response_state} ->
           # Normal completion - run after_model hooks
           apply_after_model_hooks(response_state, agent.middleware)
@@ -448,6 +467,12 @@ defmodule Sagents.Agent do
   - `agent` - The agent instance
   - `state` - The state at the point of interruption
   - `decisions` - List of decision maps from human reviewer
+  - `opts` - Options forwarded to `execute/3` (e.g., `:callbacks`, `:until_tool`, `:max_runs`)
+
+  **Important**: If the original `execute/3` call used `:until_tool`, you must pass the
+  same option to `resume/4` so the continued execution uses the until_tool loop:
+
+      Agent.resume(agent, state, decisions, until_tool: "submit")
 
   ## Decision Format
 
@@ -635,11 +660,26 @@ defmodule Sagents.Agent do
     end
   end
 
-  defp execute_model(%Agent{} = agent, %State{} = state, callbacks) do
+  defp execute_model(agent, state, callbacks, until_tool_names, max_runs)
+
+  defp execute_model(
+         %Agent{} = agent,
+         %State{} = state,
+         callbacks,
+         until_tool_names,
+         max_runs
+       ) do
     with {:ok, langchain_messages} <- validate_messages(state.messages),
          {:ok, chain} <- build_chain(agent, langchain_messages, state, callbacks),
-         result <- execute_chain(chain, agent.middleware, agent) do
+         result <- execute_chain(chain, agent.middleware, agent, until_tool_names, max_runs) do
       case result do
+        {:ok, executed_chain, tool_result} ->
+          # until_tool match - extract state and pass tool_result through
+          case extract_state_from_chain(executed_chain, state) do
+            {:ok, response_state} -> {:ok, response_state, tool_result}
+            {:error, reason} -> {:error, reason}
+          end
+
         {:ok, executed_chain} ->
           extract_state_from_chain(executed_chain, state)
 
@@ -744,13 +784,29 @@ defmodule Sagents.Agent do
     opts
   end
 
-  defp execute_chain(chain, middleware, agent) do
-    # Check if we should use HITL execution mode
-    if has_middleware?(middleware, HumanInTheLoop) do
-      execute_chain_with_hitl(chain, middleware, agent)
-    else
-      # Use custom execution loop to ensure state is updated between tool calls
-      execute_chain_with_state_updates(chain, agent)
+  defp execute_chain(chain, middleware, agent, until_tool_names, max_runs) do
+    has_hitl = has_middleware?(middleware, HumanInTheLoop)
+
+    cond do
+      until_tool_names != nil and has_hitl ->
+        execute_chain_until_tool_with_hitl(
+          chain,
+          middleware,
+          agent,
+          until_tool_names,
+          max_runs,
+          0
+        )
+
+      until_tool_names != nil ->
+        execute_chain_until_tool(chain, agent, until_tool_names, max_runs, 0)
+
+      has_hitl ->
+        execute_chain_with_hitl(chain, middleware, agent)
+
+      true ->
+        # Use custom execution loop to ensure state is updated between tool calls
+        execute_chain_with_state_updates(chain, agent)
     end
   end
 
@@ -780,6 +836,106 @@ defmodule Sagents.Agent do
 
       {:error, _chain, reason} ->
         {:error, "Agent execution failed: #{inspect(reason)}"}
+    end
+  end
+
+  # until_tool execution loop (non-HITL variant)
+  # Runs the chain in a loop, checking after each tool execution step whether
+  # the target tool was called. Returns {:ok, chain, tool_result} on match.
+  defp execute_chain_until_tool(chain, agent, until_tool_names, max_runs, run_count) do
+    if run_count >= max_runs do
+      {:error, "until_tool: max_runs (#{max_runs}) exceeded without target tool being called"}
+    else
+      run_opts = build_run_options(agent)
+
+      case LLMChain.run(chain, run_opts) do
+        {:ok, chain_after_llm} ->
+          chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
+          chain_with_updated_state = update_chain_state_from_tools(chain_after_tools)
+
+          case AgentUtils.find_matching_tool_result(chain_with_updated_state, until_tool_names) do
+            {:found, tool_result} ->
+              {:ok, chain_with_updated_state, tool_result}
+
+            :not_found ->
+              if chain_with_updated_state.needs_response do
+                execute_chain_until_tool(
+                  chain_with_updated_state,
+                  agent,
+                  until_tool_names,
+                  max_runs,
+                  run_count + 1
+                )
+              else
+                {:error,
+                 "until_tool: LLM completed without calling target tool(s): #{inspect(until_tool_names)}"}
+              end
+          end
+
+        {:error, _chain, %LangChainError{} = reason} ->
+          {:error, reason.message}
+
+        {:error, _chain, reason} ->
+          {:error, "Agent execution failed: #{inspect(reason)}"}
+      end
+    end
+  end
+
+  # until_tool execution loop (HITL variant)
+  # Same as above but checks for HITL interrupts before tool execution.
+  defp execute_chain_until_tool_with_hitl(
+         chain,
+         middleware,
+         agent,
+         until_tool_names,
+         max_runs,
+         run_count
+       ) do
+    if run_count >= max_runs do
+      {:error, "until_tool: max_runs (#{max_runs}) exceeded without target tool being called"}
+    else
+      run_opts = build_run_options(agent)
+
+      case LLMChain.run(chain, run_opts) do
+        {:ok, chain_after_llm} ->
+          case check_for_interrupts(chain_after_llm, middleware) do
+            {:interrupt, interrupt_data} ->
+              {:interrupt, chain_after_llm, interrupt_data}
+
+            :continue ->
+              chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
+              chain_with_updated_state = update_chain_state_from_tools(chain_after_tools)
+
+              case AgentUtils.find_matching_tool_result(
+                     chain_with_updated_state,
+                     until_tool_names
+                   ) do
+                {:found, tool_result} ->
+                  {:ok, chain_with_updated_state, tool_result}
+
+                :not_found ->
+                  if chain_with_updated_state.needs_response do
+                    execute_chain_until_tool_with_hitl(
+                      chain_with_updated_state,
+                      middleware,
+                      agent,
+                      until_tool_names,
+                      max_runs,
+                      run_count + 1
+                    )
+                  else
+                    {:error,
+                     "until_tool: LLM completed without calling target tool(s): #{inspect(until_tool_names)}"}
+                  end
+              end
+          end
+
+        {:error, _chain, %LangChainError{} = reason} ->
+          {:error, reason.message}
+
+        {:error, _chain, reason} ->
+          {:error, "Agent execution failed: #{inspect(reason)}"}
+      end
     end
   end
 

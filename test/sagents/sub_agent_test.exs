@@ -1178,6 +1178,221 @@ defmodule Sagents.SubAgentTest do
     end
   end
 
+  describe "new_from_config/1 with until_tool" do
+    test "sets until_tool_names from string" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test",
+          instructions: "Task",
+          agent_config: agent_config,
+          parent_state: %{messages: []},
+          until_tool: "submit"
+        )
+
+      assert subagent.until_tool_names == ["submit"]
+      assert subagent.until_tool_max_runs == 25
+    end
+
+    test "sets until_tool_names from list" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test",
+          instructions: "Task",
+          agent_config: agent_config,
+          parent_state: %{messages: []},
+          until_tool: ["submit", "done"]
+        )
+
+      assert subagent.until_tool_names == ["submit", "done"]
+    end
+
+    test "sets custom until_tool_max_runs" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test",
+          instructions: "Task",
+          agent_config: agent_config,
+          parent_state: %{messages: []},
+          until_tool: "submit",
+          until_tool_max_runs: 10
+        )
+
+      assert subagent.until_tool_names == ["submit"]
+      assert subagent.until_tool_max_runs == 10
+    end
+
+    test "without until_tool, fields remain nil/default" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test",
+          instructions: "Task",
+          agent_config: agent_config,
+          parent_state: %{messages: []}
+        )
+
+      assert subagent.until_tool_names == nil
+      assert subagent.until_tool_max_runs == 25
+    end
+  end
+
+  describe "new_from_compiled/1 with until_tool" do
+    test "sets until_tool_names from string" do
+      compiled_agent = test_agent()
+
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "test",
+          instructions: "Task",
+          compiled_agent: compiled_agent,
+          parent_state: %{messages: []},
+          until_tool: "submit"
+        )
+
+      assert subagent.until_tool_names == ["submit"]
+      assert subagent.until_tool_max_runs == 25
+    end
+
+    test "sets until_tool_names from list" do
+      compiled_agent = test_agent()
+
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "test",
+          instructions: "Task",
+          compiled_agent: compiled_agent,
+          parent_state: %{messages: []},
+          until_tool: ["submit", "done"]
+        )
+
+      assert subagent.until_tool_names == ["submit", "done"]
+    end
+
+    test "sets custom until_tool_max_runs" do
+      compiled_agent = test_agent()
+
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "test",
+          instructions: "Task",
+          compiled_agent: compiled_agent,
+          parent_state: %{messages: []},
+          until_tool: "submit",
+          until_tool_max_runs: 10
+        )
+
+      assert subagent.until_tool_names == ["submit"]
+      assert subagent.until_tool_max_runs == 10
+    end
+
+    test "without until_tool, fields remain nil/default" do
+      compiled_agent = test_agent()
+
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "test",
+          instructions: "Task",
+          compiled_agent: compiled_agent,
+          parent_state: %{messages: []}
+        )
+
+      assert subagent.until_tool_names == nil
+      assert subagent.until_tool_max_runs == 25
+    end
+  end
+
+  describe "Config with until_tool fields" do
+    test "creates config with until_tool as string" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        system_prompt: "You are a test agent",
+        tools: [test_tool()],
+        until_tool: "submit"
+      }
+
+      assert {:ok, config} = SubAgent.Config.new(attrs)
+      assert config.until_tool == "submit"
+      assert config.until_tool_max_runs == 25
+    end
+
+    test "creates config with until_tool as list" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        system_prompt: "You are a test agent",
+        tools: [test_tool()],
+        until_tool: ["submit", "done"]
+      }
+
+      assert {:ok, config} = SubAgent.Config.new(attrs)
+      assert config.until_tool == ["submit", "done"]
+    end
+
+    test "creates config with custom until_tool_max_runs" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        system_prompt: "You are a test agent",
+        tools: [test_tool()],
+        until_tool: "submit",
+        until_tool_max_runs: 10
+      }
+
+      assert {:ok, config} = SubAgent.Config.new(attrs)
+      assert config.until_tool == "submit"
+      assert config.until_tool_max_runs == 10
+    end
+
+    test "until_tool defaults to nil" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        system_prompt: "You are a test agent",
+        tools: [test_tool()]
+      }
+
+      assert {:ok, config} = SubAgent.Config.new(attrs)
+      assert config.until_tool == nil
+      assert config.until_tool_max_runs == 25
+    end
+  end
+
+  describe "Compiled with until_tool fields" do
+    test "creates compiled with until_tool" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        agent: test_agent(),
+        until_tool: "submit",
+        until_tool_max_runs: 10
+      }
+
+      assert {:ok, compiled} = SubAgent.Compiled.new(attrs)
+      assert compiled.until_tool == "submit"
+      assert compiled.until_tool_max_runs == 10
+    end
+
+    test "until_tool defaults to nil" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        agent: test_agent()
+      }
+
+      assert {:ok, compiled} = SubAgent.Compiled.new(attrs)
+      assert compiled.until_tool == nil
+      assert compiled.until_tool_max_runs == 25
+    end
+  end
+
   describe "SubAgent status checks" do
     test "can_execute?/1 returns true for idle SubAgent" do
       agent_config = test_agent()

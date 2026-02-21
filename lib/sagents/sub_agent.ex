@@ -131,6 +131,10 @@ defmodule Sagents.SubAgent do
     # Error information (when status = :error)
     field :error, :any, virtual: true
 
+    # until_tool configuration (persisted across interrupt/resume cycles)
+    field :until_tool_names, {:array, :string}, virtual: true
+    field :until_tool_max_runs, :integer, virtual: true, default: 25
+
     # Metadata
     field :id, :string
     field :parent_agent_id, :string
@@ -143,6 +147,8 @@ defmodule Sagents.SubAgent do
           interrupt_on: map() | nil,
           interrupt_data: map() | nil,
           error: term() | nil,
+          until_tool_names: [String.t()] | nil,
+          until_tool_max_runs: integer(),
           id: String.t() | nil,
           parent_agent_id: String.t() | nil,
           created_at: DateTime.t() | nil
@@ -179,6 +185,10 @@ defmodule Sagents.SubAgent do
     instructions = Keyword.fetch!(opts, :instructions)
     agent_config = Keyword.fetch!(opts, :agent_config)
 
+    # Optional until_tool configuration
+    until_tool = Keyword.get(opts, :until_tool)
+    until_tool_max_runs = Keyword.get(opts, :until_tool_max_runs)
+
     # Generate unique ID
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
 
@@ -207,11 +217,16 @@ defmodule Sagents.SubAgent do
     # Extract interrupt_on configuration from agent_config middleware
     interrupt_on = extract_interrupt_on_from_middleware(agent_config.middleware)
 
+    # Normalize until_tool into a list of names (or nil)
+    normalized_until_tool = AgentUtils.normalize_until_tool(until_tool)
+
     %SubAgent{
       id: sub_agent_id,
       parent_agent_id: parent_agent_id,
       chain: chain,
       interrupt_on: interrupt_on,
+      until_tool_names: normalized_until_tool,
+      until_tool_max_runs: until_tool_max_runs || 25,
       status: :idle,
       created_at: DateTime.utc_now()
     }
@@ -247,6 +262,10 @@ defmodule Sagents.SubAgent do
     compiled_agent = Keyword.fetch!(opts, :compiled_agent)
     initial_messages = Keyword.get(opts, :initial_messages, [])
 
+    # Optional until_tool configuration
+    until_tool = Keyword.get(opts, :until_tool)
+    until_tool_max_runs = Keyword.get(opts, :until_tool_max_runs)
+
     # Generate unique ID
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
 
@@ -277,11 +296,16 @@ defmodule Sagents.SubAgent do
     # Extract interrupt_on configuration from compiled_agent middleware
     interrupt_on = extract_interrupt_on_from_middleware(compiled_agent.middleware)
 
+    # Normalize until_tool into a list of names (or nil)
+    normalized_until_tool = AgentUtils.normalize_until_tool(until_tool)
+
     %SubAgent{
       id: sub_agent_id,
       parent_agent_id: parent_agent_id,
       chain: chain,
       interrupt_on: interrupt_on,
+      until_tool_names: normalized_until_tool,
+      until_tool_max_runs: until_tool_max_runs || 25,
       status: :idle,
       created_at: DateTime.utc_now()
     }
@@ -302,12 +326,20 @@ defmodule Sagents.SubAgent do
   ## Options
 
   - `:callbacks` - Map of LLMChain callbacks (e.g., `%{on_message_processed: fn...}`)
+  - `:until_tool` - Tool name (string) or list of names. When set, the agent loops
+    until one of the named tools is called, then returns `{:ok, subagent, tool_result}`.
+    The configuration is stored on the struct for automatic use during `resume/3`.
+  - `:max_runs` - Maximum LLM iterations for `:until_tool` mode (default: 25)
 
   ## Examples
 
       case SubAgent.execute(subagent) do
         {:ok, completed_subagent} ->
           result = SubAgent.extract_result(completed_subagent)
+
+        {:ok, completed_subagent, tool_result} ->
+          # until_tool mode: tool_result contains the matching ToolResult
+          tool_result.processed_content
 
         {:interrupt, interrupted_subagent} ->
           # interrupted_subagent.interrupt_data contains action_requests
@@ -328,48 +360,95 @@ defmodule Sagents.SubAgent do
 
   def execute(%SubAgent{status: :idle, chain: chain, interrupt_on: interrupt_on} = subagent, opts) do
     callbacks = Keyword.get(opts, :callbacks, %{})
+
+    # Use opts if provided, otherwise fall back to struct fields
+    until_tool_names =
+      case Keyword.fetch(opts, :until_tool) do
+        {:ok, value} -> AgentUtils.normalize_until_tool(value)
+        :error -> subagent.until_tool_names
+      end
+
+    max_runs =
+      Keyword.get(opts, :max_runs) || subagent.until_tool_max_runs || 25
+
     Logger.debug("SubAgent #{subagent.id} executing")
 
-    # Update status to running
-    running_subagent = %{subagent | status: :running}
-
-    # Add callbacks to chain once at entry point (not in the loop)
-    chain_with_callbacks = maybe_add_callbacks(chain, callbacks)
-
-    # Execute with HITL support using execution loop
-    case execute_chain_with_hitl(chain_with_callbacks, interrupt_on) do
-      {:ok, final_chain} ->
-        # Chain completed successfully (needs_response = false)
-        Logger.debug("SubAgent #{subagent.id} completed successfully")
-
-        {:ok,
-         %SubAgent{
-           running_subagent
-           | status: :completed,
-             chain: final_chain
-         }}
-
-      {:interrupt, interrupted_chain, interrupt_data} ->
-        # Chain hit HITL interrupt
-        Logger.debug("SubAgent #{subagent.id} interrupted for HITL")
-
-        {:interrupt,
-         %SubAgent{
-           running_subagent
-           | status: :interrupted,
-             chain: interrupted_chain,
-             interrupt_data: interrupt_data
-         }}
-
+    # Validate until_tool names against chain's registered tools
+    case AgentUtils.validate_until_tool_names(until_tool_names, chain.tools) do
       {:error, reason} ->
-        Logger.error("SubAgent #{subagent.id} execution error: #{inspect(reason)}")
+        {:error, %SubAgent{subagent | status: :error, error: reason}}
 
-        {:error,
-         %SubAgent{
-           running_subagent
-           | status: :error,
-             error: reason
-         }}
+      :ok ->
+        # Update status to running and store until_tool config for resume
+        running_subagent = %{
+          subagent
+          | status: :running,
+            until_tool_names: until_tool_names,
+            until_tool_max_runs: max_runs
+        }
+
+        # Add callbacks to chain once at entry point (not in the loop)
+        chain_with_callbacks = maybe_add_callbacks(chain, callbacks)
+
+        # Dispatch to appropriate execution loop
+        result =
+          if until_tool_names do
+            execute_chain_until_tool(
+              chain_with_callbacks,
+              interrupt_on,
+              until_tool_names,
+              max_runs,
+              0
+            )
+          else
+            execute_chain_with_hitl(chain_with_callbacks, interrupt_on)
+          end
+
+        case result do
+          {:ok, final_chain, tool_result} ->
+            # until_tool match
+            Logger.debug("SubAgent #{subagent.id} completed (until_tool matched)")
+
+            {:ok,
+             %SubAgent{
+               running_subagent
+               | status: :completed,
+                 chain: final_chain
+             }, tool_result}
+
+          {:ok, final_chain} ->
+            # Normal completion (needs_response = false)
+            Logger.debug("SubAgent #{subagent.id} completed successfully")
+
+            {:ok,
+             %SubAgent{
+               running_subagent
+               | status: :completed,
+                 chain: final_chain
+             }}
+
+          {:interrupt, interrupted_chain, interrupt_data} ->
+            # Chain hit HITL interrupt
+            Logger.debug("SubAgent #{subagent.id} interrupted for HITL")
+
+            {:interrupt,
+             %SubAgent{
+               running_subagent
+               | status: :interrupted,
+                 chain: interrupted_chain,
+                 interrupt_data: interrupt_data
+             }}
+
+          {:error, reason} ->
+            Logger.error("SubAgent #{subagent.id} execution error: #{inspect(reason)}")
+
+            {:error,
+             %SubAgent{
+               running_subagent
+               | status: :error,
+                 error: reason
+             }}
+        end
     end
   end
 
@@ -467,7 +546,32 @@ defmodule Sagents.SubAgent do
       )
 
     # Continue execution loop after applying decisions
-    case execute_chain_with_hitl(chain_with_results, interrupt_on) do
+    # Use stored until_tool config if present
+    result =
+      if subagent.until_tool_names do
+        execute_chain_until_tool(
+          chain_with_results,
+          interrupt_on,
+          subagent.until_tool_names,
+          subagent.until_tool_max_runs,
+          0
+        )
+      else
+        execute_chain_with_hitl(chain_with_results, interrupt_on)
+      end
+
+    case result do
+      {:ok, final_chain, tool_result} ->
+        # until_tool match after resume
+        Logger.debug("SubAgent #{subagent.id} completed after resume (until_tool matched)")
+
+        {:ok,
+         %SubAgent{
+           running_subagent
+           | status: :completed,
+             chain: final_chain
+         }, tool_result}
+
       {:ok, final_chain} ->
         # SubAgent completed after resume
         Logger.debug("SubAgent #{subagent.id} completed after resume")
@@ -615,7 +719,10 @@ defmodule Sagents.SubAgent do
 
           :continue ->
             # No interrupt needed - execute tools automatically
-            chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
+            chain_after_tools =
+              chain_after_llm
+              |> LLMChain.execute_tool_calls()
+              |> Sagents.Agent.update_chain_state_from_tools()
 
             # Check if chain needs more work (needs_response flag)
             # If needs_response is nil or true, continue; if false, we're done
@@ -640,6 +747,52 @@ defmodule Sagents.SubAgent do
     LLMChain.add_callback(chain, callbacks)
   end
 
+  # until_tool execution loop with HITL support
+  # Runs the chain in a loop, checking after each tool execution step whether
+  # the target tool was called. Returns {:ok, chain, tool_result} on match.
+  defp execute_chain_until_tool(chain, interrupt_on, until_tool_names, max_runs, run_count) do
+    if run_count >= max_runs do
+      {:error, "until_tool: max_runs (#{max_runs}) exceeded without target tool being called"}
+    else
+      case LLMChain.run(chain) do
+        {:ok, chain_after_llm} ->
+          # Check for HITL interrupt before tool execution
+          case AgentUtils.check_for_hitl_interrupt(chain_after_llm, interrupt_on || %{}) do
+            {:interrupt, interrupt_data} ->
+              {:interrupt, chain_after_llm, interrupt_data}
+
+            :continue ->
+              chain_after_tools =
+                chain_after_llm
+                |> LLMChain.execute_tool_calls()
+                |> Sagents.Agent.update_chain_state_from_tools()
+
+              case AgentUtils.find_matching_tool_result(chain_after_tools, until_tool_names) do
+                {:found, tool_result} ->
+                  {:ok, chain_after_tools, tool_result}
+
+                :not_found ->
+                  if Map.get(chain_after_tools, :needs_response, false) do
+                    execute_chain_until_tool(
+                      chain_after_tools,
+                      interrupt_on,
+                      until_tool_names,
+                      max_runs,
+                      run_count + 1
+                    )
+                  else
+                    {:error,
+                     "until_tool: LLM completed without calling target tool(s): #{inspect(until_tool_names)}"}
+                  end
+              end
+          end
+
+        {:error, _chain, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
   ## Nested Modules (Config and Compiled)
 
   defmodule Config do
@@ -662,6 +815,8 @@ defmodule Sagents.SubAgent do
       field :model, :any, virtual: true
       field :middleware, {:array, :any}, default: [], virtual: true
       field :interrupt_on, :map
+      field :until_tool, :any, virtual: true
+      field :until_tool_max_runs, :integer, virtual: true, default: 25
     end
 
     @type t :: %Config{
@@ -671,7 +826,9 @@ defmodule Sagents.SubAgent do
             tools: [LangChain.Function.t()],
             model: term() | nil,
             middleware: list(),
-            interrupt_on: map() | nil
+            interrupt_on: map() | nil,
+            until_tool: String.t() | [String.t()] | nil,
+            until_tool_max_runs: integer()
           }
 
     def new(attrs) do
@@ -683,7 +840,9 @@ defmodule Sagents.SubAgent do
         :tools,
         :model,
         :middleware,
-        :interrupt_on
+        :interrupt_on,
+        :until_tool,
+        :until_tool_max_runs
       ])
       |> validate_required([:name, :description, :system_prompt, :tools])
       |> validate_length(:name, min: 1, max: 100)
@@ -734,6 +893,8 @@ defmodule Sagents.SubAgent do
       field :agent, :any, virtual: true
       field :extract_result, :any, virtual: true
       field :initial_messages, {:array, :any}, default: [], virtual: true
+      field :until_tool, :any, virtual: true
+      field :until_tool_max_runs, :integer, virtual: true, default: 25
     end
 
     @type t :: %Compiled{
@@ -741,12 +902,22 @@ defmodule Sagents.SubAgent do
             description: String.t(),
             agent: Sagents.Agent.t(),
             extract_result: (State.t() -> any()) | nil,
-            initial_messages: [LangChain.Message.t()]
+            initial_messages: [LangChain.Message.t()],
+            until_tool: String.t() | [String.t()] | nil,
+            until_tool_max_runs: integer()
           }
 
     def new(attrs) do
       %Compiled{}
-      |> cast(attrs, [:name, :description, :agent, :extract_result, :initial_messages])
+      |> cast(attrs, [
+        :name,
+        :description,
+        :agent,
+        :extract_result,
+        :initial_messages,
+        :until_tool,
+        :until_tool_max_runs
+      ])
       |> validate_required([:name, :description, :agent])
       |> validate_length(:name, min: 1, max: 100)
       |> validate_length(:description, min: 1, max: 500)

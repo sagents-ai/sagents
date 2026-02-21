@@ -173,7 +173,11 @@ defmodule Sagents.SubAgentServer do
         {:error, reason} -> handle_error(reason)
       end
   """
-  @spec execute(String.t()) :: {:ok, String.t()} | {:interrupt, map()} | {:error, term()}
+  @spec execute(String.t()) ::
+          {:ok, String.t()}
+          | {:ok, String.t(), LangChain.Message.ToolResult.t()}
+          | {:interrupt, map()}
+          | {:error, term()}
   def execute(sub_agent_id) when is_binary(sub_agent_id) do
     GenServer.call(get_name(sub_agent_id), :execute, :infinity)
   end
@@ -205,7 +209,10 @@ defmodule Sagents.SubAgentServer do
       end
   """
   @spec resume(String.t(), list(map())) ::
-          {:ok, String.t()} | {:interrupt, map()} | {:error, term()}
+          {:ok, String.t()}
+          | {:ok, String.t(), LangChain.Message.ToolResult.t()}
+          | {:interrupt, map()}
+          | {:error, term()}
   def resume(sub_agent_id, decisions) when is_binary(sub_agent_id) and is_list(decisions) do
     GenServer.call(get_name(sub_agent_id), {:resume, decisions}, :infinity)
   end
@@ -271,6 +278,18 @@ defmodule Sagents.SubAgentServer do
 
     # Delegate to SubAgent.execute with callbacks
     case SubAgent.execute(subagent, callbacks: callbacks) do
+      {:ok, completed_subagent, tool_result} ->
+        # until_tool mode: tool_result contains the matching ToolResult
+        new_state = %{server_state | subagent: completed_subagent}
+        result_string = extract_tool_result_content(tool_result)
+
+        broadcast_subagent_event(
+          new_state,
+          {:subagent_completed, build_completed_metadata(new_state, result_string)}
+        )
+
+        {:reply, {:ok, result_string, tool_result}, new_state}
+
       {:ok, completed_subagent} ->
         # Extract result - returns {:ok, result} or {:error, reason}
         case SubAgent.extract_result(completed_subagent) do
@@ -333,6 +352,19 @@ defmodule Sagents.SubAgentServer do
 
     # Delegate to SubAgent.resume with callbacks
     case SubAgent.resume(subagent, decisions, callbacks: callbacks) do
+      {:ok, completed_subagent, tool_result} ->
+        # until_tool mode after resume: tool_result contains the matching ToolResult
+        Logger.debug("SubAgentServer #{subagent.id} completed after resume (until_tool matched)")
+        new_state = %{server_state | subagent: completed_subagent}
+        result_string = extract_tool_result_content(tool_result)
+
+        broadcast_subagent_event(
+          new_state,
+          {:subagent_completed, build_completed_metadata(new_state, result_string)}
+        )
+
+        {:reply, {:ok, result_string, tool_result}, new_state}
+
       {:ok, completed_subagent} ->
         Logger.debug("SubAgentServer #{subagent.id} completed after resume")
 
@@ -407,6 +439,25 @@ defmodule Sagents.SubAgentServer do
   end
 
   ## Private Helper Functions
+
+  # Extract a string representation of the tool result content.
+  # ToolResult.content is a list of ContentParts; we extract the text.
+  defp extract_tool_result_content(%LangChain.Message.ToolResult{content: content})
+       when is_list(content) do
+    content
+    |> Enum.map_join("\n", fn
+      %LangChain.Message.ContentPart{type: :text, content: text} -> text
+      _ -> ""
+    end)
+    |> String.trim()
+  end
+
+  defp extract_tool_result_content(%LangChain.Message.ToolResult{content: content})
+       when is_binary(content) do
+    content
+  end
+
+  defp extract_tool_result_content(_), do: ""
 
   # Build callbacks for LLMChain that broadcast message events to the parent's debug PubSub.
   # This enables real-time visibility into sub-agent execution.
