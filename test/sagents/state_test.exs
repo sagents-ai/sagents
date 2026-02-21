@@ -99,6 +99,54 @@ defmodule Sagents.StateTest do
     end
   end
 
+  describe "merge_states/2 interrupt_data" do
+    test "right interrupt_data wins when both present" do
+      left = State.new!(%{interrupt_data: %{tool: "left"}})
+      right = State.new!(%{interrupt_data: %{tool: "right"}})
+
+      merged = State.merge_states(left, right)
+
+      assert merged.interrupt_data == %{tool: "right"}
+    end
+
+    test "right nil interrupt_data clears left (right-biased semantics)" do
+      left = State.new!(%{interrupt_data: %{tool: "left"}})
+      right = State.new!()
+
+      merged = State.merge_states(left, right)
+
+      assert merged.interrupt_data == nil
+    end
+
+    test "right interrupt_data used when left is nil" do
+      left = State.new!()
+      right = State.new!(%{interrupt_data: %{tool: "right"}})
+
+      merged = State.merge_states(left, right)
+
+      assert merged.interrupt_data == %{tool: "right"}
+    end
+
+    test "both nil results in nil" do
+      left = State.new!()
+      right = State.new!()
+
+      merged = State.merge_states(left, right)
+
+      assert merged.interrupt_data == nil
+    end
+
+    test "right-biased in sequential reduce" do
+      base = State.new!()
+      delta1 = State.new!(%{metadata: %{round: 1}})
+      delta2 = State.new!(%{metadata: %{round: 2}})
+
+      merged = Enum.reduce([delta1, delta2], base, &State.merge_states(&2, &1))
+
+      assert merged.metadata.round == 2
+    end
+  end
+
   describe "add_message/2" do
     test "adds a message to empty state" do
       state = State.new!()

@@ -25,6 +25,7 @@ defmodule Sagents.Middleware.SubAgentTest do
 
     # Copy modules for mocking
     Mimic.copy(LLMChain)
+    Mimic.copy(Sagents.SubAgentServer)
 
     :ok
   end
@@ -1356,5 +1357,100 @@ defmodule Sagents.Middleware.SubAgentTest do
 
       assert log =~ "not a module atom"
     end
+  end
+
+  describe "HITL interrupt propagation from sub-agent" do
+    setup do
+      agent_id = "parent-hitl-#{System.unique_integer([:positive])}"
+
+      {:ok, _sup} =
+        start_supervised({
+          SubAgentsDynamicSupervisor,
+          agent_id: agent_id
+        })
+
+      subagent_config = build_subagent_config("hitl_agent", "Agent with HITL")
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: agent_id,
+          model: test_model(),
+          middleware: [],
+          subagents: [subagent_config]
+        )
+
+      [task_tool] = SubAgentMiddleware.tools(middleware_config)
+
+      context = %{
+        agent_id: agent_id,
+        state: State.new!(%{messages: []}),
+        parent_middleware: [],
+        parent_tools: []
+      }
+
+      %{
+        task_tool: task_tool,
+        middleware_config: middleware_config,
+        context: context,
+        agent_id: agent_id
+      }
+    end
+
+    test "execute_subagent returns valid 3-tuple when sub-agent interrupts", %{
+      middleware_config: config,
+      context: context,
+      agent_id: _agent_id
+    } do
+      # Mock SubAgentServer.execute to return an interrupt
+      # We achieve this by mocking LLMChain.run to produce a tool call that
+      # triggers HITL, but that's complex. Instead, we mock at the SubAgentServer level.
+
+      # Mock LLMChain.run to simulate sub-agent hitting HITL interrupt
+      # The SubAgentServer.execute will return {:interrupt, interrupt_data}
+      # which should be converted to {:ok, message, %State{interrupt_data: ...}}
+      # by execute_subagent
+
+      # We need to mock at SubAgentServer level since execute_subagent calls it
+      Sagents.SubAgentServer
+      |> Mimic.stub(:execute, fn _sub_agent_id ->
+        {:interrupt,
+         %{
+           action_requests: [
+             %{tool_call_id: "call_1", tool_name: "ask_user", arguments: %{"question" => "OK?"}}
+           ],
+           review_configs: %{"ask_user" => %{allowed_decisions: [:approve, :edit]}},
+           hitl_tool_call_ids: ["call_1"]
+         }}
+      end)
+
+      args = %{
+        "instructions" => "Do something requiring approval",
+        "subagent_type" => "hitl_agent"
+      }
+
+      # After the fix, this should return {:ok, message, %State{interrupt_data: ...}}
+      # which is a valid LangChain 3-tuple
+      result =
+        SubAgentMiddleware.start_subagent(
+          "Do something requiring approval",
+          "hitl_agent",
+          args,
+          context,
+          config
+        )
+
+      # The task tool function returns this to LangChain. It must be a valid 3-tuple.
+      assert {:ok, message, %State{interrupt_data: interrupt_data}} = result
+      assert is_binary(message)
+      assert message =~ "paused"
+      assert interrupt_data.type == :subagent_hitl
+      assert is_binary(interrupt_data.sub_agent_id)
+      assert interrupt_data.subagent_type == "hitl_agent"
+      assert interrupt_data.interrupt_data.action_requests != nil
+    end
+
+    # NOTE: The resume_subagent test was removed because the direct injection
+    # refactor in agent.ex now calls SubAgentServer.resume directly, bypassing
+    # the tool function entirely. Resume no longer flows through execute_task/3.
   end
 end

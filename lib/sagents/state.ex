@@ -153,7 +153,10 @@ defmodule Sagents.State do
       messages: merge_messages(left.messages, right.messages),
       todos: merge_todos(left.todos, right.todos),
       metadata: deep_merge_maps(left.metadata, right.metadata),
-      interrupt_data: right.interrupt_data || left.interrupt_data
+      # Right-side wins unconditionally — nil is a valid value meaning
+      # "clear the interrupt". Using || would treat nil as "not set" and
+      # fall back to stale left-side data.
+      interrupt_data: right.interrupt_data
     }
   end
 
