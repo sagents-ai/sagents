@@ -576,6 +576,14 @@ defmodule Sagents.Middleware.HumanInTheLoopTest do
       assert reason =~ "type 'edit' must include 'arguments' field"
     end
 
+    test "returns error for malformed decisions list", %{state: state, config: config} do
+      # not a list of maps
+      decisions = [:approve, :woops]
+
+      assert {:error, reason} = HumanInTheLoop.process_decisions(state, decisions, config)
+      assert reason =~ "Decision at index 0 is not a map"
+    end
+
     test "returns error when no tool calls found in state", %{agent_id: agent_id} do
       messages = [
         Message.new_user!("Hello"),
