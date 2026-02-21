@@ -72,7 +72,8 @@ defmodule Sagents.AgentsDynamicSupervisor do
     - `:shutdown_delay` - Shutdown delay in milliseconds (optional)
     - `:presence_tracking` - Presence tracking configuration (optional)
     - `:conversation_id` - Conversation identifier (optional)
-    - `:save_new_message_fn` - Message persistence callback (optional)
+    - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` (optional)
+    - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` (optional)
     - `:supervisor` - Supervisor reference (optional, defaults to `__MODULE__`)
 
   ## Returns
@@ -110,11 +111,11 @@ defmodule Sagents.AgentsDynamicSupervisor do
     child_spec = %{
       id: AgentSupervisor,
       start: {AgentSupervisor, :start_link, [supervisor_opts]},
-      restart: :temporary,
+      restart: :transient,
       type: :supervisor
     }
 
-    case DynamicSupervisor.start_child(supervisor, child_spec) do
+    case Sagents.ProcessSupervisor.start_child(supervisor, child_spec) do
       {:ok, pid} ->
         Logger.debug("Started AgentSupervisor for agent_id=#{agent_id}, pid=#{inspect(pid)}")
         {:ok, pid}
@@ -199,7 +200,7 @@ defmodule Sagents.AgentsDynamicSupervisor do
 
     case AgentSupervisor.get_pid(agent_id) do
       {:ok, pid} ->
-        DynamicSupervisor.terminate_child(supervisor, pid)
+        Sagents.ProcessSupervisor.terminate_child(supervisor, pid)
         Logger.debug("Stopped AgentSupervisor for agent_id=#{agent_id}")
         :ok
 
@@ -226,10 +227,10 @@ defmodule Sagents.AgentsDynamicSupervisor do
   """
   @spec list_agents(atom() | pid()) :: [String.t()]
   def list_agents(supervisor \\ __MODULE__) do
-    DynamicSupervisor.which_children(supervisor)
+    Sagents.ProcessSupervisor.which_children(supervisor)
     |> Enum.map(fn {_id, pid, _type, _modules} ->
       # Get agent_id from the AgentSupervisor's registered name via Registry
-      case Registry.keys(Sagents.Registry, pid) do
+      case Sagents.ProcessRegistry.keys(pid) do
         [{:agent_supervisor, agent_id}] -> agent_id
         _ -> nil
       end
@@ -251,7 +252,7 @@ defmodule Sagents.AgentsDynamicSupervisor do
   """
   @spec count_agents(atom() | pid()) :: non_neg_integer()
   def count_agents(supervisor \\ __MODULE__) do
-    DynamicSupervisor.count_children(supervisor).active
+    Sagents.ProcessSupervisor.count_children(supervisor).active
   end
 
   # ============================================================================

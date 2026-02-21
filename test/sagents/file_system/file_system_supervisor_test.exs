@@ -303,7 +303,7 @@ defmodule Sagents.FileSystem.FileSystemSupervisorTest do
 
       # Check Registry directly
       assert [{^fs_pid, _}] =
-               Registry.lookup(Sagents.Registry, {:filesystem_server, scope_key})
+               Sagents.ProcessRegistry.lookup({:filesystem_server, scope_key})
 
       # Clean up
       FileSystemSupervisor.stop_filesystem(scope_key, supervisor: sup)
@@ -319,7 +319,7 @@ defmodule Sagents.FileSystem.FileSystemSupervisorTest do
       Process.sleep(50)
 
       # Should not be in Registry anymore
-      assert [] = Registry.lookup(Sagents.Registry, {:filesystem_server, scope_key})
+      assert [] = Sagents.ProcessRegistry.lookup({:filesystem_server, scope_key})
     end
   end
 

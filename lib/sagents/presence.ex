@@ -3,8 +3,9 @@ defmodule Sagents.Presence do
   Convenience wrappers for Phoenix.Presence operations.
 
   This module provides thin wrappers around Phoenix.Presence to make presence tracking
-  more convenient in agent-based applications. Phoenix.Presence automatically cleans up
-  presence entries when the tracked process terminates, so no manual cleanup is needed.
+  more convenient in agent-based applications. These functions always track the calling
+  process (`self()`). Phoenix.Presence automatically cleans up presence entries when
+  the tracked process terminates, so no manual cleanup is needed.
 
   ## Examples
 
@@ -14,19 +15,19 @@ defmodule Sagents.Presence do
           MyApp.Presence,
           "conversation:123",
           "user-1",
-          self(),
           %{name: "Alice"}
         )
       end
 
       # Track presence in multiple topics from the same process
-      Sagents.Presence.track(MyApp.Presence, "conversation:123", "user-1", self())
-      Sagents.Presence.track(MyApp.Presence, "conversation:456", "user-1", self())
+      Sagents.Presence.track(MyApp.Presence, "conversation:123", "user-1")
+      Sagents.Presence.track(MyApp.Presence, "conversation:456", "user-1")
   """
 
   @doc """
-  Track presence for the given topic and identifier.
+  Track presence for the calling process on the given topic and identifier.
 
+  Tracks `self()` — must be called from the process you want to track.
   Phoenix.Presence automatically removes the entry when the tracked process terminates,
   so manual cleanup is typically not needed.
 
@@ -35,7 +36,6 @@ defmodule Sagents.Presence do
     - `presence_module` - The Presence module (e.g., MyApp.Presence)
     - `topic` - The topic string for presence tracking
     - `id` - Unique identifier for this presence entry (e.g., user_id)
-    - `pid` - The process to track (typically self())
     - `metadata` - Optional metadata map (default: empty map)
 
   ## Returns
@@ -50,26 +50,26 @@ defmodule Sagents.Presence do
         MyApp.Presence,
         "conversation:123",
         "user-1",
-        self(),
         %{joined_at: System.system_time(:second)}
       )
 
       # Track in multiple topics
-      {:ok, _} = Sagents.Presence.track(MyApp.Presence, "topic:123", "user-1", self())
-      {:ok, _} = Sagents.Presence.track(MyApp.Presence, "topic:456", "user-1", self())
+      {:ok, _} = Sagents.Presence.track(MyApp.Presence, "topic:123", "user-1")
+      {:ok, _} = Sagents.Presence.track(MyApp.Presence, "topic:456", "user-1")
   """
-  def track(presence_module, topic, id, pid, metadata \\ %{}) do
-    presence_module.track(pid, topic, id, metadata)
+  def track(presence_module, topic, id, metadata \\ %{}) do
+    presence_module.track(self(), topic, id, metadata)
   end
 
   @doc """
-  Untrack presence for the given topic and identifier.
+  Untrack presence for the calling process on the given topic and identifier.
 
+  Untracks `self()` — must be called from the same process that originally tracked.
   Note: This is rarely needed since Phoenix.Presence automatically cleans up
   when the tracked process terminates. Only use this for explicit early cleanup.
   """
-  def untrack(presence_module, topic, id, pid) do
-    presence_module.untrack(pid, topic, id)
+  def untrack(presence_module, topic, id) do
+    presence_module.untrack(self(), topic, id)
   end
 
   @doc """

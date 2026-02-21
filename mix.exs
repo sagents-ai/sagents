@@ -2,7 +2,7 @@ defmodule Sagents.MixProject do
   use Mix.Project
 
   @source_url "https://github.com/sagents-ai/sagents"
-  @version "0.1.0"
+  @version "0.2.0"
 
   def project do
     [
@@ -27,8 +27,7 @@ defmodule Sagents.MixProject do
 
   def application do
     [
-      extra_applications: [:logger],
-      mod: {Sagents.Application, []}
+      extra_applications: [:logger]
     ]
   end
 
@@ -53,12 +52,14 @@ defmodule Sagents.MixProject do
 
       # Optional dependencies
       {:phoenix, "~> 1.7", optional: true},
+      {:horde, "~> 0.10", optional: true},
 
       # Development dependencies
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
 
       # Test dependencies
       {:mimic, "~> 1.8", only: :test},
+      {:local_cluster, "~> 2.0", only: :test},
 
       # AGENTS.md file maintenance
       {:usage_rules, "~> 0.1", only: :dev, runtime: false}
@@ -67,7 +68,12 @@ defmodule Sagents.MixProject do
 
   defp aliases do
     [
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "test --include cluster"
+      ]
     ]
   end
 

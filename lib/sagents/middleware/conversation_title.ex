@@ -140,11 +140,18 @@ defmodule Sagents.Middleware.ConversationTitle do
     # Generate title from the user's message before the LLM call starts.
     # This runs the title generation in parallel with the main execution,
     # so titles appear quickly even when long-running tools are involved.
-    if State.get_metadata(state, "conversation_title") == nil do
+    #
+    # We check both "conversation_title" (set when generation completes) and
+    # "conversation_title_triggered" (set immediately below) to prevent a race
+    # condition where a second execution starts before the async title task
+    # delivers its result, which would spawn a duplicate title generation.
+    if State.get_metadata(state, "conversation_title") == nil and
+         State.get_metadata(state, "conversation_title_triggered") == nil do
       spawn_title_generation_task(state, config)
+      {:ok, State.put_metadata(state, "conversation_title_triggered", true)}
+    else
+      {:ok, state}
     end
-
-    {:ok, state}
   end
 
   @doc """

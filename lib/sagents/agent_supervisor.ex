@@ -26,7 +26,8 @@ defmodule Sagents.AgentSupervisor do
   - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` (optional, default: nil)
   - `:shutdown_delay` - Delay in milliseconds to allow the supervisor to gracefully stop all children (optional, default: 5000)
   - `:conversation_id` - Optional conversation identifier for message persistence (optional, default: nil)
-  - `:save_new_message_fn` - Optional callback function for persisting messages (optional, default: nil)
+  - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` (optional, default: nil)
+  - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` (optional, default: nil)
 
   ## Examples
 
@@ -75,10 +76,10 @@ defmodule Sagents.AgentSupervisor do
 
   alias Sagents.Agent
   alias Sagents.AgentServer
+  alias Sagents.Persistence.StateSerializer
+  alias Sagents.ProcessRegistry
   alias Sagents.SubAgentsDynamicSupervisor
   alias Sagents.State
-
-  @registry Sagents.Registry
 
   @doc """
   Get the name of the AgentSupervisor process for a specific agent.
@@ -88,9 +89,9 @@ defmodule Sagents.AgentSupervisor do
       name = AgentSupervisor.get_name("my-agent-1")
       AgentSupervisor.stop(name)
   """
-  @spec get_name(String.t()) :: {:via, Registry, {Registry, String.t()}}
+  @spec get_name(String.t()) :: GenServer.name()
   def get_name(agent_id) when is_binary(agent_id) do
-    {:via, Registry, {@registry, {:agent_supervisor, agent_id}}}
+    ProcessRegistry.via_tuple({:agent_supervisor, agent_id})
   end
 
   @doc """
@@ -103,7 +104,7 @@ defmodule Sagents.AgentSupervisor do
   """
   @spec get_pid(String.t()) :: {:ok, pid()} | {:error, :not_found}
   def get_pid(agent_id) when is_binary(agent_id) do
-    case Registry.lookup(@registry, {:agent_supervisor, agent_id}) do
+    case ProcessRegistry.lookup({:agent_supervisor, agent_id}) do
       [{pid, _}] -> {:ok, pid}
       [] -> {:error, :not_found}
     end
@@ -143,7 +144,8 @@ defmodule Sagents.AgentSupervisor do
   - `:name` - Supervisor name registration (optional)
   - `:shutdown_delay` - Delay in milliseconds to allow the supervisor to gracefully stop all children (optional, default: 5000)
   - `:conversation_id` - Optional conversation identifier for message persistence (optional, default: nil)
-  - `:save_new_message_fn` - Optional callback function for persisting messages (optional, default: nil)
+  - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` (optional, default: nil)
+  - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` (optional, default: nil)
 
   ## Examples
 
@@ -297,20 +299,24 @@ defmodule Sagents.AgentSupervisor do
     end
 
     # Extract remaining configuration
-    initial_state = Keyword.get(config, :initial_state, State.new!(%{agent_id: agent.agent_id}))
+    # Resolve initial state: prefer DB-persisted state over stale child spec state
+    # This is critical for Horde redistribution where the child spec's initial_state is stale
+    {initial_state, restored} = resolve_initial_state(config, agent)
     pubsub = Keyword.get(config, :pubsub)
     debug_pubsub = Keyword.get(config, :debug_pubsub)
     inactivity_timeout = Keyword.get(config, :inactivity_timeout, 300_000)
     shutdown_delay = Keyword.get(config, :shutdown_delay, 5000)
     presence_tracking = Keyword.get(config, :presence_tracking)
     conversation_id = Keyword.get(config, :conversation_id)
-    save_new_message_fn = Keyword.get(config, :save_new_message_fn)
+    agent_persistence = Keyword.get(config, :agent_persistence)
+    display_message_persistence = Keyword.get(config, :display_message_persistence)
     presence_module = Keyword.get(config, :presence_module)
 
     # Build AgentServer options
     agent_server_opts = [
       agent: agent,
       initial_state: initial_state,
+      restored: restored,
       inactivity_timeout: inactivity_timeout,
       shutdown_delay: shutdown_delay,
       id: agent_id,
@@ -339,10 +345,21 @@ defmodule Sagents.AgentSupervisor do
         do: Keyword.put(agent_server_opts, :conversation_id, conversation_id),
         else: agent_server_opts
 
-    # Add save_new_message_fn if provided
+    # Add agent_persistence if provided
     agent_server_opts =
-      if save_new_message_fn,
-        do: Keyword.put(agent_server_opts, :save_new_message_fn, save_new_message_fn),
+      if agent_persistence,
+        do: Keyword.put(agent_server_opts, :agent_persistence, agent_persistence),
+        else: agent_server_opts
+
+    # Add display_message_persistence if provided
+    agent_server_opts =
+      if display_message_persistence,
+        do:
+          Keyword.put(
+            agent_server_opts,
+            :display_message_persistence,
+            display_message_persistence
+          ),
         else: agent_server_opts
 
     # Add presence_module if provided
@@ -369,6 +386,46 @@ defmodule Sagents.AgentSupervisor do
   end
 
   ## Private Helpers
+
+  # Resolve the initial state for the AgentServer.
+  #
+  # When agent_persistence is configured, attempts to load fresh state from the
+  # database. This is critical for Horde redistribution: when a node departs and
+  # Horde replays the child spec on a surviving node, the initial_state in the
+  # child spec is stale (captured at first startup). Loading from DB gets the
+  # latest persisted state including all messages and middleware state.
+  #
+  # Returns {state, restored} where restored is true if state was loaded from DB.
+  defp resolve_initial_state(config, agent) do
+    agent_persistence = Keyword.get(config, :agent_persistence)
+    fallback_state = Keyword.get(config, :initial_state, State.new!(%{agent_id: agent.agent_id}))
+
+    if agent_persistence do
+      case agent_persistence.load_state(agent.agent_id) do
+        {:ok, exported_state} ->
+          case StateSerializer.deserialize_state(agent.agent_id, exported_state["state"]) do
+            {:ok, state} ->
+              Logger.info(
+                "Loaded persisted state for #{agent.agent_id} (#{length(state.messages)} messages)"
+              )
+
+              {state, true}
+
+            {:error, _reason} ->
+              Logger.warning(
+                "Failed to deserialize persisted state for #{agent.agent_id}, using initial_state"
+              )
+
+              {fallback_state, false}
+          end
+
+        {:error, :not_found} ->
+          {fallback_state, false}
+      end
+    else
+      {fallback_state, false}
+    end
+  end
 
   # Wait for the AgentServer to be registered and ready
   # Retries with exponential backoff up to the timeout

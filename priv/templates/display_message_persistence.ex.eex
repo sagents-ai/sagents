@@ -1,0 +1,66 @@
+defmodule <%= module %> do
+  @moduledoc """
+  Implements `Sagents.DisplayMessagePersistence` for display messages.
+
+  Persists user-facing message representations to PostgreSQL and handles
+  tool execution lifecycle status updates. Called from within the AgentServer
+  process for exactly-once semantics.
+  """
+
+  @behaviour Sagents.DisplayMessagePersistence
+
+  require Logger
+
+  alias Sagents.Message.DisplayHelpers
+  alias LangChain.Message
+
+  @impl true
+  def save_message(conversation_id, %Message{} = message) do
+    display_items = DisplayHelpers.extract_display_items(message)
+
+    if Enum.empty?(display_items) do
+      {:ok, []}
+    else
+      Enum.reduce_while(display_items, {:ok, []}, fn item, {:ok, acc} ->
+        attrs = %{
+          "message_type" => Atom.to_string(item.message_type),
+          "content_type" => Atom.to_string(item.type),
+          "content" => item.content
+        }
+
+        # Set status to "pending" for tool calls
+        attrs =
+          if item.type == :tool_call do
+            Map.put(attrs, "status", "pending")
+          else
+            attrs
+          end
+
+        case <%= conversations_module %>.append_display_message(conversation_id, attrs) do
+          {:ok, display_msg} ->
+            {:cont, {:ok, acc ++ [display_msg]}}
+
+          {:error, reason} ->
+            Logger.error(
+              "Failed to persist DisplayMessage (#{attrs["content_type"]}): #{inspect(reason)}"
+            )
+
+            {:halt, {:error, reason}}
+        end
+      end)
+    end
+  end
+
+  @impl true
+  def update_tool_status(:executing, %{call_id: call_id}) do
+    <%= conversations_module %>.mark_tool_executing(call_id)
+  end
+
+  def update_tool_status(:completed, %{call_id: call_id, result: result}) do
+    <%= conversations_module %>.complete_tool_call(call_id, %{"result" => result})
+  end
+
+  def update_tool_status(:failed, %{call_id: call_id, error: error}) do
+    <%= conversations_module %>.fail_tool_call(call_id, %{"error" => error})
+  end
+end
