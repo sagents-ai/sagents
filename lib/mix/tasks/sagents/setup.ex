@@ -94,7 +94,12 @@ defmodule Mix.Tasks.Sagents.Setup do
     display_message_persistence_path = generate_display_message_persistence(config)
 
     # Print all generated files
-    all_files = [coordinator_path, agent_persistence_path, display_message_persistence_path | persistence_files]
+    all_files = [
+      coordinator_path,
+      agent_persistence_path,
+      display_message_persistence_path | persistence_files
+    ]
+
     print_generated_files(all_files)
 
     # Print instructions
@@ -279,7 +284,9 @@ defmodule Mix.Tasks.Sagents.Setup do
       conversations_module: config.context_module
     ]
 
-    template_path = Application.app_dir(:sagents, "priv/templates/display_message_persistence.ex.eex")
+    template_path =
+      Application.app_dir(:sagents, "priv/templates/display_message_persistence.ex.eex")
+
     content = EEx.eval_file(template_path, binding)
 
     file_path = module_to_path(config.display_message_persistence_module)
