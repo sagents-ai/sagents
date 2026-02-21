@@ -1,0 +1,76 @@
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+#
+# https://github.com/erlef/setup-beam/tree/v1.18.2
+
+name: Elixir CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  MIX_ENV: test
+  OPENAI_API_KEY: invalid
+  ANTHROPIC_API_KEY: invalid
+  GOOGLE_API_KEY: invalid
+  AWS_ACCESS_KEY_ID: invalid
+  AWS_SECRET_ACCESS_KEY: invalid
+  AWS_REGION: invalid
+  PERPLEXITY_API_KEY: invalid
+  MISTRAL_API_KEY: invalid
+  VERTEX_API_KEY: invalid
+  VERTEX_API_ENDPOINT: invalid
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pair:
+              elixir: "1.17"
+              otp: "27"
+          - pair:
+              elixir: "1.19"
+              otp: "27"
+            lint: lint
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ matrix.pair.elixir }}
+          otp-version: ${{ matrix.pair.otp }}
+
+      - uses: actions/cache@v4
+        with:
+          path: deps
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-
+
+      - run: mix deps.get
+
+      - run: mix format --check-formatted
+        if: ${{ matrix.lint }}
+
+      - run: mix deps.get && mix deps.unlock --check-unused
+        if: ${{ matrix.lint }}
+
+      - run: mix deps.compile
+
+      - run: mix compile --warnings-as-errors
+        if: ${{ matrix.lint }}
+
+      - name: Run tests
+        run: mix test
