@@ -422,7 +422,8 @@ defmodule Sagents.Middleware.SubAgent do
                 parent_agent_id: config.agent_id,
                 instructions: instructions,
                 compiled_agent: compiled.agent,
-                initial_messages: compiled.initial_messages || []
+                initial_messages: compiled.initial_messages || [],
+                parent_state: context[:state]
               )
 
             agent ->
@@ -430,7 +431,8 @@ defmodule Sagents.Middleware.SubAgent do
               SubAgent.new_from_config(
                 parent_agent_id: config.agent_id,
                 instructions: instructions,
-                agent_config: agent
+                agent_config: agent,
+                parent_state: context[:state]
               )
           end
 
@@ -512,7 +514,8 @@ defmodule Sagents.Middleware.SubAgent do
           SubAgent.new_from_config(
             parent_agent_id: config.agent_id,
             instructions: instructions,
-            agent_config: agent_config
+            agent_config: agent_config,
+            parent_state: context[:state]
           )
 
         # Get supervisor and start SubAgent (same as pre-configured)
