@@ -493,4 +493,116 @@ defmodule Sagents.AgentTest do
       assert agent.before_fallback == nil
     end
   end
+
+  describe "custom execution mode" do
+    setup do
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Mock response")]}
+      end)
+
+      :ok
+    end
+
+    test "accepts mode field" do
+      {:ok, agent} =
+        Agent.new(%{
+          model: mock_model(),
+          mode: Sagents.Modes.AgentExecution
+        })
+
+      assert agent.mode == Sagents.Modes.AgentExecution
+    end
+
+    test "defaults to nil when not provided" do
+      {:ok, agent} = Agent.new(%{model: mock_model()})
+
+      assert agent.mode == nil
+    end
+
+    test "custom mode is invoked during execute" do
+      test_pid = self()
+
+      # Define a custom mode inline via a module attribute trick:
+      # We use a real module defined below (TestMode) that sends a message
+      # to the test process.
+      #
+      # TestMode is defined at the bottom of this describe block.
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            mode: __MODULE__.TestMode
+          },
+          replace_default_middleware: true
+        )
+
+      # Store the test pid so TestMode can notify us
+      Process.put(:test_mode_pid, test_pid)
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+      assert {:ok, _result_state} = Agent.execute(agent, initial_state)
+
+      # Verify our custom mode was called, not the default AgentExecution
+      assert_received {:custom_mode_called, opts}
+      assert Keyword.get(opts, :middleware) != nil
+    end
+
+    test "nil mode falls back to default AgentExecution" do
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            mode: nil
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      # Should work normally using the default AgentExecution mode
+      assert {:ok, result_state} = Agent.execute(agent, initial_state)
+      assert length(result_state.messages) == 2
+      assert Enum.at(result_state.messages, 1).role == :assistant
+    end
+
+    test "custom mode receives middleware in opts" do
+      test_pid = self()
+      Process.put(:test_mode_pid, test_pid)
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            mode: __MODULE__.TestMode,
+            middleware: [{TestMiddleware1, [name: "mw1"]}]
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+      assert {:ok, _result_state} = Agent.execute(agent, initial_state)
+
+      assert_received {:custom_mode_called, opts}
+      middleware = Keyword.get(opts, :middleware)
+      assert length(middleware) == 1
+    end
+  end
+
+  # A test mode module that implements the Mode behaviour.
+  # It notifies the test process that it was called, then delegates
+  # to the default AgentExecution so the rest of execution completes normally.
+  defmodule TestMode do
+    @behaviour LangChain.Chains.LLMChain.Mode
+
+    @impl true
+    def run(chain, opts) do
+      # Notify the test process
+      if pid = Process.get(:test_mode_pid) do
+        send(pid, {:custom_mode_called, opts})
+      end
+
+      # Delegate to the real mode so execution completes
+      Sagents.Modes.AgentExecution.run(chain, opts)
+    end
+  end
 end

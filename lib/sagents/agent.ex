@@ -68,6 +68,10 @@ defmodule Sagents.Agent do
     # Optional function to modify chain before each LLM attempt (including first)
     # Signature: (LLMChain.t() -> LLMChain.t())
     field :before_fallback, :any, virtual: true
+    # Custom LLMChain execution mode module. Must implement the
+    # LangChain.Chains.LLMChain.Mode behaviour. Defaults to
+    # Sagents.Modes.AgentExecution when nil.
+    field :mode, :any, virtual: true
   end
 
   @type t :: %Agent{}
@@ -83,7 +87,8 @@ defmodule Sagents.Agent do
     :filesystem_scope,
     :async_tool_timeout,
     :fallback_models,
-    :before_fallback
+    :before_fallback,
+    :mode
   ]
   @required_fields [:agent_id, :model]
 
@@ -749,7 +754,7 @@ defmodule Sagents.Agent do
 
     mode_opts =
       run_opts
-      |> Keyword.put(:mode, Sagents.Modes.AgentExecution)
+      |> Keyword.put(:mode, agent.mode || Sagents.Modes.AgentExecution)
       |> Keyword.put(:middleware, middleware)
 
     case LLMChain.run(chain, mode_opts) do
