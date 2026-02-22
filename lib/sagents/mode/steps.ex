@@ -1,0 +1,115 @@
+defmodule Sagents.Mode.Steps do
+  @moduledoc """
+  Sagents-specific pipeline steps for custom execution modes.
+
+  These steps handle concerns that belong at the agent layer, not the
+  LLMChain layer: HITL interrupts and state propagation from tool results.
+  """
+
+  alias LangChain.Chains.LLMChain
+  alias LangChain.Message
+  alias Sagents.State
+  alias Sagents.MiddlewareEntry
+  alias Sagents.Middleware.HumanInTheLoop
+
+  @doc """
+  Check if the LLM response contains tool calls that need human approval.
+
+  Reads middleware list from opts `:middleware`. Inspects `chain.exchanged_messages`
+  for tool calls that match the HITL policy.
+
+  Returns `{:interrupt, chain, interrupt_data}` if approval is needed.
+  """
+  def check_pre_tool_hitl({:continue, chain}, opts) do
+    middleware = Keyword.get(opts, :middleware, [])
+
+    hitl_middleware =
+      Enum.find(middleware, fn %MiddlewareEntry{module: module} ->
+        module == HumanInTheLoop
+      end)
+
+    case hitl_middleware do
+      nil ->
+        {:continue, chain}
+
+      %MiddlewareEntry{module: module, config: config} ->
+        agent_id =
+          case chain.custom_context do
+            %{state: %{agent_id: agent_id}} -> agent_id
+            _ -> nil
+          end
+
+        state = %State{
+          agent_id: agent_id,
+          messages: chain.exchanged_messages,
+          metadata: %{}
+        }
+
+        case module.check_for_interrupt(state, config) do
+          {:interrupt, interrupt_data} ->
+            {:interrupt, chain, interrupt_data}
+
+          :continue ->
+            {:continue, chain}
+        end
+    end
+  end
+
+  def check_pre_tool_hitl(terminal, _opts), do: terminal
+
+  @doc """
+  Propagate state updates from tool results into the chain's custom_context.
+
+  After tool execution, tools may have returned State structs as
+  `processed_content`. This step extracts those deltas and merges them
+  into `custom_context.state`.
+  """
+  def propagate_state({:continue, chain}, _opts) do
+    {:continue, update_chain_state_from_tools(chain)}
+  end
+
+  def propagate_state(terminal, _opts), do: terminal
+
+  # ── Private Helpers (extracted from Agent) ──────────────────────
+
+  defp update_chain_state_from_tools(chain) do
+    current_state =
+      case chain.custom_context do
+        %{state: %State{} = state} -> state
+        _ -> State.new!()
+      end
+
+    state_deltas = extract_state_deltas_from_chain(chain)
+
+    if Enum.empty?(state_deltas) do
+      chain
+    else
+      updated_state =
+        Enum.reduce(state_deltas, current_state, fn delta, acc ->
+          State.merge_states(acc, delta)
+        end)
+
+      LLMChain.update_custom_context(chain, %{state: updated_state})
+    end
+  end
+
+  defp extract_state_deltas_from_chain(chain) do
+    chain.messages
+    |> Enum.reverse()
+    |> Enum.take_while(fn msg ->
+      not (msg.role == :assistant and Message.is_tool_call?(msg))
+    end)
+    |> Enum.filter(&(&1.role == :tool))
+    |> Enum.flat_map(fn message ->
+      case message.tool_results do
+        nil ->
+          []
+
+        tool_results when is_list(tool_results) ->
+          tool_results
+          |> Enum.filter(fn result -> is_struct(result.processed_content, State) end)
+          |> Enum.map(& &1.processed_content)
+      end
+    end)
+  end
+end

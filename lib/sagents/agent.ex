@@ -745,78 +745,31 @@ defmodule Sagents.Agent do
   end
 
   defp execute_chain(chain, middleware, agent) do
-    # Check if we should use HITL execution mode
-    if has_middleware?(middleware, HumanInTheLoop) do
-      execute_chain_with_hitl(chain, middleware, agent)
-    else
-      # Use custom execution loop to ensure state is updated between tool calls
-      execute_chain_with_state_updates(chain, agent)
-    end
-  end
-
-  # Custom execution loop for non-HITL agents that updates state between tool calls
-  # This ensures that tools called later in the execution have access to state updates
-  # from earlier tool calls (e.g., TodoList merge operations)
-  defp execute_chain_with_state_updates(chain, agent) do
     run_opts = build_run_options(agent)
 
-    case LLMChain.run(chain, run_opts) do
-      {:ok, chain_after_llm} ->
-        # Execute tools and update the chain's custom_context.state with any deltas
-        chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
-        chain_with_updated_state = update_chain_state_from_tools(chain_after_tools)
+    mode_opts =
+      run_opts
+      |> Keyword.put(:mode, Sagents.Modes.AgentExecution)
+      |> Keyword.put(:middleware, middleware)
 
-        # Check if we need to continue (needs_response)
-        if chain_with_updated_state.needs_response do
-          # Continue the loop with updated state
-          execute_chain_with_state_updates(chain_with_updated_state, agent)
-        else
-          # Done
-          {:ok, chain_with_updated_state}
-        end
+    case LLMChain.run(chain, mode_opts) do
+      {:ok, chain} ->
+        {:ok, chain}
+
+      {:ok, chain, _extra} ->
+        {:ok, chain}
+
+      {:interrupt, chain, interrupt_data} ->
+        {:interrupt, chain, interrupt_data}
+
+      {:pause, chain} ->
+        {:pause, chain}
 
       {:error, _chain, %LangChainError{} = reason} ->
         {:error, reason.message}
 
       {:error, _chain, reason} ->
         {:error, "Agent execution failed: #{inspect(reason)}"}
-    end
-  end
-
-  defp execute_chain_with_hitl(chain, middleware, agent) do
-    # Custom execution loop that checks for interrupts BEFORE executing tools
-    # 1. Call LLM to get a response
-    # 2. Check if response contains tool calls that need approval
-    # 3. If yes, return interrupt WITHOUT executing tools
-    # 4. If no, execute tools, update state, and continue loop
-
-    run_opts = build_run_options(agent)
-
-    case LLMChain.run(chain, run_opts) do
-      {:ok, chain_after_llm} ->
-        # Check if we have tool calls that need approval
-        case check_for_interrupts(chain_after_llm, middleware) do
-          {:interrupt, interrupt_data} ->
-            # Stop here - don't execute tools yet
-            {:interrupt, chain_after_llm, interrupt_data}
-
-          :continue ->
-            # No interrupt needed - execute tools and update state
-            chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
-            chain_with_updated_state = update_chain_state_from_tools(chain_after_tools)
-
-            # Check if we need to continue (needs_response)
-            if chain_with_updated_state.needs_response do
-              # Continue the loop with updated state
-              execute_chain_with_hitl(chain_with_updated_state, middleware, agent)
-            else
-              # Done
-              {:ok, chain_with_updated_state}
-            end
-        end
-
-      {:error, _chain, reason} ->
-        {:error, reason}
     end
   end
 
@@ -856,108 +809,5 @@ defmodule Sagents.Agent do
     {:ok, final_state}
   rescue
     error -> {:error, "Failed to extract state: #{inspect(error)}"}
-  end
-
-  # Update the chain's custom_context.state with state deltas from recently executed tools.
-  # This is critical for tools like TodoList that use merge operations - they need to see
-  # the updated state from previous tool calls in the same execution loop.
-  defp update_chain_state_from_tools(chain) do
-    # Get the current state from custom_context
-    current_state =
-      case chain.custom_context do
-        %{state: %State{} = state} -> state
-        _ -> State.new!()
-      end
-
-    # Extract state deltas from recent tool results
-    state_deltas = extract_state_deltas_from_chain(chain)
-
-    # If no deltas, return chain unchanged
-    if Enum.empty?(state_deltas) do
-      chain
-    else
-      # Merge deltas into current state
-      updated_state =
-        Enum.reduce(state_deltas, current_state, fn delta, acc ->
-          State.merge_states(acc, delta)
-        end)
-
-      # Update chain's custom_context with the new state
-      LLMChain.update_custom_context(chain, %{state: updated_state})
-    end
-  end
-
-  # Extract state deltas (State structs) from the most recent tool results in the chain.
-  # Only looks at tool messages since the last assistant message to avoid re-processing
-  # old tool results.
-  defp extract_state_deltas_from_chain(chain) do
-    # Get messages in reverse order and take only the most recent tool results
-    # (since the last assistant message that made tool calls)
-    chain.messages
-    |> Enum.reverse()
-    |> Enum.take_while(fn msg ->
-      # Stop when we hit the assistant message that made the tool calls
-      not (msg.role == :assistant and Message.is_tool_call?(msg))
-    end)
-    |> Enum.filter(&(&1.role == :tool))
-    |> Enum.flat_map(fn message ->
-      case message.tool_results do
-        nil ->
-          []
-
-        tool_results when is_list(tool_results) ->
-          tool_results
-          |> Enum.filter(fn result ->
-            is_struct(result.processed_content, State)
-          end)
-          |> Enum.map(& &1.processed_content)
-      end
-    end)
-  end
-
-  # HITL (Human-in-the-Loop) helper functions
-
-  defp has_middleware?(middleware_list, target_module) do
-    Enum.any?(middleware_list, fn %MiddlewareEntry{module: module} ->
-      module == target_module
-    end)
-  end
-
-  defp check_for_interrupts(chain, middleware_list) do
-    # Extract agent_id from the chain's custom_context (set in build_chain)
-    agent_id =
-      case chain.custom_context do
-        %{state: %{agent_id: agent_id}} -> agent_id
-        _other -> nil
-      end
-
-    # Convert chain to state for middleware inspection
-    # Include agent_id so HITL can broadcast debug events
-    state = %State{
-      agent_id: agent_id,
-      messages: chain.exchanged_messages,
-      metadata: %{}
-    }
-
-    # Find the HumanInTheLoop middleware
-    hitl_middleware =
-      Enum.find(middleware_list, fn %MiddlewareEntry{module: module} ->
-        module == HumanInTheLoop
-      end)
-
-    case hitl_middleware do
-      nil ->
-        :continue
-
-      %MiddlewareEntry{module: module, config: config} ->
-        # Check if there are any tool calls that need approval
-        case module.check_for_interrupt(state, config) do
-          {:interrupt, interrupt_data} ->
-            {:interrupt, interrupt_data}
-
-          :continue ->
-            :continue
-        end
-    end
   end
 end
