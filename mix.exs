@@ -139,6 +139,7 @@ defmodule Sagents.MixProject do
           Sagents.Todo
         ]
       ],
+      skip_undefined_reference_warnings_on: ["CHANGELOG.md"],
       before_closing_head_tag: &before_closing_head_tag/1,
       before_closing_body_tag: &before_closing_body_tag/1
     ]
