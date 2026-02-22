@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.1
+
+Agent execution now uses LangChain's new customizable run mode system. The duplicated execution loops in `Agent` (`execute_chain_with_state_updates` and `execute_chain_with_hitl`) have been replaced by a single composable mode — `Sagents.Modes.AgentExecution` — built from pipe-friendly step functions.
+
+### Added
+- `Sagents.Modes.AgentExecution` — custom LLMChain execution mode that composes HITL interrupt checking, tool execution, and state propagation into a single pipeline
+- `Sagents.Mode.Steps` — reusable pipe-friendly step functions for building custom execution modes:
+  - `check_pre_tool_hitl/2` — checks tool calls against HITL policy before execution
+  - `propagate_state/2` — merges tool result state deltas into the chain's custom context
+- GitHub Actions CI workflow for automated testing on push and PRs [#14](https://github.com/sagents-ai/sagents/pull/14)
+
+### Changed
+- `Agent.execute_chain/3` now delegates to `Sagents.Modes.AgentExecution` via `LLMChain.run/2` instead of maintaining separate execution loops for HITL and non-HITL agents — removed ~160 lines of duplicated loop logic from `Agent`
+- Requires `langchain ~> 0.5.3` for `LLMChain.execute_step/1` and the `Mode` behaviour
+
+### Fixed
+- HITL `process_decisions/3` now validates that each decision is a map, returning a clear error instead of crashing the AgentServer GenServer [#4](https://github.com/sagents-ai/sagents/pull/4)
+
 ## v0.2.0
 
 Cluster-aware release with optional Horde-based distribution. Agents can now run across a cluster of nodes with automatic state migration, or continue running locally on a single node (the default).
