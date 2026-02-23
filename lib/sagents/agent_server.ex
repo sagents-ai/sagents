@@ -316,6 +316,9 @@ defmodule Sagents.AgentServer do
   - `:conversation_id` - Optional conversation identifier for message persistence (default: nil)
   - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` for state snapshots (default: nil)
   - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` for display messages (default: nil)
+  - `:agent_context` - Application-level context map propagated through the agent hierarchy (default: `%{}`).
+    Accessible via `AgentContext.get()` in the agent process and all sub-agent processes.
+    See `Sagents.AgentContext` for details.
 
   ## Examples
 
@@ -356,6 +359,12 @@ defmodule Sagents.AgentServer do
         agent: agent,
         pubsub: {Phoenix.PubSub, :my_app_pubsub},
         debug_pubsub: {Phoenix.PubSub, :my_debug_pubsub}
+      )
+
+      # With application context (propagated to sub-agents)
+      {:ok, pid} = AgentServer.start_link(
+        agent: agent,
+        agent_context: %{tenant_id: 42, trace_id: "abc123"}
       )
   """
   def start_link(opts) do
