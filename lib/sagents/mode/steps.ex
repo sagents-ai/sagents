@@ -164,6 +164,9 @@ defmodule Sagents.Mode.Steps do
           tool_results
           |> Enum.filter(fn result -> is_struct(result.processed_content, State) end)
           |> Enum.map(& &1.processed_content)
+
+        _ ->
+          []
       end
     end)
   end

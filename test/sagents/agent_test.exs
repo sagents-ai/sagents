@@ -11,6 +11,7 @@ defmodule Sagents.AgentTest do
   alias LangChain.Message.ToolCall
   alias LangChain.Message.ToolResult
   alias Sagents.MiddlewareEntry
+  alias LangChain.LangChainError
 
   # Test middleware for composition testing
 
@@ -685,7 +686,8 @@ defmodule Sagents.AgentTest do
       # It may return an error about the tool not being called (since mock just returns text),
       # but NOT a validation error
       case result do
-        {:error, msg} -> refute msg =~ "not found"
+        {:error, %LangChainError{} = err} -> refute err.message =~ "not found"
+        {:error, msg} when is_binary(msg) -> refute msg =~ "not found"
         _ -> :ok
       end
     end
@@ -807,11 +809,11 @@ defmodule Sagents.AgentTest do
 
       initial_state = State.new!(%{messages: [Message.new_user!("Do something")]})
 
-      assert {:error, msg} =
+      assert {:error, %LangChainError{type: "until_tool_not_called"} = err} =
                Agent.execute(agent, initial_state, until_tool: "submit_report")
 
-      assert msg =~ "submit_report"
-      assert msg =~ "without calling target tool"
+      assert err.message =~ "submit_report"
+      assert err.message =~ "without calling target tool"
     end
 
     test "3-tuple propagation: execute_chain passes extra through" do

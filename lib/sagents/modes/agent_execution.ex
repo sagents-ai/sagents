@@ -52,10 +52,13 @@ defmodule Sagents.Modes.AgentExecution do
 
   # ── Private Helpers ──────────────────────────────────────────────
 
-  @doc false
   defp normalize_until_tool_opts(opts) do
     case Keyword.get(opts, :until_tool) do
       nil ->
+        opts
+
+      # Empty list means no until_tool behavior
+      [] ->
         opts
 
       tool_name when is_binary(tool_name) ->

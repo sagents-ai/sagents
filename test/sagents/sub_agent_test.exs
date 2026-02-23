@@ -32,7 +32,7 @@ defmodule Sagents.SubAgentTest do
   defp test_agent do
     Agent.new!(%{
       model: test_model(),
-      system_prompt: "Test agent",
+      base_system_prompt: "Test agent",
       replace_default_middleware: true,
       middleware: []
     })

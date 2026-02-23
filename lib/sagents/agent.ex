@@ -876,10 +876,10 @@ defmodule Sagents.Agent do
         {:pause, chain}
 
       {:error, _chain, %LangChainError{} = reason} ->
-        {:error, reason.message}
+        {:error, reason}
 
       {:error, _chain, reason} ->
-        {:error, "Agent execution failed: #{inspect(reason)}"}
+        {:error, reason}
     end
   end
 
@@ -922,6 +922,9 @@ defmodule Sagents.Agent do
               is_struct(result.processed_content, State)
             end)
             |> Enum.map(& &1.processed_content)
+
+          _ ->
+            []
         end
       end)
 

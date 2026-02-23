@@ -645,6 +645,10 @@ defmodule Sagents.SubAgent do
       {:ok, final_chain} -> {:ok, final_chain}
       {:ok, final_chain, extra} -> {:ok, final_chain, extra}
       {:interrupt, chain, interrupt_data} -> {:interrupt, chain, interrupt_data}
+      # Infrastructure pause is treated as completion for SubAgents.
+      # SubAgents are short-lived and don't support the external pause signal
+      # that LangChain modes can return. If the mode pauses, we consider the
+      # SubAgent's work done with whatever progress was made.
       {:pause, chain} -> {:ok, chain}
       {:error, _chain, reason} -> {:error, reason}
     end
@@ -791,7 +795,7 @@ defmodule Sagents.SubAgent do
           validate_tool_names_exist(changeset, names, tools)
 
         _ ->
-          changeset
+          add_error(changeset, :until_tool, "must be a string or list of strings")
       end
     end
 
