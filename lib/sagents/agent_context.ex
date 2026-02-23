@@ -18,8 +18,13 @@ defmodule Sagents.AgentContext do
   3. **AgentServer.init/1** calls `AgentContext.init/1` to store it in the process dictionary
   4. **Agent.execute/3** runs in a `Task.async`, which inherits the caller's process dictionary,
      so tools and callbacks can read context via `AgentContext.get/0`
-  5. **SubAgent middleware** calls `AgentContext.fork/1` to snapshot context before
-     spawning a child SubAgentServer, which calls `AgentContext.init/1` in its own process
+  5. **SubAgent middleware** calls `AgentContext.fork_with_middleware/1` to snapshot
+     context before spawning a child SubAgentServer. Each middleware's
+     `on_fork_context/2` callback can inject process-local state (e.g., OpenTelemetry
+     span context) and register restore functions via `add_restore_fn/2`.
+  6. **SubAgentServer.init/1** calls `AgentContext.init/1`, which stores the clean
+     context and runs any registered restore functions to rebuild process-local state
+     in the child process.
 
   This means context is available everywhere in the hierarchy without passing it
   through every function signature.
@@ -65,6 +70,8 @@ defmodule Sagents.AgentContext do
     tool functions.
   """
 
+  require Logger
+
   @key {Sagents, :agent_context}
 
   @doc """
@@ -73,11 +80,28 @@ defmodule Sagents.AgentContext do
   Sets the context map in the process dictionary. Should be called once
   during process initialization (e.g., in `GenServer.init/1`).
 
+  If the context contains `:__context_restore_fns__` (registered via
+  `add_restore_fn/2` during `fork_with_middleware/1`), those functions are
+  popped from the context, the clean context is stored, and each restore
+  function is called with the clean context. Failures in restore functions
+  are logged as warnings but do not prevent init from completing.
+
   Returns `:ok`.
   """
   @spec init(map()) :: :ok
   def init(context) when is_map(context) do
-    Process.put(@key, context)
+    {restore_fns, clean_context} = Map.pop(context, :__context_restore_fns__, [])
+    Process.put(@key, clean_context)
+
+    Enum.each(restore_fns, fn fun ->
+      try do
+        fun.(clean_context)
+      rescue
+        e ->
+          Logger.warning("AgentContext restore function failed: #{Exception.message(e)}")
+      end
+    end)
+
     :ok
   end
 
@@ -121,5 +145,68 @@ defmodule Sagents.AgentContext do
       nil -> ctx
       fun when is_function(fun, 1) -> fun.(ctx)
     end
+  end
+
+  @doc """
+  Fork the current context, giving each middleware the opportunity to inject
+  process-local state via its `on_fork_context/2` callback.
+
+  Reads the current process context via `get/0`, then reduces over the
+  middleware list calling `Middleware.apply_on_fork_context/2` for each entry
+  in list order. Returns the transformed context map.
+
+  This is the preferred way to fork context at sub-agent boundaries, as it
+  ensures middleware like OpenTelemetry tracers or Logger metadata propagators
+  can contribute to the snapshot.
+
+  ## Parameters
+
+  - `middleware_entries` - List of `MiddlewareEntry` structs (in middleware order)
+
+  ## Examples
+
+      child_context = AgentContext.fork_with_middleware(parent_middleware)
+      SubAgentServer.start_link(subagent: subagent, agent_context: child_context)
+  """
+  @spec fork_with_middleware([Sagents.MiddlewareEntry.t()]) :: map()
+  def fork_with_middleware(middleware_entries) when is_list(middleware_entries) do
+    ctx = get()
+
+    Enum.reduce(middleware_entries, ctx, fn entry, acc ->
+      Sagents.Middleware.apply_on_fork_context(acc, entry)
+    end)
+  end
+
+  @doc """
+  Append a restore function to the context map.
+
+  Middleware `on_fork_context/2` implementations use this to register
+  side-effect functions that the child process will call during `init/1`
+  to rebuild process-local state (e.g., attaching OpenTelemetry span context,
+  setting Logger metadata).
+
+  Each restore function is a 1-arity function that receives the clean context
+  map (with `:__context_restore_fns__` already removed).
+
+  ## Parameters
+
+  - `context` - The context map being built during fork
+  - `fun` - A 1-arity function to call in the child process during `init/1`
+
+  ## Examples
+
+      def on_fork_context(context, _config) do
+        otel_ctx = OpenTelemetry.Ctx.get_current()
+        context = Map.put(context, :otel_ctx, otel_ctx)
+
+        AgentContext.add_restore_fn(context, fn ctx ->
+          OpenTelemetry.Ctx.attach(ctx[:otel_ctx])
+        end)
+      end
+  """
+  @spec add_restore_fn(map(), (map() -> any())) :: map()
+  def add_restore_fn(context, fun) when is_map(context) and is_function(fun, 1) do
+    fns = Map.get(context, :__context_restore_fns__, [])
+    Map.put(context, :__context_restore_fns__, fns ++ [fun])
   end
 end
