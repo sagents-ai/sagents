@@ -9,6 +9,21 @@ defmodule Sagents.AgentContext do
   At process boundaries (e.g., spawning sub-agents), use `fork/1` to snapshot the
   context for explicit passing to the child process.
 
+  ## How it works
+
+  Context flows automatically through the agent hierarchy:
+
+  1. **Your application** passes `:agent_context` when starting an agent
+  2. **AgentSupervisor** forwards the context to its child AgentServer
+  3. **AgentServer.init/1** calls `AgentContext.init/1` to store it in the process dictionary
+  4. **Agent.execute/3** runs in a `Task.async`, which inherits the caller's process dictionary,
+     so tools and callbacks can read context via `AgentContext.get/0`
+  5. **SubAgent middleware** calls `AgentContext.fork/1` to snapshot context before
+     spawning a child SubAgentServer, which calls `AgentContext.init/1` in its own process
+
+  This means context is available everywhere in the hierarchy without passing it
+  through every function signature.
+
   ## Usage
 
       # At the application boundary (e.g., LiveView or API controller)
@@ -17,13 +32,37 @@ defmodule Sagents.AgentContext do
         agent_context: %{trace_id: "abc123", tenant_id: 42}
       )
 
-      # Inside a tool function (reads from chain's custom_context or PD)
+      # Inside a tool function
       ctx = AgentContext.get()
       trace_id = AgentContext.fetch(:trace_id)
 
       # When spawning a sub-agent (cross-process boundary)
       child_context = AgentContext.fork(fn ctx -> Map.put(ctx, :parent_span_id, current_span()) end)
       SubAgentServer.start_link(subagent: subagent, agent_context: child_context)
+
+  ## Reading context in tools
+
+  Tool functions run inside `Task.async` spawned by AgentServer, so they
+  inherit the process dictionary. Read context directly:
+
+      defp my_tool_function(_args, context) do
+        tenant_id = AgentContext.fetch(:tenant_id)
+        trace_id = AgentContext.fetch(:trace_id)
+
+        # Use context to scope operations
+        MyApp.Repo.query(data_query, tenant_id: tenant_id)
+      end
+
+  ## Common use cases
+
+  - **Tenant isolation** — Pass `tenant_id` so tools scope database queries
+    and file operations to the correct tenant.
+  - **Distributed tracing** — Propagate `trace_id` and `span_id` so agent
+    activity appears in your OpenTelemetry traces.
+  - **Feature flags** — Include feature flag state so tool behaviour can vary
+    per-user or per-experiment without global lookups.
+  - **User info** — Carry `user_id` or `user_email` for audit logging inside
+    tool functions.
   """
 
   @key {Sagents, :agent_context}
