@@ -311,6 +311,7 @@ defmodule Sagents.AgentSupervisor do
     agent_persistence = Keyword.get(config, :agent_persistence)
     display_message_persistence = Keyword.get(config, :display_message_persistence)
     presence_module = Keyword.get(config, :presence_module)
+    agent_context = Keyword.get(config, :agent_context)
 
     # Build AgentServer options
     agent_server_opts = [
@@ -366,6 +367,12 @@ defmodule Sagents.AgentSupervisor do
     agent_server_opts =
       if presence_module,
         do: Keyword.put(agent_server_opts, :presence_module, presence_module),
+        else: agent_server_opts
+
+    # Add agent_context if provided
+    agent_server_opts =
+      if agent_context,
+        do: Keyword.put(agent_server_opts, :agent_context, agent_context),
         else: agent_server_opts
 
     # Build child specifications
