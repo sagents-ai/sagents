@@ -2,9 +2,14 @@ defmodule Sagents.AgentTest do
   use Sagents.BaseCase, async: true
   use Mimic
 
+  import ExUnit.CaptureLog
+  require Logger
+
   alias Sagents.{Agent, Middleware, State}
   alias LangChain.ChatModels.ChatAnthropic
   alias LangChain.Message
+  alias LangChain.Message.ToolCall
+  alias LangChain.Message.ToolResult
   alias Sagents.MiddlewareEntry
 
   # Test middleware for composition testing
@@ -643,6 +648,344 @@ defmodule Sagents.AgentTest do
       assert_received {:custom_mode_called, opts}
       middleware = Keyword.get(opts, :middleware)
       assert length(middleware) == 1
+    end
+  end
+
+  describe "until_tool execution" do
+    setup do
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Mock response")]}
+      end)
+
+      :ok
+    end
+
+    test "until_tool validation: valid tool name passes" do
+      search_tool =
+        LangChain.Function.new!(%{
+          name: "search",
+          description: "Search for information",
+          function: fn _args, _params -> {:ok, "result"} end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [search_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      # Should not return a validation error - the tool name is valid
+      result = Agent.execute(agent, initial_state, until_tool: "search")
+      # It may return an error about the tool not being called (since mock just returns text),
+      # but NOT a validation error
+      case result do
+        {:error, msg} -> refute msg =~ "not found"
+        _ -> :ok
+      end
+    end
+
+    test "until_tool validation: invalid tool name returns error" do
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:error, msg} = Agent.execute(agent, initial_state, until_tool: "nonexistent")
+      assert msg =~ "until_tool"
+      assert msg =~ "nonexistent"
+      assert msg =~ "not found"
+    end
+
+    test "until_tool validation: multiple tools, one invalid" do
+      search_tool =
+        LangChain.Function.new!(%{
+          name: "search",
+          description: "Search",
+          function: fn _args, _params -> {:ok, "result"} end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [search_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:error, msg} =
+               Agent.execute(agent, initial_state, until_tool: ["search", "nonexistent"])
+
+      assert msg =~ "nonexistent"
+      assert msg =~ "not found"
+      # Only "nonexistent" should be in the missing list, not "search"
+      assert msg =~ ~s|tool(s) ["nonexistent"] not found|
+    end
+
+    test "until_tool: returns 3-tuple when target tool called" do
+      submit_tool =
+        LangChain.Function.new!(%{
+          name: "submit_report",
+          description: "Submit a report",
+          parameters_schema: %{
+            type: "object",
+            properties: %{"title" => %{type: "string"}}
+          },
+          function: fn args, _ctx -> {:ok, Jason.encode!(args)} end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [submit_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      # LLM calls the target tool
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        tool_call =
+          ToolCall.new!(%{
+            call_id: "call_1",
+            name: "submit_report",
+            arguments: %{"title" => "Test Report"}
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+      end)
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Write a report")]})
+
+      assert {:ok, result_state, %ToolResult{name: "submit_report"}} =
+               Agent.execute(agent, initial_state, until_tool: "submit_report")
+
+      assert %State{} = result_state
+    end
+
+    test "until_tool: returns error when LLM stops without calling tool" do
+      submit_tool =
+        LangChain.Function.new!(%{
+          name: "submit_report",
+          description: "Submit a report",
+          function: fn _args, _ctx -> {:ok, "done"} end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [submit_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      # LLM returns a plain text response without calling any tool
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("I'm done talking.")]}
+      end)
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Do something")]})
+
+      assert {:error, msg} =
+               Agent.execute(agent, initial_state, until_tool: "submit_report")
+
+      assert msg =~ "submit_report"
+      assert msg =~ "without calling target tool"
+    end
+
+    test "3-tuple propagation: execute_chain passes extra through" do
+      submit_tool =
+        LangChain.Function.new!(%{
+          name: "submit_report",
+          description: "Submit a report",
+          parameters_schema: %{
+            type: "object",
+            properties: %{"title" => %{type: "string"}}
+          },
+          function: fn args, _ctx -> {:ok, Jason.encode!(args)} end
+        })
+
+      search_tool =
+        LangChain.Function.new!(%{
+          name: "search",
+          description: "Search",
+          function: fn _args, _ctx -> {:ok, "found something"} end
+        })
+
+      # Agent with both tools so LLM can call search first, then submit_report
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [submit_tool, search_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        tool_call =
+          ToolCall.new!(%{
+            call_id: "call_1",
+            name: "search",
+            arguments: %{"query" => "test"}
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+      end)
+      |> expect(:call, fn _model, _messages, _tools ->
+        tool_call =
+          ToolCall.new!(%{
+            call_id: "call_2",
+            name: "submit_report",
+            arguments: %{"title" => "Found it"}
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+      end)
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Research and report")]})
+
+      assert {:ok, result_state, %ToolResult{name: "submit_report"}} =
+               Agent.execute(agent, initial_state, until_tool: "submit_report")
+
+      assert %State{} = result_state
+      # Should have multiple messages from the multi-step execution
+      assert length(result_state.messages) > 2
+    end
+
+    test "resume after HITL interrupt completes with until_tool 3-tuple" do
+      write_file_tool =
+        LangChain.Function.new!(%{
+          name: "write_file",
+          description: "Write content to a file",
+          parameters_schema: %{
+            type: "object",
+            properties: %{
+              "path" => %{type: "string"},
+              "content" => %{type: "string"}
+            },
+            required: ["path", "content"]
+          },
+          function: fn args, _ctx -> {:ok, "File written: #{args["path"]}"} end
+        })
+
+      submit_report_tool =
+        LangChain.Function.new!(%{
+          name: "submit_report",
+          description: "Submit a report",
+          parameters_schema: %{
+            type: "object",
+            properties: %{
+              "title" => %{type: "string"}
+            }
+          },
+          function: fn args, _ctx -> {:ok, Jason.encode!(args)} end
+        })
+
+      # Call 1 (during execute): LLM returns a write_file tool call (HITL protected)
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        tool_call =
+          ToolCall.new!(%{
+            call_id: "call_1",
+            name: "write_file",
+            arguments: %{"path" => "report.txt", "content" => "data"}
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+      end)
+      # Call 2 (during resume, after write_file executes): LLM returns submit_report
+      |> expect(:call, fn _model, _messages, _tools ->
+        tool_call =
+          ToolCall.new!(%{
+            call_id: "call_2",
+            name: "submit_report",
+            arguments: %{"title" => "Final Report"}
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+      end)
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [write_file_tool, submit_report_tool],
+            base_system_prompt: "Test agent",
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"write_file" => true}]}
+            ]
+          },
+          replace_default_middleware: true,
+          interrupt_on: %{"write_file" => true}
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Write a report")]})
+
+      # Step 1: Execute should return HITL interrupt because write_file is protected
+      assert {:interrupt, interrupted_state, interrupt_data} =
+               Agent.execute(agent, initial_state, until_tool: "submit_report")
+
+      # Verify interrupt data
+      assert %{action_requests: [action_request]} = interrupt_data
+      assert action_request.tool_name == "write_file"
+      assert action_request.arguments == %{"path" => "report.txt", "content" => "data"}
+
+      # Step 2: Resume with approval decision for the write_file tool call
+      decisions = [%{type: :approve}]
+
+      assert {:ok, final_state, %ToolResult{name: "submit_report"} = tool_result} =
+               Agent.resume(agent, interrupted_state, decisions, until_tool: "submit_report")
+
+      assert %State{} = final_state
+      # The tool result should contain the submit_report result
+      assert tool_result.name == "submit_report"
+    end
+
+    test "raw LangChain mode warning" do
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            mode: LangChain.Chains.LLMChain.Modes.WhileNeedsResponse,
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      log =
+        capture_log(fn ->
+          Agent.execute(agent, initial_state)
+        end)
+
+      assert log =~ "raw LangChain mode"
+      assert log =~ "HITL interrupts and state propagation will NOT be applied"
+      assert log =~ "WhileNeedsResponse"
     end
   end
 

@@ -131,6 +131,9 @@ defmodule Sagents.SubAgent do
     # Error information (when status = :error)
     field :error, :any, virtual: true
 
+    # Until-tool termination: tool name (string) or list of tool names
+    field :until_tool, :any, virtual: true
+
     # Metadata
     field :id, :string
     field :parent_agent_id, :string
@@ -143,6 +146,7 @@ defmodule Sagents.SubAgent do
           interrupt_on: map() | nil,
           interrupt_data: map() | nil,
           error: term() | nil,
+          until_tool: String.t() | [String.t()] | nil,
           id: String.t() | nil,
           parent_agent_id: String.t() | nil,
           created_at: DateTime.t() | nil
@@ -207,11 +211,15 @@ defmodule Sagents.SubAgent do
     # Extract interrupt_on configuration from agent_config middleware
     interrupt_on = extract_interrupt_on_from_middleware(agent_config.middleware)
 
+    # Optional until_tool termination
+    until_tool = Keyword.get(opts, :until_tool)
+
     %SubAgent{
       id: sub_agent_id,
       parent_agent_id: parent_agent_id,
       chain: chain,
       interrupt_on: interrupt_on,
+      until_tool: until_tool,
       status: :idle,
       created_at: DateTime.utc_now()
     }
@@ -277,11 +285,15 @@ defmodule Sagents.SubAgent do
     # Extract interrupt_on configuration from compiled_agent middleware
     interrupt_on = extract_interrupt_on_from_middleware(compiled_agent.middleware)
 
+    # Optional until_tool termination
+    until_tool = Keyword.get(opts, :until_tool)
+
     %SubAgent{
       id: sub_agent_id,
       parent_agent_id: parent_agent_id,
       chain: chain,
       interrupt_on: interrupt_on,
+      until_tool: until_tool,
       status: :idle,
       created_at: DateTime.utc_now()
     }
@@ -326,7 +338,7 @@ defmodule Sagents.SubAgent do
   """
   def execute(subagent, opts \\ [])
 
-  def execute(%SubAgent{status: :idle, chain: chain, interrupt_on: interrupt_on} = subagent, opts) do
+  def execute(%SubAgent{status: :idle, chain: chain} = subagent, opts) do
     callbacks = Keyword.get(opts, :callbacks, %{})
     Logger.debug("SubAgent #{subagent.id} executing")
 
@@ -336,10 +348,10 @@ defmodule Sagents.SubAgent do
     # Add callbacks to chain once at entry point (not in the loop)
     chain_with_callbacks = maybe_add_callbacks(chain, callbacks)
 
-    # Execute with HITL support using execution loop
-    case execute_chain_with_hitl(chain_with_callbacks, interrupt_on) do
+    # Execute using the mode system
+    case run_with_mode(chain_with_callbacks, subagent) do
       {:ok, final_chain} ->
-        # Chain completed successfully (needs_response = false)
+        # Chain completed successfully
         Logger.debug("SubAgent #{subagent.id} completed successfully")
 
         {:ok,
@@ -348,6 +360,17 @@ defmodule Sagents.SubAgent do
            | status: :completed,
              chain: final_chain
          }}
+
+      {:ok, final_chain, extra} ->
+        # Chain completed with extra data (e.g., until_tool result)
+        Logger.debug("SubAgent #{subagent.id} completed successfully with extra data")
+
+        {:ok,
+         %SubAgent{
+           running_subagent
+           | status: :completed,
+             chain: final_chain
+         }, extra}
 
       {:interrupt, interrupted_chain, interrupt_data} ->
         # Chain hit HITL interrupt
@@ -420,7 +443,6 @@ defmodule Sagents.SubAgent do
         %SubAgent{
           status: :interrupted,
           chain: chain,
-          interrupt_on: interrupt_on,
           interrupt_data: interrupt_data
         } = subagent,
         decisions,
@@ -466,8 +488,8 @@ defmodule Sagents.SubAgent do
         full_decisions
       )
 
-    # Continue execution loop after applying decisions
-    case execute_chain_with_hitl(chain_with_results, interrupt_on) do
+    # Continue execution using the mode system after applying decisions
+    case run_with_mode(chain_with_results, subagent) do
       {:ok, final_chain} ->
         # SubAgent completed after resume
         Logger.debug("SubAgent #{subagent.id} completed after resume")
@@ -478,6 +500,17 @@ defmodule Sagents.SubAgent do
            | status: :completed,
              chain: final_chain
          }}
+
+      {:ok, final_chain, extra} ->
+        # SubAgent completed with extra data after resume
+        Logger.debug("SubAgent #{subagent.id} completed after resume with extra data")
+
+        {:ok,
+         %SubAgent{
+           running_subagent
+           | status: :completed,
+             chain: final_chain
+         }, extra}
 
       {:interrupt, interrupted_chain, new_interrupt_data} ->
         # Another interrupt (multiple HITL tools in sequence)
@@ -598,39 +631,55 @@ defmodule Sagents.SubAgent do
 
   defp extract_interrupt_on_from_middleware(_), do: %{}
 
-  # Execute chain with HITL interrupt detection
-  # This mirrors Agent.execute_chain_with_hitl from agent.ex
+  # Execute chain using the mode system (replaces execute_chain_with_hitl/2)
+  #
+  # Delegates to LLMChain.run/2 with mode: Sagents.Modes.AgentExecution,
+  # giving SubAgents the same pipeline as Agents (check_max_runs, check_pause,
+  # HITL, propagate_state, until_tool).
   #
   # Note: Callbacks should be added to the chain BEFORE calling this function.
-  # This function does not manage callbacks - they persist on the chain across iterations.
-  defp execute_chain_with_hitl(chain, interrupt_on) do
-    # Call LLM to get response
-    case LLMChain.run(chain) do
-      {:ok, chain_after_llm} ->
-        # Check if response has tool calls that need approval
-        case AgentUtils.check_for_hitl_interrupt(chain_after_llm, interrupt_on || %{}) do
-          {:interrupt, interrupt_data} ->
-            # Stop here - don't execute tools yet, wait for human approval
-            {:interrupt, chain_after_llm, interrupt_data}
+  defp run_with_mode(chain, subagent) do
+    mode_opts = build_mode_opts(subagent)
 
-          :continue ->
-            # No interrupt needed - execute tools automatically
-            chain_after_tools = LLMChain.execute_tool_calls(chain_after_llm)
-
-            # Check if chain needs more work (needs_response flag)
-            # If needs_response is nil or true, continue; if false, we're done
-            if Map.get(chain_after_tools, :needs_response, false) do
-              # Continue the loop - LLM needs to respond to tool results
-              execute_chain_with_hitl(chain_after_tools, interrupt_on)
-            else
-              # Chain is done
-              {:ok, chain_after_tools}
-            end
-        end
-
-      {:error, _chain, reason} ->
-        {:error, reason}
+    case LLMChain.run(chain, mode_opts) do
+      {:ok, final_chain} -> {:ok, final_chain}
+      {:ok, final_chain, extra} -> {:ok, final_chain, extra}
+      {:interrupt, chain, interrupt_data} -> {:interrupt, chain, interrupt_data}
+      {:pause, chain} -> {:ok, chain}
+      {:error, _chain, reason} -> {:error, reason}
     end
+  end
+
+  @doc false
+  def build_mode_opts(%SubAgent{interrupt_on: interrupt_on, until_tool: until_tool}) do
+    opts = [mode: Sagents.Modes.AgentExecution]
+
+    opts =
+      if interrupt_on != nil and is_map(interrupt_on) and map_size(interrupt_on) > 0 do
+        # Build a MiddlewareEntry for the HITL middleware so that
+        # check_pre_tool_hitl in the mode pipeline can find it.
+        # We call HumanInTheLoop.init/1 to get a properly normalized config.
+        {:ok, hitl_config} =
+          Sagents.Middleware.HumanInTheLoop.init(interrupt_on: interrupt_on)
+
+        hitl_entry = %Sagents.MiddlewareEntry{
+          id: Sagents.Middleware.HumanInTheLoop,
+          module: Sagents.Middleware.HumanInTheLoop,
+          config: hitl_config
+        }
+
+        Keyword.put(opts, :middleware, [hitl_entry])
+      else
+        opts
+      end
+
+    opts =
+      case until_tool do
+        nil -> opts
+        ut -> Keyword.put(opts, :until_tool, ut)
+      end
+
+    opts
   end
 
   # Helper to conditionally add callbacks to chain
@@ -668,6 +717,7 @@ defmodule Sagents.SubAgent do
       field :model, :any, virtual: true
       field :middleware, {:array, :any}, default: [], virtual: true
       field :interrupt_on, :map
+      field :until_tool, :any, virtual: true
     end
 
     @type t :: %Config{
@@ -677,7 +727,8 @@ defmodule Sagents.SubAgent do
             tools: [LangChain.Function.t()],
             model: term() | nil,
             middleware: list(),
-            interrupt_on: map() | nil
+            interrupt_on: map() | nil,
+            until_tool: String.t() | [String.t()] | nil
           }
 
     def new(attrs) do
@@ -689,13 +740,15 @@ defmodule Sagents.SubAgent do
         :tools,
         :model,
         :middleware,
-        :interrupt_on
+        :interrupt_on,
+        :until_tool
       ])
       |> validate_required([:name, :description, :system_prompt, :tools])
       |> validate_length(:name, min: 1, max: 100)
       |> validate_length(:description, min: 1, max: 500)
       |> validate_length(:system_prompt, min: 1, max: 10_000)
       |> validate_tools()
+      |> validate_until_tool()
       |> apply_action(:insert)
     end
 
@@ -722,6 +775,47 @@ defmodule Sagents.SubAgent do
           add_error(changeset, :tools, "must be a list")
       end
     end
+
+    defp validate_until_tool(changeset) do
+      until_tool = get_field(changeset, :until_tool)
+      tools = get_field(changeset, :tools)
+
+      case until_tool do
+        nil ->
+          changeset
+
+        name when is_binary(name) ->
+          validate_tool_names_exist(changeset, [name], tools)
+
+        names when is_list(names) ->
+          validate_tool_names_exist(changeset, names, tools)
+
+        _ ->
+          changeset
+      end
+    end
+
+    defp validate_tool_names_exist(changeset, names, tools) when is_list(tools) do
+      tool_names =
+        tools
+        |> Enum.filter(&is_struct(&1, LangChain.Function))
+        |> Enum.map(& &1.name)
+        |> MapSet.new()
+
+      missing = Enum.reject(names, &MapSet.member?(tool_names, &1))
+
+      if missing == [] do
+        changeset
+      else
+        add_error(
+          changeset,
+          :until_tool,
+          "references tools that are not in the tools list: #{Enum.join(missing, ", ")}"
+        )
+      end
+    end
+
+    defp validate_tool_names_exist(changeset, _names, _tools), do: changeset
   end
 
   defmodule Compiled do

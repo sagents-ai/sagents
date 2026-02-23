@@ -1323,6 +1323,301 @@ defmodule Sagents.SubAgentTest do
     end
   end
 
+  describe "SubAgentConfig until_tool field" do
+    test "Config.new accepts until_tool as a string" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        system_prompt: "You are a test agent",
+        tools: [test_tool("submit")],
+        until_tool: "submit"
+      }
+
+      assert {:ok, config} = SubAgentConfig.new(attrs)
+      assert config.until_tool == "submit"
+    end
+
+    test "Config.new accepts until_tool as a list of strings" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        system_prompt: "You are a test agent",
+        tools: [test_tool("submit"), test_tool("finalize")],
+        until_tool: ["submit", "finalize"]
+      }
+
+      assert {:ok, config} = SubAgentConfig.new(attrs)
+      assert config.until_tool == ["submit", "finalize"]
+    end
+
+    test "Config.new defaults until_tool to nil when not provided" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        system_prompt: "You are a test agent",
+        tools: [test_tool()]
+      }
+
+      assert {:ok, config} = SubAgentConfig.new(attrs)
+      assert config.until_tool == nil
+    end
+
+    test "Config rejects until_tool referencing nonexistent tool" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        system_prompt: "You are a test agent",
+        tools: [test_tool("real_tool")],
+        until_tool: "nonexistent"
+      }
+
+      assert {:error, changeset} = SubAgentConfig.new(attrs)
+      errors = errors_on(changeset)
+      assert errors[:until_tool]
+      assert hd(errors[:until_tool]) =~ "nonexistent"
+    end
+
+    test "Config rejects until_tool list with nonexistent tool" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        system_prompt: "You are a test agent",
+        tools: [test_tool("real_tool")],
+        until_tool: ["real_tool", "nonexistent"]
+      }
+
+      assert {:error, changeset} = SubAgentConfig.new(attrs)
+      errors = errors_on(changeset)
+      assert errors[:until_tool]
+      assert hd(errors[:until_tool]) =~ "nonexistent"
+    end
+
+    test "Config accepts valid until_tool name" do
+      tool = test_tool("submit_result")
+
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        system_prompt: "You are a test agent",
+        tools: [tool],
+        until_tool: "submit_result"
+      }
+
+      assert {:ok, config} = SubAgentConfig.new(attrs)
+      assert config.until_tool == "submit_result"
+    end
+  end
+
+  describe "SubAgent until_tool schema field" do
+    test "SubAgent struct has until_tool field defaulting to nil" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          parent_state: %{messages: []}
+        )
+
+      assert %SubAgent{} = subagent
+      assert subagent.until_tool == nil
+    end
+  end
+
+  describe "new_from_config/1 with until_tool" do
+    test "passes until_tool from opts to SubAgent struct" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          parent_state: %{messages: []},
+          until_tool: "submit"
+        )
+
+      assert %SubAgent{} = subagent
+      assert subagent.until_tool == "submit"
+    end
+
+    test "passes until_tool list from opts to SubAgent struct" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          parent_state: %{messages: []},
+          until_tool: ["submit", "finalize"]
+        )
+
+      assert %SubAgent{} = subagent
+      assert subagent.until_tool == ["submit", "finalize"]
+    end
+
+    test "defaults until_tool to nil when not in opts" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          parent_state: %{messages: []}
+        )
+
+      assert subagent.until_tool == nil
+    end
+  end
+
+  describe "new_from_compiled/1 with until_tool" do
+    test "passes until_tool from opts to SubAgent struct" do
+      compiled_agent = test_agent()
+
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          compiled_agent: compiled_agent,
+          parent_state: %{messages: []},
+          until_tool: "submit"
+        )
+
+      assert %SubAgent{} = subagent
+      assert subagent.until_tool == "submit"
+    end
+
+    test "defaults until_tool to nil when not in opts" do
+      compiled_agent = test_agent()
+
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          compiled_agent: compiled_agent,
+          parent_state: %{messages: []}
+        )
+
+      assert subagent.until_tool == nil
+    end
+  end
+
+  describe "build_mode_opts/1" do
+    test "returns just mode when no HITL and no until_tool" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          parent_state: %{messages: []}
+        )
+
+      opts = SubAgent.build_mode_opts(subagent)
+
+      assert Keyword.get(opts, :mode) == Sagents.Modes.AgentExecution
+      refute Keyword.has_key?(opts, :middleware)
+      refute Keyword.has_key?(opts, :until_tool)
+    end
+
+    test "returns opts with middleware entry when HITL interrupt_on is set" do
+      agent_config =
+        Agent.new!(%{
+          model: test_model(),
+          system_prompt: "Test",
+          replace_default_middleware: true,
+          middleware: [
+            {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"dangerous_tool" => true}]}
+          ]
+        })
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          parent_state: %{messages: []}
+        )
+
+      opts = SubAgent.build_mode_opts(subagent)
+
+      assert Keyword.get(opts, :mode) == Sagents.Modes.AgentExecution
+      assert [%MiddlewareEntry{} = entry] = Keyword.get(opts, :middleware)
+      assert entry.module == Sagents.Middleware.HumanInTheLoop
+      assert is_map(entry.config.interrupt_on)
+      assert Map.has_key?(entry.config.interrupt_on, "dangerous_tool")
+    end
+
+    test "returns opts with until_tool when set" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          parent_state: %{messages: []},
+          until_tool: "submit"
+        )
+
+      opts = SubAgent.build_mode_opts(subagent)
+
+      assert Keyword.get(opts, :mode) == Sagents.Modes.AgentExecution
+      assert Keyword.get(opts, :until_tool) == "submit"
+      refute Keyword.has_key?(opts, :middleware)
+    end
+
+    test "returns opts with both middleware and until_tool when both are set" do
+      agent_config =
+        Agent.new!(%{
+          model: test_model(),
+          system_prompt: "Test",
+          replace_default_middleware: true,
+          middleware: [
+            {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"write_file" => true}]}
+          ]
+        })
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          parent_state: %{messages: []},
+          until_tool: ["submit", "finalize"]
+        )
+
+      opts = SubAgent.build_mode_opts(subagent)
+
+      assert Keyword.get(opts, :mode) == Sagents.Modes.AgentExecution
+      assert [%MiddlewareEntry{}] = Keyword.get(opts, :middleware)
+      assert Keyword.get(opts, :until_tool) == ["submit", "finalize"]
+    end
+
+    test "does not include middleware when interrupt_on is empty map" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          parent_state: %{messages: []}
+        )
+
+      # Verify interrupt_on is empty
+      assert subagent.interrupt_on == %{}
+
+      opts = SubAgent.build_mode_opts(subagent)
+
+      refute Keyword.has_key?(opts, :middleware)
+    end
+  end
+
   # Helper function to extract errors from changeset
   defp errors_on(changeset) do
     Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->

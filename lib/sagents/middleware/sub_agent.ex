@@ -167,6 +167,14 @@ defmodule Sagents.Middleware.SubAgent do
         # Build descriptions map for tool schema
         descriptions = SubAgent.build_descriptions(subagents)
 
+        # Build until_tool map from subagent configs that have until_tool set
+        until_tool_map =
+          subagents
+          |> Enum.filter(fn config ->
+            is_struct(config, SubAgent.Config) and config.until_tool != nil
+          end)
+          |> Map.new(fn config -> {config.name, config.until_tool} end)
+
         # Add "general-purpose" entry for dynamic subagent creation
         # This special marker enables runtime tool inheritance
         agent_map_with_general = Map.put(agent_map, "general-purpose", :dynamic)
@@ -185,7 +193,8 @@ defmodule Sagents.Middleware.SubAgent do
           descriptions: descriptions_with_general,
           agent_id: agent_id,
           model: model,
-          block_middleware: block_middleware
+          block_middleware: block_middleware,
+          until_tool_map: until_tool_map
         }
 
         {:ok, config}
@@ -401,7 +410,10 @@ defmodule Sagents.Middleware.SubAgent do
   - SubAgents are supervised and cleaned up automatically
   """
   @spec start_subagent(String.t(), String.t(), map(), map(), map()) ::
-          {:ok, String.t()} | {:interrupt, map()} | {:error, String.t()}
+          {:ok, String.t()}
+          | {:ok, String.t(), term()}
+          | {:interrupt, map()}
+          | {:error, String.t()}
   def start_subagent(instructions, subagent_type, args, context, config) do
     Logger.debug("Starting SubAgent: #{subagent_type}")
 
@@ -412,6 +424,10 @@ defmodule Sagents.Middleware.SubAgent do
         start_dynamic_subagent(instructions, args, context, config)
 
       {:ok, agent_config} ->
+        # Look up until_tool configuration for this subagent type
+        until_tool_map = Map.get(config, :until_tool_map, %{})
+        until_tool = Map.get(until_tool_map, subagent_type)
+
         # Create SubAgent struct from pre-configured agent
         # Check if it's a Compiled struct (with initial_messages) or just an Agent
         subagent =
@@ -422,7 +438,8 @@ defmodule Sagents.Middleware.SubAgent do
                 parent_agent_id: config.agent_id,
                 instructions: instructions,
                 compiled_agent: compiled.agent,
-                initial_messages: compiled.initial_messages || []
+                initial_messages: compiled.initial_messages || [],
+                until_tool: until_tool
               )
 
             agent ->
@@ -430,7 +447,8 @@ defmodule Sagents.Middleware.SubAgent do
               SubAgent.new_from_config(
                 parent_agent_id: config.agent_id,
                 instructions: instructions,
-                agent_config: agent
+                agent_config: agent,
+                until_tool: until_tool
               )
           end
 
@@ -621,6 +639,11 @@ defmodule Sagents.Middleware.SubAgent do
         Logger.debug("SubAgent #{sub_agent_id} completed")
         {:ok, final_result}
 
+      {:ok, final_result, extra} ->
+        # SubAgent completed with extra data (e.g., until_tool result)
+        Logger.debug("SubAgent #{sub_agent_id} completed with extra data")
+        {:ok, final_result, extra}
+
       {:interrupt, interrupt_data} ->
         # SubAgent needs HITL approval
         # Propagate interrupt to parent with enhanced metadata
@@ -654,6 +677,11 @@ defmodule Sagents.Middleware.SubAgent do
         # SubAgent completed after approval
         Logger.debug("SubAgent #{sub_agent_id} completed after resume")
         {:ok, final_result}
+
+      {:ok, final_result, extra} ->
+        # SubAgent completed with extra data after approval
+        Logger.debug("SubAgent #{sub_agent_id} completed after resume with extra data")
+        {:ok, final_result, extra}
 
       {:interrupt, interrupt_data} ->
         # Another interrupt (e.g., SubAgent needs approval for another tool)

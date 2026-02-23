@@ -276,6 +276,39 @@ defmodule Sagents.AgentServerTest do
       assert info.error == "Something went wrong"
     end
 
+    test "handles 3-tuple {:ok, state, extra} from until_tool completion", %{
+      agent: agent,
+      agent_id: agent_id
+    } do
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      extra_data = %{tool_name: "submit", result: %{"answer" => 42}}
+
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        new_state = State.add_message(state, Message.new_assistant!(%{content: "Done!"}))
+        {:ok, new_state, extra_data}
+      end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      assert :ok = AgentServer.execute(agent_id)
+
+      # Wait for execution to complete
+      Process.sleep(50)
+
+      # Should transition to :idle, not crash
+      assert AgentServer.get_status(agent_id) == :idle
+      state = AgentServer.get_state(agent_id)
+      assert length(state.messages) == 2
+    end
+
     test "handles agent interrupt", %{agent: agent, agent_id: agent_id} do
       initial_state = State.new!(%{messages: [Message.new_user!("Write file")]})
 
@@ -459,6 +492,31 @@ defmodule Sagents.AgentServerTest do
       assert {:error, _} = AgentServer.resume(new_agent_id, decisions)
     end
 
+    test "handles 3-tuple {:ok, state, extra} from resume with until_tool", %{
+      agent: agent,
+      agent_id: agent_id
+    } do
+      decisions = [%{type: :approve}]
+      extra_data = %{tool_name: "submit", result: %{"answer" => 42}}
+
+      Agent
+      |> expect(:resume, fn ^agent, state, ^decisions, _opts ->
+        new_state = State.add_message(state, Message.new_assistant!(%{content: "Resumed!"}))
+        {:ok, new_state, extra_data}
+      end)
+
+      assert :ok = AgentServer.resume(agent_id, decisions)
+
+      # Wait for resume to complete
+      Process.sleep(50)
+
+      # Should transition to :idle, not crash
+      assert AgentServer.get_status(agent_id) == :idle
+      state = AgentServer.get_state(agent_id)
+      # Original message + assistant response
+      assert length(state.messages) == 2
+    end
+
     test "handles resume error", %{agent: agent, agent_id: agent_id} do
       decisions = [%{type: :approve}]
 
@@ -518,6 +576,64 @@ defmodule Sagents.AgentServerTest do
       assert_receive {:agent, {:status_changed, :idle, nil}}, 100
     end
 
+    test "broadcasts idle status on 3-tuple until_tool completion", %{
+      agent: agent,
+      agent_id: agent_id
+    } do
+      extra_data = %{tool_name: "submit", result: %{"answer" => 42}}
+
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        {:ok, state, extra_data}
+      end)
+
+      :ok = AgentServer.execute(agent_id)
+
+      # Should receive running status
+      assert_receive {:agent, {:status_changed, :running, nil}}, 100
+
+      # Should receive idle status (3-tuple delegates to normal completion handler)
+      assert_receive {:agent, {:status_changed, :idle, nil}}, 100
+    end
+
+    test "broadcasts idle status on 3-tuple until_tool completion from resume", %{
+      agent: agent,
+      agent_id: agent_id
+    } do
+      interrupt_data = %{
+        action_requests: [%{tool_name: "write_file"}],
+        review_configs: %{}
+      }
+
+      # First, execute to get into interrupted state
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        {:interrupt, state, interrupt_data}
+      end)
+
+      :ok = AgentServer.execute(agent_id)
+
+      assert_receive {:agent, {:status_changed, :running, nil}}, 100
+      assert_receive {:agent, {:status_changed, :interrupted, ^interrupt_data}}, 200
+
+      # Now resume with 3-tuple result
+      decisions = [%{type: :approve}]
+      extra_data = %{tool_name: "submit", result: %{"answer" => 42}}
+
+      Agent
+      |> expect(:resume, fn ^agent, _state, ^decisions, _opts ->
+        {:ok, State.new!(%{messages: [Message.new_assistant!(%{content: "Done!"})]}), extra_data}
+      end)
+
+      :ok = AgentServer.resume(agent_id, decisions)
+
+      # Should receive running status from resume
+      assert_receive {:agent, {:status_changed, :running, nil}}, 100
+
+      # Should receive idle status (3-tuple from resume delegates to normal completion handler)
+      assert_receive {:agent, {:status_changed, :idle, nil}}, 100
+    end
+
     test "broadcasts interrupt status with data", %{agent: agent, agent_id: agent_id} do
       interrupt_data = %{
         action_requests: [%{tool_name: "write_file"}],
@@ -566,6 +682,135 @@ defmodule Sagents.AgentServerTest do
 
       # Should receive cancelled status (wrapped in {:agent, event} tuple)
       assert_receive {:agent, {:status_changed, :cancelled, _state}}, 100
+    end
+  end
+
+  describe "state persistence on 3-tuple completion" do
+    alias Sagents.TestAgentPersistence
+
+    setup do
+      # Start a test PubSub
+      pubsub_name = :"test_pubsub_#{:erlang.unique_integer([:positive])}"
+      {:ok, _} = start_supervised({Phoenix.PubSub, name: pubsub_name})
+
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      # Set up the test persistence collector
+      TestAgentPersistence.setup()
+
+      {:ok, agent: agent, agent_id: agent_id, pubsub_name: pubsub_name}
+    end
+
+    test "calls agent_persistence on execute 3-tuple completion", %{
+      agent: agent,
+      agent_id: agent_id,
+      pubsub_name: pubsub_name
+    } do
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      extra_data = %{tool_name: "submit", result: %{"answer" => 42}}
+
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        new_state = State.add_message(state, Message.new_assistant!(%{content: "Done!"}))
+        {:ok, new_state, extra_data}
+      end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: {Phoenix.PubSub, pubsub_name},
+          id: "test_persist_#{:erlang.unique_integer([:positive])}",
+          agent_persistence: TestAgentPersistence
+        )
+
+      :ok = AgentServer.execute(agent_id)
+
+      # Wait for execution to complete
+      Process.sleep(100)
+
+      assert AgentServer.get_status(agent_id) == :idle
+
+      # Verify persistence was called with :on_completion context
+      calls = TestAgentPersistence.get_calls_for(agent_id)
+
+      completion_call =
+        Enum.find(calls, fn {_id, _data, ctx} -> ctx == :on_completion end)
+
+      assert completion_call != nil
+      {persisted_agent_id, persisted_state_data, :on_completion} = completion_call
+      assert persisted_agent_id == agent_id
+      assert persisted_state_data["version"] == 1
+      assert persisted_state_data["state"] != nil
+    end
+
+    test "calls agent_persistence on resume 3-tuple completion", %{
+      agent: agent,
+      agent_id: agent_id,
+      pubsub_name: pubsub_name
+    } do
+      initial_state = State.new!(%{messages: [Message.new_user!("Write file")]})
+
+      interrupt_data = %{
+        action_requests: [
+          %{tool_name: "write_file", arguments: %{"path" => "test.txt", "content" => "data"}}
+        ],
+        review_configs: %{}
+      }
+
+      extra_data = %{tool_name: "submit", result: %{"answer" => 42}}
+
+      # Mock execute to return interrupt
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        {:interrupt, state, interrupt_data}
+      end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: {Phoenix.PubSub, pubsub_name},
+          id: "test_persist_resume_#{:erlang.unique_integer([:positive])}",
+          agent_persistence: TestAgentPersistence
+        )
+
+      :ok = AgentServer.execute(agent_id)
+      Process.sleep(100)
+
+      assert AgentServer.get_status(agent_id) == :interrupted
+
+      # Clear calls from the interrupt persistence so we can isolate the resume calls
+      TestAgentPersistence.clear()
+
+      # Now resume with 3-tuple result
+      decisions = [%{type: :approve}]
+
+      Agent
+      |> expect(:resume, fn ^agent, state, ^decisions, _opts ->
+        new_state = State.add_message(state, Message.new_assistant!(%{content: "Resumed!"}))
+        {:ok, new_state, extra_data}
+      end)
+
+      :ok = AgentServer.resume(agent_id, decisions)
+      Process.sleep(100)
+
+      assert AgentServer.get_status(agent_id) == :idle
+
+      # Verify persistence was called with :on_completion context for resume 3-tuple
+      calls = TestAgentPersistence.get_calls_for(agent_id)
+
+      completion_call =
+        Enum.find(calls, fn {_id, _data, ctx} -> ctx == :on_completion end)
+
+      assert completion_call != nil
+      {persisted_agent_id, persisted_state_data, :on_completion} = completion_call
+      assert persisted_agent_id == agent_id
+      assert persisted_state_data["version"] == 1
     end
   end
 

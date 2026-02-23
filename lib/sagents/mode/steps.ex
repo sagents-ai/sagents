@@ -7,6 +7,7 @@ defmodule Sagents.Mode.Steps do
   """
 
   alias LangChain.Chains.LLMChain
+  alias LangChain.LangChainError
   alias LangChain.Message
   alias Sagents.State
   alias Sagents.MiddlewareEntry
@@ -69,6 +70,60 @@ defmodule Sagents.Mode.Steps do
   end
 
   def propagate_state(terminal, _opts), do: terminal
+
+  # ── Loop Boundary (with until_tool enforcement) ────────────────
+
+  @doc """
+  Decide whether to loop or return, with until_tool contract enforcement.
+
+  This is a safer variant of LangChain's `continue_or_done/3` that adds
+  enforcement of the "until_tool" contract: if the LLM stops (needs_response
+  becomes false) without ever calling the target tool, it returns an error
+  instead of `{:ok, chain}`.
+
+  If the target tool WAS called, `check_until_tool/2` would have already
+  converted the pipeline to `{:ok, chain, tool_result}`, which passes
+  through here as a terminal.
+
+  ## When `until_tool_active` is false or absent in opts
+
+  - `{:continue, chain}` with `needs_response: true` -> calls `run_fn.(chain, opts)` (loop)
+  - `{:continue, chain}` with `needs_response: false` -> `{:ok, chain}` (normal completion)
+  - Any terminal tuple -> pass through unchanged
+
+  ## When `until_tool_active` is true in opts
+
+  - `{:continue, chain}` with `needs_response: true` -> calls `run_fn.(chain, opts)` (loop)
+  - `{:continue, chain}` with `needs_response: false` -> `{:error, chain, %LangChainError{...}}`
+  - Any terminal tuple -> pass through unchanged
+  """
+  def continue_or_done_safe(
+        {:continue, %LLMChain{needs_response: true} = chain},
+        run_fn,
+        opts
+      ) do
+    run_fn.(chain, opts)
+  end
+
+  def continue_or_done_safe({:continue, chain}, _run_fn, opts) do
+    if Keyword.get(opts, :until_tool_active, false) do
+      tool_names = Keyword.get(opts, :tool_names, [])
+
+      {:error, chain,
+       LangChainError.exception(
+         type: "until_tool_not_called",
+         message:
+           "Agent completed without calling target tool(s): #{inspect(tool_names)}. " <>
+             "The LLM stopped responding before invoking the required tool."
+       )}
+    else
+      {:ok, chain}
+    end
+  end
+
+  def continue_or_done_safe(terminal, _run_fn, _opts) do
+    terminal
+  end
 
   # ── Private Helpers (extracted from Agent) ──────────────────────
 

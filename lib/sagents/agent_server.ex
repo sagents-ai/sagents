@@ -2044,6 +2044,11 @@ defmodule Sagents.AgentServer do
         broadcast_state_changes(server_state, new_state)
         {:ok, new_state}
 
+      {:ok, new_state, extra} ->
+        # until_tool structured completion - broadcast state changes and pass through extra
+        broadcast_state_changes(server_state, new_state)
+        {:ok, new_state, extra}
+
       {:interrupt, %State{} = interrupted_state, interrupt_data} ->
         # Broadcast state changes up to interrupt point
         broadcast_state_changes(server_state, interrupted_state)
@@ -2066,6 +2071,11 @@ defmodule Sagents.AgentServer do
         broadcast_state_changes(server_state, new_state)
         {:ok, new_state}
 
+      {:ok, new_state, extra} ->
+        # until_tool structured completion after resume - broadcast and pass through extra
+        broadcast_state_changes(server_state, new_state)
+        {:ok, new_state, extra}
+
       {:interrupt, interrupted_state, interrupt_data} ->
         # Another interrupt occurred during resume
         broadcast_state_changes(server_state, interrupted_state)
@@ -2074,6 +2084,14 @@ defmodule Sagents.AgentServer do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp handle_execution_result({:ok, new_state, _extra}, server_state) do
+    # until_tool structured completion - the extra data (tool result) is available
+    # in the state's messages. For AgentServer (async/PubSub-driven), the important
+    # signal is that execution completed successfully. The extra structured data
+    # flows through PubSub events or can be retrieved from state.
+    handle_execution_result({:ok, new_state}, server_state)
   end
 
   defp handle_execution_result({:ok, new_state}, server_state) do

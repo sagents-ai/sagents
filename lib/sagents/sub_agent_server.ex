@@ -173,7 +173,8 @@ defmodule Sagents.SubAgentServer do
         {:error, reason} -> handle_error(reason)
       end
   """
-  @spec execute(String.t()) :: {:ok, String.t()} | {:interrupt, map()} | {:error, term()}
+  @spec execute(String.t()) ::
+          {:ok, String.t()} | {:ok, String.t(), term()} | {:interrupt, map()} | {:error, term()}
   def execute(sub_agent_id) when is_binary(sub_agent_id) do
     GenServer.call(get_name(sub_agent_id), :execute, :infinity)
   end
@@ -205,7 +206,7 @@ defmodule Sagents.SubAgentServer do
       end
   """
   @spec resume(String.t(), list(map())) ::
-          {:ok, String.t()} | {:interrupt, map()} | {:error, term()}
+          {:ok, String.t()} | {:ok, String.t(), term()} | {:interrupt, map()} | {:error, term()}
   def resume(sub_agent_id, decisions) when is_binary(sub_agent_id) and is_list(decisions) do
     GenServer.call(get_name(sub_agent_id), {:resume, decisions}, :infinity)
   end
@@ -275,31 +276,10 @@ defmodule Sagents.SubAgentServer do
     # Delegate to SubAgent.execute with callbacks
     case SubAgent.execute(subagent, callbacks: callbacks) do
       {:ok, completed_subagent} ->
-        # Extract result - returns {:ok, result} or {:error, reason}
-        case SubAgent.extract_result(completed_subagent) do
-          {:ok, result} ->
-            new_state = %{server_state | subagent: completed_subagent}
+        handle_completed_subagent(server_state, completed_subagent, nil)
 
-            # Broadcast completion event
-            broadcast_subagent_event(
-              new_state,
-              {:subagent_completed, build_completed_metadata(new_state, result)}
-            )
-
-            {:reply, {:ok, result}, new_state}
-
-          {:error, reason} ->
-            Logger.error(
-              "SubAgentServer: #{subagent.id} result extraction error: #{inspect(reason)}"
-            )
-
-            new_state = %{server_state | subagent: completed_subagent}
-
-            # Broadcast error event
-            broadcast_subagent_event(new_state, {:subagent_error, reason})
-
-            {:reply, {:error, reason}, new_state}
-        end
+      {:ok, completed_subagent, extra} ->
+        handle_completed_subagent(server_state, completed_subagent, extra)
 
       {:interrupt, interrupted_subagent} ->
         # SubAgent hit HITL interrupt
@@ -341,32 +321,11 @@ defmodule Sagents.SubAgentServer do
     case SubAgent.resume(subagent, decisions, callbacks: callbacks) do
       {:ok, completed_subagent} ->
         Logger.debug("SubAgentServer #{subagent.id} completed after resume")
+        handle_completed_subagent(server_state, completed_subagent, nil)
 
-        # Extract result - returns {:ok, result} or {:error, reason}
-        case SubAgent.extract_result(completed_subagent) do
-          {:ok, result} ->
-            new_state = %{server_state | subagent: completed_subagent}
-
-            # Broadcast completion event
-            broadcast_subagent_event(
-              new_state,
-              {:subagent_completed, build_completed_metadata(new_state, result)}
-            )
-
-            {:reply, {:ok, result}, new_state}
-
-          {:error, reason} ->
-            Logger.error(
-              "SubAgentServer #{subagent.id} result extraction error: #{inspect(reason)}"
-            )
-
-            new_state = %{server_state | subagent: completed_subagent}
-
-            # Broadcast error event
-            broadcast_subagent_event(new_state, {:subagent_error, reason})
-
-            {:reply, {:error, reason}, new_state}
-        end
+      {:ok, completed_subagent, extra} ->
+        Logger.debug("SubAgentServer #{subagent.id} completed after resume with extra data")
+        handle_completed_subagent(server_state, completed_subagent, extra)
 
       {:interrupt, interrupted_subagent} ->
         # Another interrupt (multiple HITL tools)
@@ -419,6 +378,36 @@ defmodule Sagents.SubAgentServer do
     case subagent.chain do
       %{custom_context: %{parent_middleware: mw}} when is_list(mw) -> mw
       _ -> []
+    end
+  end
+
+  # Handle a completed SubAgent, extracting the result and optionally passing through extra data.
+  # Used by both execute and resume handlers to avoid duplication.
+  defp handle_completed_subagent(server_state, completed_subagent, extra) do
+    case SubAgent.extract_result(completed_subagent) do
+      {:ok, result} ->
+        new_state = %{server_state | subagent: completed_subagent}
+
+        # Broadcast completion event
+        broadcast_subagent_event(
+          new_state,
+          {:subagent_completed, build_completed_metadata(new_state, result)}
+        )
+
+        reply = if extra, do: {:ok, result, extra}, else: {:ok, result}
+        {:reply, reply, new_state}
+
+      {:error, reason} ->
+        Logger.error(
+          "SubAgentServer: #{completed_subagent.id} result extraction error: #{inspect(reason)}"
+        )
+
+        new_state = %{server_state | subagent: completed_subagent}
+
+        # Broadcast error event
+        broadcast_subagent_event(new_state, {:subagent_error, reason})
+
+        {:reply, {:error, reason}, new_state}
     end
   end
 
