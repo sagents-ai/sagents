@@ -258,6 +258,30 @@ defmodule Sagents.Middleware do
 
   - A map of callback keys to handler functions
 
+  ## Available Callback Keys
+
+  These are the LangChain-native keys supported by `LLMChain`. Use only these
+  keys in your callback map (see `LangChain.Chains.ChainCallbacks` for full
+  type signatures):
+
+  **Model-level callbacks:**
+  - `:on_llm_new_delta` - Streaming token/delta received
+  - `:on_llm_new_message` - Complete message from LLM
+  - `:on_llm_ratelimit_info` - Rate limit headers from provider
+  - `:on_llm_token_usage` - Token usage information
+  - `:on_llm_response_headers` - Raw response headers
+
+  **Chain-level callbacks:**
+  - `:on_message_processed` - Message fully processed by chain
+  - `:on_message_processing_error` - Error processing a message
+  - `:on_error_message_created` - Error message created
+  - `:on_tool_call_identified` - Tool call detected during streaming
+  - `:on_tool_execution_started` - Tool begins executing
+  - `:on_tool_execution_completed` - Tool finished successfully
+  - `:on_tool_execution_failed` - Tool execution errored
+  - `:on_tool_response_created` - Tool response message created
+  - `:on_retries_exceeded` - Max retries exhausted
+
   ## Example
 
       def callbacks(_config) do

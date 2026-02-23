@@ -108,7 +108,11 @@ When adding new chain types:
 - **API Keys**: Never commit API keys. Use environment variables via `.envrc`
 - **Live Tests**: Be cautious with live tests as they incur API costs
 - **Multi-modal**: When working with messages, use `ContentPart` structures
-- **Callbacks**: Chains support extensive callback system for monitoring and extending behavior
+- **Callbacks**: There are two callback systems that get combined into a single list of handler maps:
+  1. **LangChain callbacks** — keys like `:on_llm_token_usage`, `:on_message_processed`, etc. These are added to the LLMChain via `add_callback/2` and fired by `LLMChain.run/2`. See `LangChain.Chains.ChainCallbacks` for valid keys.
+  2. **Sagents-specific callbacks** — currently just `:on_after_middleware`, fired manually by `Agent.execute/3` after `before_model` hooks complete. Not a LangChain key.
+
+  Both types live in the same list of maps passed via `callbacks: [map1, map2, ...]`. AgentServer builds this list by combining PubSub broadcast callbacks (`build_pubsub_callbacks/1`) with middleware callbacks (`Middleware.collect_callbacks/1`). All maps fire in fan-out: if two maps have the same key, both handlers fire. Middleware can declare LangChain callbacks via the `callbacks/1` behaviour callback.
 
 
 ## Project guidelines

@@ -392,6 +392,22 @@ defmodule Sagents.Agent do
   2. LLM execution
   3. after_model hooks (in reverse order)
 
+  ## Options
+
+  - `:callbacks` - A list of callback handler maps. Each map may contain
+    LangChain callback keys (see `LangChain.Chains.ChainCallbacks`) and/or
+    the Sagents-specific `:on_after_middleware` key. All maps are added to
+    the LLMChain, and matching handlers fire in fan-out (all maps checked).
+
+    LangChain callback keys (e.g., `:on_llm_token_usage`, `:on_message_processed`)
+    are fired by `LLMChain.run/2` during execution. The `:on_after_middleware`
+    key is fired by the agent directly after `before_model` hooks complete,
+    before the LLM call — it receives the prepared state as its single argument.
+
+    When running via `AgentServer`, callbacks are built automatically:
+    PubSub callbacks (for broadcasting events) are combined with middleware
+    callbacks (from `Middleware.collect_callbacks/1`) into this list.
+
   ## Returns
 
   - `{:ok, state}` - Normal completion
@@ -417,6 +433,17 @@ defmodule Sagents.Agent do
           # Handle error
           Logger.error("Agent execution failed: \#{inspect(err)}")
       end
+
+      # With custom callbacks
+      callbacks = [
+        %{
+          on_llm_token_usage: fn _chain, usage ->
+            IO.inspect(usage, label: "tokens")
+          end
+        }
+      ]
+
+      Agent.execute(agent, state, callbacks: callbacks)
   """
   def execute(%Agent{} = agent, %State{} = state, opts \\ []) do
     # Ensure agent_id is set in state (library handles this automatically)
@@ -453,6 +480,7 @@ defmodule Sagents.Agent do
   - `agent` - The agent instance
   - `state` - The state at the point of interruption
   - `decisions` - List of decision maps from human reviewer
+  - `opts` - Options (same as `execute/3`, including `:callbacks`)
 
   ## Decision Format
 
@@ -630,6 +658,11 @@ defmodule Sagents.Agent do
     end)
   end
 
+  # Fire a Sagents-specific callback key (e.g., :on_after_middleware) from the
+  # callbacks list. This handles keys that are NOT LangChain-native — they won't
+  # be fired by LLMChain.run, so we iterate the list and fire matching handlers
+  # ourselves. LangChain-native keys are handled separately via maybe_add_callbacks
+  # which adds each map to the chain for LLMChain to fire during execution.
   defp fire_callback(nil, _key, _args), do: :ok
   defp fire_callback([], _key, _args), do: :ok
 
@@ -723,7 +756,11 @@ defmodule Sagents.Agent do
     error -> {:error, "Failed to build chain: #{inspect(error)}"}
   end
 
-  # Helper to conditionally add callbacks to chain
+  # Add each callback map to the LLMChain for LangChain-native key dispatch.
+  # Each map is added individually so LLMChain can fan-out: if multiple maps
+  # contain the same key (e.g., :on_llm_token_usage), all handlers fire.
+  # Any non-LangChain keys in the maps (e.g., :on_after_middleware) are
+  # silently ignored by LLMChain — those are handled by fire_callback/3.
   defp maybe_add_callbacks(chain, nil), do: chain
   defp maybe_add_callbacks(chain, []), do: chain
 
