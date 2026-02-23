@@ -356,6 +356,64 @@ defmodule Sagents.AgentTest do
     end
   end
 
+  describe "execute/2 with callbacks as list" do
+    setup do
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Mock response")]}
+      end)
+
+      :ok
+    end
+
+    test "accepts callbacks as a list of maps" do
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            middleware: [{TestMiddleware1, [name: "mw1"]}]
+          },
+          replace_default_middleware: true
+        )
+
+      test_pid = self()
+
+      callback1 = %{
+        on_after_middleware: fn _state ->
+          send(test_pid, :callback1_fired)
+        end
+      }
+
+      callback2 = %{
+        on_after_middleware: fn _state ->
+          send(test_pid, :callback2_fired)
+        end
+      }
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:ok, _result_state} =
+               Agent.execute(agent, initial_state, callbacks: [callback1, callback2])
+
+      # Both callbacks should fire (fan-out)
+      assert_received :callback1_fired
+      assert_received :callback2_fired
+    end
+
+    test "accepts empty list of callbacks" do
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            middleware: [{TestMiddleware1, [name: "mw1"]}]
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+      assert {:ok, _result_state} = Agent.execute(agent, initial_state, callbacks: [])
+    end
+  end
+
   describe "integration tests" do
     setup do
       # Mock ChatAnthropic.call to return a simple response

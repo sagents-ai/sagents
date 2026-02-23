@@ -77,6 +77,35 @@ defmodule Sagents.MiddlewareTest do
     end
   end
 
+  defmodule CallbackMiddleware do
+    @behaviour Middleware
+
+    @impl true
+    def init(opts) do
+      {:ok, Map.new(opts)}
+    end
+
+    @impl true
+    def callbacks(config) do
+      test_pid = config.test_pid
+
+      %{
+        on_llm_token_usage: fn _chain, usage ->
+          send(test_pid, {:token_usage, usage})
+        end
+      }
+    end
+  end
+
+  defmodule EmptyCallbackMiddleware do
+    @behaviour Middleware
+
+    @impl true
+    def callbacks(_config) do
+      %{}
+    end
+  end
+
   describe "normalize/1" do
     test "normalizes bare module to tuple" do
       assert {MinimalMiddleware, []} = Middleware.normalize(MinimalMiddleware)
@@ -306,6 +335,65 @@ defmodule Sagents.MiddlewareTest do
         end)
 
       assert {:ok, %{calls: [:after2, :after1]}} = final_state
+    end
+  end
+
+  describe "get_callbacks/1" do
+    test "returns empty map for middleware without callbacks/1" do
+      mw = Middleware.init_middleware(MinimalMiddleware)
+      assert Middleware.get_callbacks(mw) == %{}
+    end
+
+    test "returns empty map for middleware with empty callbacks" do
+      mw = Middleware.init_middleware(EmptyCallbackMiddleware)
+      assert Middleware.get_callbacks(mw) == %{}
+    end
+
+    test "returns callback handler map from middleware" do
+      mw = Middleware.init_middleware({CallbackMiddleware, [test_pid: self()]})
+      callbacks = Middleware.get_callbacks(mw)
+
+      assert is_map(callbacks)
+      assert is_function(callbacks.on_llm_token_usage)
+    end
+  end
+
+  describe "collect_callbacks/1" do
+    test "returns empty list when no middleware has callbacks" do
+      middleware = [
+        Middleware.init_middleware(MinimalMiddleware),
+        Middleware.init_middleware(FullMiddleware)
+      ]
+
+      assert Middleware.collect_callbacks(middleware) == []
+    end
+
+    test "collects non-empty callback maps from middleware" do
+      middleware = [
+        Middleware.init_middleware(MinimalMiddleware),
+        Middleware.init_middleware({CallbackMiddleware, [test_pid: self()]}),
+        Middleware.init_middleware(EmptyCallbackMiddleware)
+      ]
+
+      result = Middleware.collect_callbacks(middleware)
+
+      # Only the CallbackMiddleware has non-empty callbacks
+      assert length(result) == 1
+      assert is_function(hd(result).on_llm_token_usage)
+    end
+
+    test "collects callbacks from multiple middleware" do
+      middleware = [
+        Middleware.init_middleware({CallbackMiddleware, [test_pid: self()]}),
+        Middleware.init_middleware({CallbackMiddleware, [test_pid: self()]})
+      ]
+
+      result = Middleware.collect_callbacks(middleware)
+      assert length(result) == 2
+    end
+
+    test "returns empty list for empty middleware list" do
+      assert Middleware.collect_callbacks([]) == []
     end
   end
 end

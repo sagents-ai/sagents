@@ -630,14 +630,19 @@ defmodule Sagents.Agent do
     end)
   end
 
-  defp fire_callback(callbacks, key, args) do
-    case callbacks do
-      %{^key => callback} when is_function(callback) ->
-        apply(callback, args)
+  defp fire_callback(nil, _key, _args), do: :ok
+  defp fire_callback([], _key, _args), do: :ok
 
-      _ ->
-        :ok
-    end
+  defp fire_callback(callbacks, key, args) when is_list(callbacks) do
+    Enum.each(callbacks, fn cb_map ->
+      case cb_map do
+        %{^key => callback} when is_function(callback) ->
+          apply(callback, args)
+
+        _ ->
+          :ok
+      end
+    end)
   end
 
   defp execute_model(%Agent{} = agent, %State{} = state, callbacks) do
@@ -720,9 +725,12 @@ defmodule Sagents.Agent do
 
   # Helper to conditionally add callbacks to chain
   defp maybe_add_callbacks(chain, nil), do: chain
+  defp maybe_add_callbacks(chain, []), do: chain
 
-  defp maybe_add_callbacks(chain, callbacks) when is_map(callbacks) do
-    LLMChain.add_callback(chain, callbacks)
+  defp maybe_add_callbacks(chain, callbacks) when is_list(callbacks) do
+    Enum.reduce(callbacks, chain, fn cb_map, acc ->
+      LLMChain.add_callback(acc, cb_map)
+    end)
   end
 
   # Build options for LLMChain.run/2, including fallback configuration

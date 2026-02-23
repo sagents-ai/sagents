@@ -634,7 +634,13 @@ defmodule Sagents.SubAgent do
   end
 
   # Helper to conditionally add callbacks to chain
-  defp maybe_add_callbacks(chain, callbacks) when callbacks == %{} or is_nil(callbacks), do: chain
+  defp maybe_add_callbacks(chain, callbacks) when callbacks in [nil, %{}, []], do: chain
+
+  defp maybe_add_callbacks(chain, callbacks) when is_list(callbacks) do
+    Enum.reduce(callbacks, chain, fn cb_map, acc ->
+      LLMChain.add_callback(acc, cb_map)
+    end)
+  end
 
   defp maybe_add_callbacks(chain, callbacks) when is_map(callbacks) do
     LLMChain.add_callback(chain, callbacks)

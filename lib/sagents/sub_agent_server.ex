@@ -266,8 +266,11 @@ defmodule Sagents.SubAgentServer do
     # Broadcast status change to running
     broadcast_subagent_event(server_state, {:subagent_status_changed, :running})
 
-    # Build callbacks for real-time message broadcasting
-    callbacks = build_llm_callbacks(server_state)
+    # Build PubSub callbacks and collect middleware callbacks
+    pubsub_callbacks = build_pubsub_callbacks(server_state)
+    middleware = get_subagent_middleware(server_state)
+    middleware_callbacks = Sagents.Middleware.collect_callbacks(middleware)
+    callbacks = [pubsub_callbacks | middleware_callbacks]
 
     # Delegate to SubAgent.execute with callbacks
     case SubAgent.execute(subagent, callbacks: callbacks) do
@@ -328,8 +331,11 @@ defmodule Sagents.SubAgentServer do
     # Broadcast status change to running (resuming)
     broadcast_subagent_event(server_state, {:subagent_status_changed, :running})
 
-    # Build callbacks for real-time message broadcasting
-    callbacks = build_llm_callbacks(server_state)
+    # Build PubSub callbacks and collect middleware callbacks
+    pubsub_callbacks = build_pubsub_callbacks(server_state)
+    middleware = get_subagent_middleware(server_state)
+    middleware_callbacks = Sagents.Middleware.collect_callbacks(middleware)
+    callbacks = [pubsub_callbacks | middleware_callbacks]
 
     # Delegate to SubAgent.resume with callbacks
     case SubAgent.resume(subagent, decisions, callbacks: callbacks) do
@@ -408,9 +414,17 @@ defmodule Sagents.SubAgentServer do
 
   ## Private Helper Functions
 
+  # Extract middleware from subagent's chain custom_context
+  defp get_subagent_middleware(%ServerState{subagent: subagent}) do
+    case subagent.chain do
+      %{custom_context: %{parent_middleware: mw}} when is_list(mw) -> mw
+      _ -> []
+    end
+  end
+
   # Build callbacks for LLMChain that broadcast message events to the parent's debug PubSub.
   # This enables real-time visibility into sub-agent execution.
-  defp build_llm_callbacks(%ServerState{} = server_state) do
+  defp build_pubsub_callbacks(%ServerState{} = server_state) do
     %{
       on_message_processed: fn _chain, message ->
         broadcast_subagent_event(server_state, {:subagent_llm_message, message})

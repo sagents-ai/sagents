@@ -1378,8 +1378,8 @@ defmodule Sagents.AgentServer do
 
   @impl true
   def handle_call(:execute, _from, %ServerState{status: :idle} = server_state) do
-    # Build callback handlers that will forward events via PubSub
-    callbacks = build_llm_callbacks(server_state)
+    # Build PubSub callback handlers (created in GenServer, captures server_state)
+    pubsub_callbacks = build_pubsub_callbacks(server_state)
 
     # Transition to running
     new_state = %{server_state | status: :running}
@@ -1392,7 +1392,7 @@ defmodule Sagents.AgentServer do
     # Start async execution
     task =
       Task.async(fn ->
-        execute_agent(new_state, callbacks)
+        execute_agent(new_state, pubsub_callbacks)
       end)
 
     # Store task reference if needed, or just let it run
@@ -1729,7 +1729,7 @@ defmodule Sagents.AgentServer do
 
   @impl true
   def handle_info({:llm_deltas, _deltas}, server_state) do
-    # Deltas are broadcast via on_llm_new_delta callback in build_llm_callbacks
+    # Deltas are broadcast via on_llm_new_delta callback in build_pubsub_callbacks
     # No need to process them here - the client (chat_live.ex) will handle merging
     {:noreply, server_state}
   end
@@ -1936,8 +1936,8 @@ defmodule Sagents.AgentServer do
   end
 
   @doc false
-  # Build callback handlers that forward LLM events via PubSub
-  defp build_llm_callbacks(%ServerState{} = server_state) do
+  # Build PubSub callback handlers that forward LLM events to subscribers
+  defp build_pubsub_callbacks(%ServerState{} = server_state) do
     %{
       # Callback for post-middleware state (before LLM call)
       # This broadcasts the prepared state (with middleware modifications) on the debug channel
@@ -2019,7 +2019,11 @@ defmodule Sagents.AgentServer do
     }
   end
 
-  defp execute_agent(%ServerState{} = server_state, callbacks) do
+  defp execute_agent(%ServerState{} = server_state, pubsub_callbacks) do
+    # Collect middleware callbacks in Task process for process-dictionary safety
+    middleware_callbacks = Middleware.collect_callbacks(server_state.agent.middleware)
+    callbacks = [pubsub_callbacks | middleware_callbacks]
+
     # Execute agent with callbacks
     case Agent.execute(server_state.agent, server_state.state, callbacks: callbacks) do
       {:ok, new_state} ->
@@ -2039,7 +2043,9 @@ defmodule Sagents.AgentServer do
 
   defp resume_agent(server_state, decisions) do
     # Build callbacks for resume execution as well
-    callbacks = build_llm_callbacks(server_state)
+    pubsub_callbacks = build_pubsub_callbacks(server_state)
+    middleware_callbacks = Middleware.collect_callbacks(server_state.agent.middleware)
+    callbacks = [pubsub_callbacks | middleware_callbacks]
 
     case Agent.resume(server_state.agent, server_state.state, decisions, callbacks: callbacks) do
       {:ok, new_state} ->
