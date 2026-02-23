@@ -210,6 +210,7 @@ defmodule Sagents.AgentServer do
   require Logger
 
   alias Sagents.Agent
+  alias Sagents.AgentContext
   alias Sagents.State
   alias Sagents.AgentSupervisor
   alias Sagents.Middleware
@@ -255,7 +256,11 @@ defmodule Sagents.AgentServer do
       :presence_module,
       # Whether this server was restored from persisted state (vs fresh start)
       # Used to broadcast :node_transferred event on startup after Horde migration
-      restored: false
+      restored: false,
+      # Application-level context map propagated through the agent hierarchy.
+      # Set via :agent_context option; accessible via AgentContext.get() in
+      # the process and its Task.async children.
+      agent_context: %{}
     ]
 
     @type t :: %__MODULE__{
@@ -286,7 +291,8 @@ defmodule Sagents.AgentServer do
             agent_persistence: module() | nil,
             display_message_persistence: module() | nil,
             presence_module: module() | nil,
-            restored: boolean()
+            restored: boolean(),
+            agent_context: map()
           }
   end
 
@@ -1288,6 +1294,10 @@ defmodule Sagents.AgentServer do
     # When set, agent will track presence on "agent_server:presence" topic
     presence_module = Keyword.get(opts, :presence_module)
 
+    # Application-level context for propagation through agent hierarchy
+    agent_context = Keyword.get(opts, :agent_context, %{})
+    AgentContext.init(agent_context)
+
     server_state = %ServerState{
       agent: updated_agent,
       state: state,
@@ -1308,7 +1318,8 @@ defmodule Sagents.AgentServer do
       agent_persistence: agent_persistence,
       display_message_persistence: display_message_persistence,
       presence_module: presence_module,
-      restored: Keyword.get(opts, :restored, false)
+      restored: Keyword.get(opts, :restored, false),
+      agent_context: agent_context
     }
 
     # Start the inactivity timer

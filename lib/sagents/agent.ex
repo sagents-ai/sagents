@@ -42,6 +42,7 @@ defmodule Sagents.Agent do
   require Logger
 
   alias __MODULE__
+  alias Sagents.AgentContext
   alias Sagents.Middleware
   alias Sagents.State
   alias LangChain.LangChainError
@@ -732,7 +733,9 @@ defmodule Sagents.Agent do
         state: state,
         # Make parent agent's middleware and tools available to tools (e.g., SubAgent middleware)
         parent_middleware: agent.middleware,
-        parent_tools: agent.tools
+        parent_tools: agent.tools,
+        # Snapshot of the process-local agent context for tool access
+        agent_context: AgentContext.get()
       }
     }
 

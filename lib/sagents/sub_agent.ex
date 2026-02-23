@@ -105,6 +105,7 @@ defmodule Sagents.SubAgent do
   require Logger
 
   alias __MODULE__
+  alias Sagents.AgentContext
   alias Sagents.AgentUtils
   alias Sagents.State
   alias LangChain.Chains.LLMChain
@@ -193,7 +194,8 @@ defmodule Sagents.SubAgent do
     # Tools in SubAgent will access/modify SubAgent's state, not parent's
     custom_context = %{
       state: subagent_state,
-      parent_middleware: agent_config.middleware
+      parent_middleware: agent_config.middleware,
+      agent_context: AgentContext.get()
     }
 
     chain =
@@ -263,7 +265,8 @@ defmodule Sagents.SubAgent do
     # Tools in SubAgent will access/modify SubAgent's state, not parent's
     custom_context = %{
       state: subagent_state,
-      parent_middleware: compiled_agent.middleware
+      parent_middleware: compiled_agent.middleware,
+      agent_context: AgentContext.get()
     }
 
     chain =
