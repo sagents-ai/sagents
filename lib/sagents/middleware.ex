@@ -19,6 +19,9 @@ defmodule Sagents.Middleware do
   4. **Callback Collection** - `callbacks/1` provides LLM event handlers
   5. **Before Model** - `before_model/2` preprocesses state before LLM call
   6. **After Model** - `after_model/2` postprocesses state after LLM response
+  7. **Fork Context** - `on_fork_context/2` injects process-local state into the
+     context map before a sub-agent is spawned (e.g., OpenTelemetry span context,
+     Logger metadata)
 
   ## Example
 
@@ -297,6 +300,47 @@ defmodule Sagents.Middleware do
   """
   @callback callbacks(middleware_config) :: map()
 
+  @doc """
+  Inject process-local state into the context map before forking to a child process.
+
+  Called during `AgentContext.fork_with_middleware/1` before a sub-agent is spawned.
+  This gives each middleware the opportunity to capture process-local state
+  (e.g., OpenTelemetry span context, Logger metadata, correlation IDs) into the
+  context map so it can be propagated to child processes.
+
+  The callback receives the current context map and the middleware configuration,
+  and must return a (potentially modified) context map.
+
+  Use `AgentContext.add_restore_fn/2` inside this callback to register a function
+  that the child process will call during `AgentContext.init/1` to rebuild
+  process-local state from the context.
+
+  Defaults to returning the context unchanged if not implemented.
+
+  ## Parameters
+
+  - `context` - The current context map being prepared for the child process
+  - `config` - The middleware configuration from `init/1`
+
+  ## Returns
+
+  - A (potentially modified) context map
+
+  ## Example
+
+      def on_fork_context(context, _config) do
+        # Capture OpenTelemetry span context
+        otel_ctx = OpenTelemetry.Ctx.get_current()
+        context = Map.put(context, :otel_ctx, otel_ctx)
+
+        # Register a restore function for the child process
+        AgentContext.add_restore_fn(context, fn ctx ->
+          OpenTelemetry.Ctx.attach(ctx[:otel_ctx])
+        end)
+      end
+  """
+  @callback on_fork_context(context :: map(), middleware_config) :: map()
+
   @optional_callbacks [
     init: 1,
     system_prompt: 1,
@@ -306,7 +350,8 @@ defmodule Sagents.Middleware do
     handle_message: 3,
     state_schema: 0,
     on_server_start: 2,
-    callbacks: 1
+    callbacks: 1,
+    on_fork_context: 2
   ]
 
   @doc """
@@ -524,6 +569,30 @@ defmodule Sagents.Middleware do
       module.on_server_start(state, config)
     rescue
       UndefinedFunctionError -> {:ok, state}
+    end
+  end
+
+  @doc """
+  Apply on_fork_context callback from middleware.
+
+  Called during context forking to allow middleware to inject process-local state
+  into the context map before it is passed to a child process.
+
+  ## Parameters
+
+  - `context` - The current context map
+  - `entry` - MiddlewareEntry struct with module and config
+
+  ## Returns
+
+  - The (potentially modified) context map
+  """
+  @spec apply_on_fork_context(map(), Sagents.MiddlewareEntry.t()) :: map()
+  def apply_on_fork_context(context, %MiddlewareEntry{module: module, config: config}) do
+    try do
+      module.on_fork_context(context, config)
+    rescue
+      UndefinedFunctionError -> context
     end
   end
 end

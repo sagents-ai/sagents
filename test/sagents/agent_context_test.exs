@@ -1,7 +1,11 @@
 defmodule Sagents.AgentContextTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias Sagents.AgentContext
+  alias Sagents.Middleware
+  alias Sagents.MiddlewareEntry
 
   describe "init/1" do
     test "sets context in process dictionary" do
@@ -143,6 +147,171 @@ defmodule Sagents.AgentContextTest do
       child_ctx = Task.await(task)
       assert child_ctx == %{trace_id: "parent", child_only: true}
       assert AgentContext.get() == %{trace_id: "parent"}
+    end
+  end
+
+  describe "add_restore_fn/2" do
+    test "appends a restore function to __context_restore_fns__" do
+      context = %{trace_id: "abc"}
+      fun1 = fn _ctx -> :ok end
+      fun2 = fn _ctx -> :ok end
+
+      context = AgentContext.add_restore_fn(context, fun1)
+      assert [^fun1] = context.__context_restore_fns__
+
+      context = AgentContext.add_restore_fn(context, fun2)
+      assert [^fun1, ^fun2] = context.__context_restore_fns__
+    end
+
+    test "creates __context_restore_fns__ key if not present" do
+      context = %{trace_id: "abc"}
+      fun = fn _ctx -> :ok end
+      result = AgentContext.add_restore_fn(context, fun)
+      assert Map.has_key?(result, :__context_restore_fns__)
+      assert [^fun] = result.__context_restore_fns__
+    end
+  end
+
+  describe "init/1 with restore functions" do
+    test "calls restore functions and strips __context_restore_fns__" do
+      test_pid = self()
+      fun1 = fn ctx -> send(test_pid, {:restored, 1, ctx}) end
+      fun2 = fn ctx -> send(test_pid, {:restored, 2, ctx}) end
+
+      context = %{trace_id: "abc", __context_restore_fns__: [fun1, fun2]}
+      assert :ok = AgentContext.init(context)
+
+      # Restore functions should have been called with clean context
+      clean = %{trace_id: "abc"}
+      assert_receive {:restored, 1, ^clean}
+      assert_receive {:restored, 2, ^clean}
+
+      # Stored context should not contain __context_restore_fns__
+      assert AgentContext.get() == clean
+    end
+
+    test "handles restore function failures gracefully" do
+      test_pid = self()
+      failing_fn = fn _ctx -> raise "boom" end
+      ok_fn = fn ctx -> send(test_pid, {:restored, ctx}) end
+
+      context = %{key: "val", __context_restore_fns__: [failing_fn, ok_fn]}
+
+      log =
+        capture_log(fn ->
+          assert :ok = AgentContext.init(context)
+        end)
+
+      # The failing function should have been logged
+      assert log =~ "AgentContext restore function failed"
+      assert log =~ "boom"
+
+      # The second function should still have been called
+      clean = %{key: "val"}
+      assert_receive {:restored, ^clean}
+
+      # Context should still be stored correctly
+      assert AgentContext.get() == clean
+    end
+
+    test "works normally when no restore functions present" do
+      context = %{trace_id: "abc"}
+      assert :ok = AgentContext.init(context)
+      assert AgentContext.get() == context
+    end
+  end
+
+  describe "fork_with_middleware/1" do
+    defmodule ForkInjector do
+      @behaviour Sagents.Middleware
+
+      @impl true
+      def on_fork_context(context, config) do
+        context
+        |> Map.put(:injected_by, config.name)
+        |> AgentContext.add_restore_fn(fn _ctx -> :ok end)
+      end
+    end
+
+    defmodule NoForkMiddleware do
+      @behaviour Sagents.Middleware
+      # Does not implement on_fork_context/2
+    end
+
+    test "returns context unchanged with empty middleware list" do
+      AgentContext.init(%{trace_id: "abc"})
+      result = AgentContext.fork_with_middleware([])
+      assert result == %{trace_id: "abc"}
+    end
+
+    test "applies on_fork_context from middleware that implements it" do
+      AgentContext.init(%{trace_id: "abc"})
+
+      entry = %MiddlewareEntry{
+        id: ForkInjector,
+        module: ForkInjector,
+        config: %{name: "test_injector"}
+      }
+
+      result = AgentContext.fork_with_middleware([entry])
+      assert result.trace_id == "abc"
+      assert result.injected_by == "test_injector"
+      assert is_list(result.__context_restore_fns__)
+      assert length(result.__context_restore_fns__) == 1
+    end
+
+    test "passes through unchanged for middleware without on_fork_context" do
+      AgentContext.init(%{trace_id: "abc"})
+
+      entry = Middleware.init_middleware(NoForkMiddleware)
+
+      result = AgentContext.fork_with_middleware([entry])
+      assert result == %{trace_id: "abc"}
+    end
+
+    test "applies middleware in order" do
+      defmodule ForkInjectorA do
+        @behaviour Sagents.Middleware
+
+        @impl true
+        def on_fork_context(context, _config) do
+          order = Map.get(context, :order, [])
+          Map.put(context, :order, order ++ [:a])
+        end
+      end
+
+      defmodule ForkInjectorB do
+        @behaviour Sagents.Middleware
+
+        @impl true
+        def on_fork_context(context, _config) do
+          order = Map.get(context, :order, [])
+          Map.put(context, :order, order ++ [:b])
+        end
+      end
+
+      AgentContext.init(%{trace_id: "abc"})
+
+      entries = [
+        %MiddlewareEntry{id: ForkInjectorA, module: ForkInjectorA, config: %{}},
+        %MiddlewareEntry{id: ForkInjectorB, module: ForkInjectorB, config: %{}}
+      ]
+
+      result = AgentContext.fork_with_middleware(entries)
+      assert result.order == [:a, :b]
+    end
+
+    test "does not modify the original process context" do
+      AgentContext.init(%{trace_id: "abc"})
+
+      entry = %MiddlewareEntry{
+        id: ForkInjector,
+        module: ForkInjector,
+        config: %{name: "test"}
+      }
+
+      _result = AgentContext.fork_with_middleware([entry])
+      assert AgentContext.get() == %{trace_id: "abc"}
     end
   end
 end
