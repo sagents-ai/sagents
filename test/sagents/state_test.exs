@@ -397,6 +397,36 @@ defmodule Sagents.StateTest do
       assert merged.interrupt_data == nil
     end
 
+    test "merge_states preserves pending_interrupts in interrupt_data" do
+      left = State.new!()
+
+      right =
+        State.new!(%{
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sa-1",
+            tool_call_id: "call-1",
+            pending_interrupts: [
+              %{
+                type: :subagent_hitl,
+                sub_agent_id: "sa-2",
+                tool_call_id: "call-2"
+              }
+            ]
+          }
+        })
+
+      merged = State.merge_states(left, right)
+
+      assert merged.interrupt_data.sub_agent_id == "sa-1"
+      assert merged.interrupt_data.tool_call_id == "call-1"
+      assert length(merged.interrupt_data.pending_interrupts) == 1
+
+      [pending] = merged.interrupt_data.pending_interrupts
+      assert pending.sub_agent_id == "sa-2"
+      assert pending.tool_call_id == "call-2"
+    end
+
     test "right-biased in sequential reduce" do
       # Simulates multiple tool results being reduced: first sets interrupt_data,
       # second clears it (right-biased means newest result wins)

@@ -80,16 +80,39 @@ defmodule Sagents.Mode.Steps do
   converts the pipeline to `{:interrupt, chain, interrupt_data}`.
   """
   def check_post_tool_interrupt({:continue, chain}, _opts) do
-    case find_interrupt_signal(chain) do
-      nil ->
+    case find_all_interrupt_signals(chain) do
+      [] ->
         {:continue, chain}
 
-      %InterruptSignal{} = signal ->
+      [single] ->
         interrupt_data = %{
-          type: signal.type,
-          sub_agent_id: signal.sub_agent_id,
-          subagent_type: signal.subagent_type,
-          interrupt_data: signal.interrupt_data
+          type: single.type,
+          sub_agent_id: single.sub_agent_id,
+          subagent_type: single.subagent_type,
+          interrupt_data: single.interrupt_data,
+          tool_call_id: single.tool_call_id,
+          pending_interrupts: []
+        }
+
+        {:interrupt, chain, interrupt_data}
+
+      [current | rest] ->
+        interrupt_data = %{
+          type: current.type,
+          sub_agent_id: current.sub_agent_id,
+          subagent_type: current.subagent_type,
+          interrupt_data: current.interrupt_data,
+          tool_call_id: current.tool_call_id,
+          pending_interrupts:
+            Enum.map(rest, fn signal ->
+              %{
+                type: signal.type,
+                sub_agent_id: signal.sub_agent_id,
+                subagent_type: signal.subagent_type,
+                interrupt_data: signal.interrupt_data,
+                tool_call_id: signal.tool_call_id
+              }
+            end)
         }
 
         {:interrupt, chain, interrupt_data}
@@ -98,19 +121,22 @@ defmodule Sagents.Mode.Steps do
 
   def check_post_tool_interrupt(terminal, _opts), do: terminal
 
-  # Scan the chain's last_message for an InterruptSignal in processed_content
-  defp find_interrupt_signal(chain) do
+  # Scan the chain's last_message for all InterruptSignals in processed_content
+  defp find_all_interrupt_signals(chain) do
     case chain.last_message do
       %Message{role: :tool, tool_results: tool_results} when is_list(tool_results) ->
-        Enum.find_value(tool_results, fn result ->
+        Enum.flat_map(tool_results, fn result ->
           case result.processed_content do
-            %InterruptSignal{} = signal -> signal
-            _ -> nil
+            %InterruptSignal{} = signal ->
+              [%{signal | tool_call_id: result.tool_call_id}]
+
+            _ ->
+              []
           end
         end)
 
       _ ->
-        nil
+        []
     end
   end
 

@@ -11,12 +11,13 @@ defmodule Sagents.InterruptSignal do
   """
 
   @enforce_keys [:type, :sub_agent_id, :subagent_type, :interrupt_data]
-  defstruct [:type, :sub_agent_id, :subagent_type, :interrupt_data]
+  defstruct [:type, :sub_agent_id, :subagent_type, :interrupt_data, :tool_call_id]
 
   @type t :: %__MODULE__{
           type: :subagent_hitl,
           sub_agent_id: String.t(),
           subagent_type: String.t(),
-          interrupt_data: map()
+          interrupt_data: map(),
+          tool_call_id: String.t() | nil
         }
 end

@@ -639,9 +639,16 @@ defmodule Sagents.Agent do
   defp resume_subagent_hitl(%Agent{} = agent, %State{} = state, decisions, opts) do
     interrupt_data = state.interrupt_data
     callbacks = Keyword.get(opts, :callbacks)
+    pending = Map.get(interrupt_data, :pending_interrupts, [])
 
-    # Find the "task" tool call in the last assistant message
-    case find_task_tool_call(state.messages) do
+    # Use tool_call_id if available (new path), fall back to name-based (old path)
+    task_tool_call =
+      case Map.get(interrupt_data, :tool_call_id) do
+        nil -> find_task_tool_call(state.messages)
+        call_id -> find_task_tool_call_by_id(state.messages, call_id)
+      end
+
+    case task_tool_call do
       nil ->
         {:error, "No task tool call found for sub-agent HITL resume"}
 
@@ -673,8 +680,7 @@ defmodule Sagents.Agent do
               # Re-execute the task tool with resume context
               case LangChain.Function.execute(function, task_tool_call.arguments, context) do
                 {:ok, result} ->
-                  # Sub-agent completed — replace stale tool result in state,
-                  # clear interrupt_data, and continue execution
+                  # Sub-agent completed — replace stale tool result in state
                   updated_state =
                     replace_tool_result_in_state(
                       state,
@@ -682,17 +688,30 @@ defmodule Sagents.Agent do
                       result,
                       nil
                     )
-                    |> Map.put(:interrupt_data, nil)
 
-                  execute(agent, updated_state, opts)
+                  # Check pending queue
+                  case pending do
+                    [] ->
+                      # All done — continue execution
+                      execute(agent, %{updated_state | interrupt_data: nil}, opts)
+
+                    [next | rest] ->
+                      # Pop next interrupt
+                      next_interrupt_data = Map.put(next, :pending_interrupts, rest)
+
+                      {:interrupt, %{updated_state | interrupt_data: next_interrupt_data},
+                       next_interrupt_data}
+                  end
 
                 {:ok, result, %Sagents.InterruptSignal{} = signal} ->
-                  # Another sub-agent interrupt — replace tool result and return interrupt
+                  # Same sub-agent re-interrupted — keep it at front, preserve queue
                   new_interrupt_data = %{
                     type: signal.type,
                     sub_agent_id: signal.sub_agent_id,
                     subagent_type: signal.subagent_type,
-                    interrupt_data: signal.interrupt_data
+                    interrupt_data: signal.interrupt_data,
+                    tool_call_id: task_tool_call.call_id,
+                    pending_interrupts: pending
                   }
 
                   updated_state =
@@ -725,6 +744,17 @@ defmodule Sagents.Agent do
     end)
   end
 
+  # Find a specific tool call by its call_id in the assistant messages
+  defp find_task_tool_call_by_id(messages, call_id) do
+    messages
+    |> Enum.reverse()
+    |> Enum.find_value(fn msg ->
+      if msg.role == :assistant && is_list(msg.tool_calls) do
+        Enum.find(msg.tool_calls, fn tc -> tc.call_id == call_id end)
+      end
+    end)
+  end
+
   # Replace the tool result for a specific tool_call_id in state messages,
   # updating both content (for LLM) and processed_content (for pipeline)
   defp replace_tool_result_in_state(%State{} = state, tool_call_id, new_content, signal) do
@@ -742,8 +772,22 @@ defmodule Sagents.Agent do
 
           # Also update message content to match new tool result
           updated_content =
-            Enum.map(updated_results, fn r ->
-              LangChain.Message.ContentPart.new!(%{type: :text, content: r.content})
+            Enum.flat_map(updated_results, fn r ->
+              case r.content do
+                parts when is_list(parts) ->
+                  parts
+
+                text when is_binary(text) ->
+                  [LangChain.Message.ContentPart.new!(%{type: :text, content: text})]
+
+                _ ->
+                  [
+                    LangChain.Message.ContentPart.new!(%{
+                      type: :text,
+                      content: inspect(r.content)
+                    })
+                  ]
+              end
             end)
 
           %{msg | tool_results: updated_results, content: updated_content}

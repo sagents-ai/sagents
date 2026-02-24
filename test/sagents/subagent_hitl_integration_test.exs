@@ -247,4 +247,227 @@ defmodule Sagents.SubagentHitlIntegrationTest do
       assert final_state.interrupt_data == nil
     end
   end
+
+  describe "parallel sub-agent multi-interrupt resolution" do
+    test "parallel sub-agent interrupts resolved sequentially" do
+      test_pid = self()
+      resume_count = :counters.new(1, [:atomics])
+
+      # Tool that returns InterruptSignal with different sub_agent_id based on subagent_type
+      task_tool =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate to sub-agent",
+          parameters_schema: %{
+            type: "object",
+            required: ["instructions", "subagent_type"],
+            properties: %{
+              "instructions" => %{type: "string"},
+              "subagent_type" => %{type: "string"}
+            }
+          },
+          function: fn args, context ->
+            send(test_pid, {:task_tool_called, args, context})
+            subagent_type = Map.get(args, "subagent_type", "unknown")
+
+            case Map.get(context, :resume_info) do
+              nil ->
+                # First execution: return interrupt signal
+                {:ok, "SubAgent '#{subagent_type}' requires human approval.",
+                 %Sagents.InterruptSignal{
+                   type: :subagent_hitl,
+                   sub_agent_id: "sub-#{subagent_type}",
+                   subagent_type: subagent_type,
+                   interrupt_data: %{
+                     action_requests: [
+                       %{
+                         tool_call_id: "inner-tc-#{subagent_type}",
+                         tool_name: "action_#{subagent_type}",
+                         arguments: %{"q" => subagent_type}
+                       }
+                     ]
+                   }
+                 }}
+
+              %{sub_agent_id: _} ->
+                # Resume: return completion
+                :counters.add(resume_count, 1, 1)
+                {:ok, "#{subagent_type} completed successfully"}
+            end
+          end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [task_tool],
+            middleware: []
+          },
+          replace_default_middleware: true,
+          interrupt_on: %{"task" => true}
+        )
+
+      # LLM returns TWO parallel task tool calls
+      tool_call1 =
+        ToolCall.new!(%{
+          call_id: "call-1",
+          name: "task",
+          arguments: %{"instructions" => "research", "subagent_type" => "researcher"}
+        })
+
+      tool_call2 =
+        ToolCall.new!(%{
+          call_id: "call-2",
+          name: "task",
+          arguments: %{"instructions" => "write code", "subagent_type" => "coder"}
+        })
+
+      llm_call_count = :counters.new(1, [:atomics])
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        count = :counters.get(llm_call_count, 1)
+        :counters.add(llm_call_count, 1, 1)
+
+        case count do
+          0 ->
+            {:ok, [Message.new_assistant!(%{tool_calls: [tool_call1, tool_call2]})]}
+
+          _ ->
+            {:ok, [Message.new_assistant!("All tasks completed.")]}
+        end
+      end)
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Do both tasks")]})
+
+      # Execute → should interrupt with first signal, queue second
+      assert {:interrupt, state1, data1} = Agent.execute(agent, initial_state)
+      assert data1.type == :subagent_hitl
+      assert data1.sub_agent_id == "sub-researcher"
+      assert data1.tool_call_id == "call-1"
+      assert length(data1.pending_interrupts) == 1
+
+      [pending] = data1.pending_interrupts
+      assert pending.sub_agent_id == "sub-coder"
+      assert pending.tool_call_id == "call-2"
+
+      # Resume first → should pop second interrupt
+      assert {:interrupt, state2, data2} = Agent.resume(agent, state1, [%{type: :approve}])
+      assert data2.type == :subagent_hitl
+      assert data2.sub_agent_id == "sub-coder"
+      assert data2.tool_call_id == "call-2"
+      assert data2.pending_interrupts == []
+
+      # Resume second → should complete
+      assert {:ok, final_state} = Agent.resume(agent, state2, [%{type: :approve}])
+      assert final_state.interrupt_data == nil
+
+      # Both resumes should have happened
+      assert :counters.get(resume_count, 1) == 2
+    end
+
+    test "parallel sub-agents where one completes and one interrupts" do
+      test_pid = self()
+
+      # Tool returns InterruptSignal for "researcher" but completes for "coder"
+      task_tool =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate to sub-agent",
+          parameters_schema: %{
+            type: "object",
+            required: ["instructions", "subagent_type"],
+            properties: %{
+              "instructions" => %{type: "string"},
+              "subagent_type" => %{type: "string"}
+            }
+          },
+          function: fn args, context ->
+            send(test_pid, {:task_tool_called, args, context})
+            subagent_type = Map.get(args, "subagent_type", "unknown")
+
+            case Map.get(context, :resume_info) do
+              nil ->
+                # First execution: researcher interrupts, coder completes
+                case subagent_type do
+                  "researcher" ->
+                    {:ok, "SubAgent 'researcher' requires human approval.",
+                     %Sagents.InterruptSignal{
+                       type: :subagent_hitl,
+                       sub_agent_id: "sub-researcher",
+                       subagent_type: "researcher",
+                       interrupt_data: %{
+                         action_requests: [
+                           %{
+                             tool_call_id: "inner-tc-1",
+                             tool_name: "search",
+                             arguments: %{"q" => "test"}
+                           }
+                         ]
+                       }
+                     }}
+
+                  "coder" ->
+                    {:ok, "Code written successfully"}
+                end
+
+              %{sub_agent_id: "sub-researcher"} ->
+                {:ok, "Research completed successfully"}
+            end
+          end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [task_tool],
+            middleware: []
+          },
+          replace_default_middleware: true,
+          interrupt_on: %{"task" => true}
+        )
+
+      tool_call1 =
+        ToolCall.new!(%{
+          call_id: "call-1",
+          name: "task",
+          arguments: %{"instructions" => "research", "subagent_type" => "researcher"}
+        })
+
+      tool_call2 =
+        ToolCall.new!(%{
+          call_id: "call-2",
+          name: "task",
+          arguments: %{"instructions" => "write code", "subagent_type" => "coder"}
+        })
+
+      llm_call_count = :counters.new(1, [:atomics])
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        count = :counters.get(llm_call_count, 1)
+        :counters.add(llm_call_count, 1, 1)
+
+        case count do
+          0 ->
+            {:ok, [Message.new_assistant!(%{tool_calls: [tool_call1, tool_call2]})]}
+
+          _ ->
+            {:ok, [Message.new_assistant!("All done.")]}
+        end
+      end)
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Do both tasks")]})
+
+      # Execute → only researcher interrupts, coder completes
+      assert {:interrupt, state1, data1} = Agent.execute(agent, initial_state)
+      assert data1.type == :subagent_hitl
+      assert data1.sub_agent_id == "sub-researcher"
+      assert data1.pending_interrupts == []
+
+      # Resume researcher → should complete
+      assert {:ok, final_state} = Agent.resume(agent, state1, [%{type: :approve}])
+      assert final_state.interrupt_data == nil
+    end
+  end
 end

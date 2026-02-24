@@ -718,6 +718,107 @@ defmodule Sagents.AgentTest do
       assert interrupted_state.interrupt_data == interrupt_data
     end
 
+    test "execution loop detects multiple sub-agent interrupts and queues them" do
+      # When TWO tools each return InterruptSignals, the pipeline should
+      # detect both and queue the second behind the first.
+
+      signal1 = %Sagents.InterruptSignal{
+        type: :subagent_hitl,
+        sub_agent_id: "sub-1",
+        subagent_type: "researcher",
+        interrupt_data: %{
+          action_requests: [
+            %{tool_call_id: "tc-1", tool_name: "search", arguments: %{"q" => "test"}}
+          ]
+        }
+      }
+
+      signal2 = %Sagents.InterruptSignal{
+        type: :subagent_hitl,
+        sub_agent_id: "sub-2",
+        subagent_type: "coder",
+        interrupt_data: %{
+          action_requests: [
+            %{tool_call_id: "tc-2", tool_name: "write_code", arguments: %{"lang" => "elixir"}}
+          ]
+        }
+      }
+
+      # Create two tools that each return an InterruptSignal
+      task_tool1 =
+        LangChain.Function.new!(%{
+          name: "task",
+          description: "Delegate to sub-agent",
+          parameters_schema: %{
+            type: "object",
+            required: ["instructions", "subagent_type"],
+            properties: %{
+              "instructions" => %{type: "string"},
+              "subagent_type" => %{type: "string"}
+            }
+          },
+          function: fn args, _context ->
+            case Map.get(args, "subagent_type") do
+              "researcher" ->
+                {:ok, "SubAgent 'researcher' requires human approval.", signal1}
+
+              "coder" ->
+                {:ok, "SubAgent 'coder' requires human approval.", signal2}
+            end
+          end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [task_tool1],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      # Mock LLM to return TWO parallel tool calls
+      tool_call1 =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "call-1",
+          name: "task",
+          arguments: %{"instructions" => "research something", "subagent_type" => "researcher"}
+        })
+
+      tool_call2 =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "call-2",
+          name: "task",
+          arguments: %{"instructions" => "write code", "subagent_type" => "coder"}
+        })
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!(%{tool_calls: [tool_call1, tool_call2]})]}
+      end)
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Do both tasks")]})
+
+      # Should return {:interrupt, state, data} with the first signal
+      assert {:interrupt, interrupted_state, interrupt_data} =
+               Agent.execute(agent, initial_state)
+
+      assert interrupt_data.type == :subagent_hitl
+      assert interrupt_data.sub_agent_id == "sub-1"
+      assert interrupt_data.subagent_type == "researcher"
+      assert interrupt_data.tool_call_id == "call-1"
+
+      # Should have one pending interrupt for the second signal
+      assert length(interrupt_data.pending_interrupts) == 1
+      [pending] = interrupt_data.pending_interrupts
+      assert pending.sub_agent_id == "sub-2"
+      assert pending.subagent_type == "coder"
+      assert pending.tool_call_id == "call-2"
+
+      assert %State{} = interrupted_state
+      assert interrupted_state.interrupt_data == interrupt_data
+    end
+
     test "resume detects subagent_hitl and routes to sub-agent resume" do
       # After interrupt, Agent.resume detects subagent_hitl type and should
       # find the task tool call, re-execute it with resume_info context
