@@ -193,8 +193,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       # Mock LLMChain.run to return success
       assistant_message = Message.new_assistant!(%{content: "Hello!"})
 
-      LLMChain
-      |> stub(:run, fn chain ->
+      stub_llm_run(fn chain ->
         updated_chain =
           chain
           |> Map.put(:messages, chain.messages ++ [assistant_message])
@@ -432,8 +431,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       # Mock LLMChain.run to return success
       assistant_message = Message.new_assistant!(%{content: "Task completed!"})
 
-      LLMChain
-      |> stub(:run, fn chain ->
+      stub_llm_run(fn chain ->
         updated_chain =
           chain
           |> Map.put(:messages, chain.messages ++ [assistant_message])
@@ -466,8 +464,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       # Mock LLMChain.run to return success
       assistant_message = Message.new_assistant!(%{content: "Done!"})
 
-      LLMChain
-      |> stub(:run, fn chain ->
+      stub_llm_run(fn chain ->
         updated_chain =
           chain
           |> Map.put(:messages, chain.messages ++ [assistant_message])
@@ -592,8 +589,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       # Mock LLMChain.run to return success
       assistant_message = Message.new_assistant!(%{content: "Subagent task completed!"})
 
-      LLMChain
-      |> stub(:run, fn chain ->
+      stub_llm_run(fn chain ->
         updated_chain =
           chain
           |> Map.put(:messages, chain.messages ++ [assistant_message])
@@ -668,8 +664,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       # Mock LLMChain
       assistant_message = Message.new_assistant!(%{content: "Done"})
 
-      LLMChain
-      |> stub(:run, fn chain ->
+      stub_llm_run(fn chain ->
         {:ok,
          Map.merge(chain, %{
            messages: chain.messages ++ [assistant_message],
@@ -745,8 +740,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       # Mock LLMChain.run to return success
       assistant_message = Message.new_assistant!(%{content: "Research completed!"})
 
-      LLMChain
-      |> stub(:run, fn chain ->
+      stub_llm_run(fn chain ->
         updated_chain =
           chain
           |> Map.put(:messages, chain.messages ++ [assistant_message])
@@ -781,8 +775,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       # Mock LLMChain.run
       assistant_message = Message.new_assistant!(%{content: "Task done!"})
 
-      LLMChain
-      |> stub(:run, fn chain ->
+      stub_llm_run(fn chain ->
         updated_chain =
           chain
           |> Map.put(:messages, chain.messages ++ [assistant_message])
@@ -816,8 +809,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       # Mock LLMChain.run
       assistant_message = Message.new_assistant!(%{content: "Custom task done!"})
 
-      LLMChain
-      |> stub(:run, fn chain ->
+      stub_llm_run(fn chain ->
         updated_chain =
           chain
           |> Map.put(:messages, chain.messages ++ [assistant_message])
@@ -958,8 +950,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       # Mock LLMChain.run
       assistant_message = Message.new_assistant!(%{content: "Tool result!"})
 
-      LLMChain
-      |> stub(:run, fn chain ->
+      stub_llm_run(fn chain ->
         updated_chain =
           chain
           |> Map.put(:messages, chain.messages ++ [assistant_message])
@@ -1131,8 +1122,7 @@ defmodule Sagents.Middleware.SubAgentTest do
 
       # Capture what agent gets created by mocking LLMChain.run
       # and inspecting the chain that's passed to it
-      LLMChain
-      |> stub(:run, fn chain ->
+      stub_llm_run(fn chain ->
         # Store reference to verify later
         # We can't easily capture the chain here, but we can verify
         # the chain doesn't have the task tool by checking tools
@@ -1178,6 +1168,117 @@ defmodule Sagents.Middleware.SubAgentTest do
 
       refute subagent_has_task_tool,
              "Subagent's LLMChain should NOT have task tool - SubAgent middleware should be filtered"
+    end
+  end
+
+  describe "execute_subagent encodes HITL interrupt as 3-tuple with InterruptSignal" do
+    setup do
+      agent_id = "parent-signal-#{System.unique_integer([:positive])}"
+
+      {:ok, _sup} =
+        start_supervised({
+          SubAgentsDynamicSupervisor,
+          agent_id: agent_id
+        })
+
+      # Create a subagent config with HITL middleware that interrupts on "test_tool"
+      subagent_config =
+        SubAgent.Config.new!(%{
+          name: "interruptible",
+          description: "Agent that gets interrupted",
+          system_prompt: "Test agent",
+          tools: [test_tool()],
+          middleware: [
+            {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"test_tool" => true}]}
+          ]
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: agent_id,
+          model: test_model(),
+          middleware: [],
+          subagents: [subagent_config]
+        )
+
+      %{agent_id: agent_id, middleware_config: middleware_config}
+    end
+
+    test "returns 3-tuple {:ok, message, %InterruptSignal{}} on sub-agent HITL interrupt", %{
+      middleware_config: config
+    } do
+      # Mock LLMChain.run to simulate HITL interrupt.
+      # The SubAgent has HITL configured for "test_tool", so execution should
+      # be interrupted before the tool runs.
+      #
+      # For run/1 (pre-mode path): return {:ok, chain} with a tool call in the
+      # last message so execute_chain_with_hitl detects the interrupt.
+      #
+      # For run/2 (mode pipeline path): the mode pipeline itself performs the
+      # HITL check, so we must return {:interrupt, chain, interrupt_data}
+      # directly, matching what AgentExecution.run/2 would produce.
+      LLMChain
+      |> stub(:run, fn chain ->
+        tool_call =
+          LangChain.Message.ToolCall.new!(%{
+            call_id: "tc-1",
+            name: "test_tool",
+            arguments: %{}
+          })
+
+        assistant_msg = Message.new_assistant!(%{tool_calls: [tool_call]})
+
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_msg])
+          |> Map.put(:last_message, assistant_msg)
+          |> Map.put(:needs_response, true)
+          |> Map.put(:exchanged_messages, chain.messages ++ [assistant_msg])
+
+        {:ok, updated_chain}
+      end)
+
+      LLMChain
+      |> stub(:run, fn chain, _opts ->
+        tool_call =
+          LangChain.Message.ToolCall.new!(%{
+            call_id: "tc-1",
+            name: "test_tool",
+            arguments: %{}
+          })
+
+        assistant_msg = Message.new_assistant!(%{tool_calls: [tool_call]})
+
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_msg])
+          |> Map.put(:last_message, assistant_msg)
+          |> Map.put(:needs_response, true)
+          |> Map.put(:exchanged_messages, chain.messages ++ [assistant_msg])
+
+        {:interrupt, updated_chain,
+         %{type: :hitl, tool_calls: [%{call_id: "tc-1", name: "test_tool"}]}}
+      end)
+
+      [task_tool] = SubAgentMiddleware.tools(config)
+
+      args = %{
+        "instructions" => "Do something that triggers HITL",
+        "subagent_type" => "interruptible"
+      }
+
+      context = %{state: State.new!(%{messages: []})}
+
+      result = task_tool.function.(args, context)
+
+      # Should be a 3-tuple with InterruptSignal
+      assert {:ok, message, %Sagents.InterruptSignal{} = signal} = result
+      assert is_binary(message)
+      assert message =~ "requires human approval"
+      assert signal.type == :subagent_hitl
+      assert signal.subagent_type == "interruptible"
+      assert is_binary(signal.sub_agent_id)
+      assert is_map(signal.interrupt_data)
     end
   end
 
@@ -1356,5 +1457,12 @@ defmodule Sagents.Middleware.SubAgentTest do
 
       assert log =~ "not a module atom"
     end
+  end
+
+  # Stub LLMChain.run for both /1 and /2 arities so tests are compatible
+  # with the mode-based execution pipeline (which calls run/2).
+  defp stub_llm_run(fun) do
+    LLMChain |> stub(:run, fun)
+    LLMChain |> stub(:run, fn chain, _opts -> fun.(chain) end)
   end
 end

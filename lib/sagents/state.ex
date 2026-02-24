@@ -153,7 +153,7 @@ defmodule Sagents.State do
       messages: merge_messages(left.messages, right.messages),
       todos: merge_todos(left.todos, right.todos),
       metadata: deep_merge_maps(left.metadata, right.metadata),
-      interrupt_data: right.interrupt_data || left.interrupt_data
+      interrupt_data: right.interrupt_data
     }
   end
 

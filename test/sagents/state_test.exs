@@ -357,6 +357,93 @@ defmodule Sagents.StateTest do
     end
   end
 
+  describe "merge_states/2 interrupt_data" do
+    test "right nil interrupt_data clears left (right-biased semantics)" do
+      left = State.new!(%{interrupt_data: %{type: :subagent_hitl, sub_agent_id: "sa-1"}})
+      right = State.new!()
+
+      merged = State.merge_states(left, right)
+
+      # Right's nil should clear left's interrupt_data (right-biased)
+      assert merged.interrupt_data == nil
+    end
+
+    test "right interrupt_data wins when both present" do
+      left = State.new!(%{interrupt_data: %{type: :subagent_hitl, sub_agent_id: "sa-1"}})
+
+      right =
+        State.new!(%{interrupt_data: %{type: :subagent_hitl, sub_agent_id: "sa-2"}})
+
+      merged = State.merge_states(left, right)
+
+      assert merged.interrupt_data.sub_agent_id == "sa-2"
+    end
+
+    test "right interrupt_data used when left is nil" do
+      left = State.new!()
+      right = State.new!(%{interrupt_data: %{type: :subagent_hitl, sub_agent_id: "sa-1"}})
+
+      merged = State.merge_states(left, right)
+
+      assert merged.interrupt_data.sub_agent_id == "sa-1"
+    end
+
+    test "both nil results in nil" do
+      left = State.new!()
+      right = State.new!()
+
+      merged = State.merge_states(left, right)
+
+      assert merged.interrupt_data == nil
+    end
+
+    test "merge_states preserves pending_interrupts in interrupt_data" do
+      left = State.new!()
+
+      right =
+        State.new!(%{
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sa-1",
+            tool_call_id: "call-1",
+            pending_interrupts: [
+              %{
+                type: :subagent_hitl,
+                sub_agent_id: "sa-2",
+                tool_call_id: "call-2"
+              }
+            ]
+          }
+        })
+
+      merged = State.merge_states(left, right)
+
+      assert merged.interrupt_data.sub_agent_id == "sa-1"
+      assert merged.interrupt_data.tool_call_id == "call-1"
+      assert length(merged.interrupt_data.pending_interrupts) == 1
+
+      [pending] = merged.interrupt_data.pending_interrupts
+      assert pending.sub_agent_id == "sa-2"
+      assert pending.tool_call_id == "call-2"
+    end
+
+    test "right-biased in sequential reduce" do
+      # Simulates multiple tool results being reduced: first sets interrupt_data,
+      # second clears it (right-biased means newest result wins)
+      base = State.new!()
+
+      delta1 = State.new!(%{interrupt_data: %{type: :subagent_hitl, sub_agent_id: "sa-1"}})
+      delta2 = State.new!()
+
+      result =
+        [delta1, delta2]
+        |> Enum.reduce(base, fn delta, acc -> State.merge_states(acc, delta) end)
+
+      # After reducing, the last delta (nil interrupt_data) should win
+      assert result.interrupt_data == nil
+    end
+  end
+
   describe "reset/1" do
     test "clears messages, todos, and metadata" do
       state =

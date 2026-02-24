@@ -11,7 +11,8 @@ defmodule Sagents.Modes.AgentExecution do
   2. Check for HITL interrupts (if HumanInTheLoop middleware present)
   3. Execute tools
   4. Propagate state updates from tool results
-  5. Loop if `needs_response` is true
+  5. Check for sub-agent HITL interrupts (InterruptSignal in tool results)
+  6. Loop if `needs_response` is true
 
   ## Options
 
@@ -41,6 +42,7 @@ defmodule Sagents.Modes.AgentExecution do
     |> check_pre_tool_hitl(opts)
     |> execute_tools()
     |> propagate_state(opts)
+    |> check_post_tool_interrupt(opts)
     |> continue_or_done(&do_run/2, opts)
   end
 end
