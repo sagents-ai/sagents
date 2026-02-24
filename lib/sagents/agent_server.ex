@@ -1378,8 +1378,8 @@ defmodule Sagents.AgentServer do
 
   @impl true
   def handle_call(:execute, _from, %ServerState{status: :idle} = server_state) do
-    # Build callback handlers that will forward events via PubSub
-    callbacks = build_llm_callbacks(server_state)
+    # Build PubSub callback handlers (created in GenServer, captures server_state)
+    pubsub_callbacks = build_pubsub_callbacks(server_state)
 
     # Transition to running
     new_state = %{server_state | status: :running}
@@ -1392,7 +1392,7 @@ defmodule Sagents.AgentServer do
     # Start async execution
     task =
       Task.async(fn ->
-        execute_agent(new_state, callbacks)
+        execute_agent(new_state, pubsub_callbacks)
       end)
 
     # Store task reference if needed, or just let it run
@@ -1729,7 +1729,7 @@ defmodule Sagents.AgentServer do
 
   @impl true
   def handle_info({:llm_deltas, _deltas}, server_state) do
-    # Deltas are broadcast via on_llm_new_delta callback in build_llm_callbacks
+    # Deltas are broadcast via on_llm_new_delta callback in build_pubsub_callbacks
     # No need to process them here - the client (chat_live.ex) will handle merging
     {:noreply, server_state}
   end
@@ -1936,11 +1936,21 @@ defmodule Sagents.AgentServer do
   end
 
   @doc false
-  # Build callback handlers that forward LLM events via PubSub
-  defp build_llm_callbacks(%ServerState{} = server_state) do
+  # Build PubSub callback handlers that forward LLM events to subscribers.
+  #
+  # Returns a single map containing:
+  # - LangChain-native keys (on_llm_new_delta, on_message_processed, etc.)
+  #   that are added to the LLMChain and fired by LLMChain.run/2
+  # - on_after_middleware: a Sagents-specific key fired by Agent.fire_callback/3
+  #   after before_model hooks complete (NOT a LangChain key, ignored by LLMChain)
+  #
+  # This map is combined with middleware callback maps into a list
+  # in execute_agent/2 and resume_agent/2 before being passed to Agent.execute/3.
+  defp build_pubsub_callbacks(%ServerState{} = server_state) do
     %{
-      # Callback for post-middleware state (before LLM call)
-      # This broadcasts the prepared state (with middleware modifications) on the debug channel
+      # Sagents-specific callback (NOT a LangChain key).
+      # Fired by Agent.fire_callback/3 after before_model hooks, before LLM call.
+      # Broadcasts the prepared state (with middleware modifications) on the debug channel.
       on_after_middleware: fn prepared_state ->
         broadcast_debug_event(server_state, {:after_middleware_state, prepared_state})
       end,
@@ -2019,7 +2029,14 @@ defmodule Sagents.AgentServer do
     }
   end
 
-  defp execute_agent(%ServerState{} = server_state, callbacks) do
+  defp execute_agent(%ServerState{} = server_state, pubsub_callbacks) do
+    # Collect middleware callbacks in Task process (safe for process-dictionary closures).
+    # Combine into a single list: [pubsub_map, mw_map_1, mw_map_2, ...].
+    # Agent.execute will add each map to the LLMChain (for LangChain keys)
+    # and iterate the list for Sagents-specific keys (on_after_middleware).
+    middleware_callbacks = Middleware.collect_callbacks(server_state.agent.middleware)
+    callbacks = [pubsub_callbacks | middleware_callbacks]
+
     # Execute agent with callbacks
     case Agent.execute(server_state.agent, server_state.state, callbacks: callbacks) do
       {:ok, new_state} ->
@@ -2038,8 +2055,10 @@ defmodule Sagents.AgentServer do
   end
 
   defp resume_agent(server_state, decisions) do
-    # Build callbacks for resume execution as well
-    callbacks = build_llm_callbacks(server_state)
+    # Same callback assembly as execute_agent/2
+    pubsub_callbacks = build_pubsub_callbacks(server_state)
+    middleware_callbacks = Middleware.collect_callbacks(server_state.agent.middleware)
+    callbacks = [pubsub_callbacks | middleware_callbacks]
 
     case Agent.resume(server_state.agent, server_state.state, decisions, callbacks: callbacks) do
       {:ok, new_state} ->

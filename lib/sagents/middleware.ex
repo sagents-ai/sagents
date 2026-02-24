@@ -9,14 +9,16 @@ defmodule Sagents.Middleware do
   - Tools (Functions)
   - State schema modifications
   - Pre/post processing hooks
+  - LLM callback handlers (token usage, tool execution, message processing)
 
   ## Middleware Lifecycle
 
   1. **Initialization** - `init/1` is called when middleware is configured
   2. **Tool Collection** - `tools/1` provides tools to add to the agent
   3. **Prompt Assembly** - `system_prompt/1` contributes to the system prompt
-  4. **Before Model** - `before_model/2` preprocesses state before LLM call
-  5. **After Model** - `after_model/2` postprocesses state after LLM response
+  4. **Callback Collection** - `callbacks/1` provides LLM event handlers
+  5. **Before Model** - `before_model/2` preprocesses state before LLM call
+  6. **After Model** - `after_model/2` postprocesses state after LLM response
 
   ## Example
 
@@ -37,6 +39,15 @@ defmodule Sagents.Middleware do
         @impl true
         def tools(_config) do
           [my_custom_tool()]
+        end
+
+        @impl true
+        def callbacks(_config) do
+          %{
+            on_llm_token_usage: fn _chain, usage ->
+              Logger.info("Token usage: \#{inspect(usage)}")
+            end
+          }
         end
 
         @impl true
@@ -226,6 +237,66 @@ defmodule Sagents.Middleware do
   """
   @callback on_server_start(State.t(), middleware_config) :: {:ok, State.t()} | {:error, term()}
 
+  @doc """
+  Provide LangChain callback handlers for this middleware.
+
+  Receives the middleware configuration from `init/1` and returns a callback
+  handler map compatible with `LangChain.Chains.LLMChain.add_callback/2`.
+  This allows middleware to observe LLM events such as token usage, tool
+  execution, and message processing.
+
+  When multiple middleware declare callbacks, all handlers are collected and
+  fire in fan-out fashion (every matching handler from every middleware fires).
+
+  Defaults to empty map (`%{}`) if not implemented. Return `%{}` for no callbacks.
+
+  ## Parameters
+
+  - `config` - The middleware configuration from `init/1`
+
+  ## Returns
+
+  - A map of callback keys to handler functions
+
+  ## Available Callback Keys
+
+  These are the LangChain-native keys supported by `LLMChain`. Use only these
+  keys in your callback map (see `LangChain.Chains.ChainCallbacks` for full
+  type signatures):
+
+  **Model-level callbacks:**
+  - `:on_llm_new_delta` - Streaming token/delta received
+  - `:on_llm_new_message` - Complete message from LLM
+  - `:on_llm_ratelimit_info` - Rate limit headers from provider
+  - `:on_llm_token_usage` - Token usage information
+  - `:on_llm_response_headers` - Raw response headers
+
+  **Chain-level callbacks:**
+  - `:on_message_processed` - Message fully processed by chain
+  - `:on_message_processing_error` - Error processing a message
+  - `:on_error_message_created` - Error message created
+  - `:on_tool_call_identified` - Tool call detected during streaming
+  - `:on_tool_execution_started` - Tool begins executing
+  - `:on_tool_execution_completed` - Tool finished successfully
+  - `:on_tool_execution_failed` - Tool execution errored
+  - `:on_tool_response_created` - Tool response message created
+  - `:on_retries_exceeded` - Max retries exhausted
+
+  ## Example
+
+      def callbacks(_config) do
+        %{
+          on_llm_token_usage: fn _chain, usage ->
+            Logger.info("Token usage: \#{inspect(usage)}")
+          end,
+          on_message_processed: fn _chain, message ->
+            Logger.info("Message: \#{inspect(message)}")
+          end
+        }
+      end
+  """
+  @callback callbacks(middleware_config) :: map()
+
   @optional_callbacks [
     init: 1,
     system_prompt: 1,
@@ -234,7 +305,8 @@ defmodule Sagents.Middleware do
     after_model: 2,
     handle_message: 3,
     state_schema: 0,
-    on_server_start: 2
+    on_server_start: 2,
+    callbacks: 1
   ]
 
   @doc """
@@ -329,6 +401,34 @@ defmodule Sagents.Middleware do
     rescue
       UndefinedFunctionError -> []
     end
+  end
+
+  @doc """
+  Get LLM callback handlers from middleware.
+
+  Returns the callback handler map from the middleware's `callbacks/1` callback,
+  or `nil` if the callback is not implemented.
+  """
+  def get_callbacks(%MiddlewareEntry{module: module, config: config}) do
+    try do
+      module.callbacks(config)
+    rescue
+      UndefinedFunctionError -> nil
+    end
+  end
+
+  @doc """
+  Collect callback handler maps from all middleware.
+
+  Calls `get_callbacks/1` on each middleware entry and filters out nils.
+  Returns a list of callback handler maps suitable for passing
+  to `LLMChain.add_callback/2`.
+  """
+  @spec collect_callbacks([MiddlewareEntry.t()]) :: [map()]
+  def collect_callbacks(middleware) when is_list(middleware) do
+    middleware
+    |> Enum.map(&get_callbacks/1)
+    |> Enum.reject(&is_nil/1)
   end
 
   @doc """
