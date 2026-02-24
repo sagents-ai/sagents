@@ -339,9 +339,9 @@ defmodule Sagents.MiddlewareTest do
   end
 
   describe "get_callbacks/1" do
-    test "returns empty map for middleware without callbacks/1" do
+    test "returns nil for middleware without callbacks/1" do
       mw = Middleware.init_middleware(MinimalMiddleware)
-      assert Middleware.get_callbacks(mw) == %{}
+      assert Middleware.get_callbacks(mw) == nil
     end
 
     test "returns empty map for middleware with empty callbacks" do
@@ -368,7 +368,7 @@ defmodule Sagents.MiddlewareTest do
       assert Middleware.collect_callbacks(middleware) == []
     end
 
-    test "collects non-empty callback maps from middleware" do
+    test "collects callback maps from middleware, filtering nils" do
       middleware = [
         Middleware.init_middleware(MinimalMiddleware),
         Middleware.init_middleware({CallbackMiddleware, [test_pid: self()]}),
@@ -377,9 +377,9 @@ defmodule Sagents.MiddlewareTest do
 
       result = Middleware.collect_callbacks(middleware)
 
-      # Only the CallbackMiddleware has non-empty callbacks
-      assert length(result) == 1
-      assert is_function(hd(result).on_llm_token_usage)
+      # MinimalMiddleware returns nil (no callbacks/1), so it's filtered out.
+      # CallbackMiddleware and EmptyCallbackMiddleware both define callbacks/1.
+      assert length(result) == 2
     end
 
     test "collects callbacks from multiple middleware" do

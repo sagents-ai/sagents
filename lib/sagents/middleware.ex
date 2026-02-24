@@ -407,28 +407,28 @@ defmodule Sagents.Middleware do
   Get LLM callback handlers from middleware.
 
   Returns the callback handler map from the middleware's `callbacks/1` callback,
-  or an empty map if the callback is not implemented.
+  or `nil` if the callback is not implemented.
   """
   def get_callbacks(%MiddlewareEntry{module: module, config: config}) do
     try do
       module.callbacks(config)
     rescue
-      UndefinedFunctionError -> %{}
+      UndefinedFunctionError -> nil
     end
   end
 
   @doc """
   Collect callback handler maps from all middleware.
 
-  Calls `get_callbacks/1` on each middleware entry and filters out empty maps.
-  Returns a list of non-empty callback handler maps suitable for passing
+  Calls `get_callbacks/1` on each middleware entry and filters out nils.
+  Returns a list of callback handler maps suitable for passing
   to `LLMChain.add_callback/2`.
   """
   @spec collect_callbacks([MiddlewareEntry.t()]) :: [map()]
   def collect_callbacks(middleware) when is_list(middleware) do
     middleware
     |> Enum.map(&get_callbacks/1)
-    |> Enum.reject(&(map_size(&1) == 0))
+    |> Enum.reject(&is_nil/1)
   end
 
   @doc """
