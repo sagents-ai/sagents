@@ -9,6 +9,7 @@ defmodule Sagents do
   - **Virtual Filesystem**: File operations for agent workflows
   - **Task Delegation**: Hierarchical sub-agents for complex tasks
   - **Context Management**: Automatic summarization and optimization
+  - **Observability**: Custom telemetry and tracing via middleware callbacks (see [Observability Guide](docs/observability.md))
 
   ## Quick Start
 
