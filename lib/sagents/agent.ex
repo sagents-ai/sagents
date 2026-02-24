@@ -451,14 +451,29 @@ defmodule Sagents.Agent do
 
     callbacks = Keyword.get(opts, :callbacks)
 
-    with {:ok, prepared_state} <- apply_before_model_hooks(state, agent.middleware) do
+    with {:ok, validated_opts} <- validate_until_tool(agent, opts),
+         {:ok, prepared_state} <- apply_before_model_hooks(state, agent.middleware) do
       # Fire callback with post-middleware state (before LLM call)
       fire_callback(callbacks, :on_after_middleware, [prepared_state])
 
-      case execute_model(agent, prepared_state, callbacks) do
+      case execute_model(agent, prepared_state, callbacks, validated_opts) do
         {:ok, response_state} ->
           # Normal completion - run after_model hooks
           apply_after_model_hooks(response_state, agent.middleware)
+
+        {:ok, response_state, extra} ->
+          # 3-tuple completion (e.g., until_tool result) - run after_model hooks
+          # and re-attach extra data
+          case apply_after_model_hooks(response_state, agent.middleware) do
+            {:ok, final_state} ->
+              {:ok, final_state, extra}
+
+            {:interrupt, interrupted_state, interrupt_data} ->
+              {:interrupt, interrupted_state, interrupt_data}
+
+            {:error, reason} ->
+              {:error, reason}
+          end
 
         {:interrupt, interrupted_state, interrupt_data} ->
           # Interrupt from execute_model - return immediately without after_model hooks
@@ -678,13 +693,19 @@ defmodule Sagents.Agent do
     end)
   end
 
-  defp execute_model(%Agent{} = agent, %State{} = state, callbacks) do
+  defp execute_model(%Agent{} = agent, %State{} = state, callbacks, opts) do
     with {:ok, langchain_messages} <- validate_messages(state.messages),
          {:ok, chain} <- build_chain(agent, langchain_messages, state, callbacks),
-         result <- execute_chain(chain, agent.middleware, agent) do
+         result <- execute_chain(chain, agent.middleware, agent, opts) do
       case result do
         {:ok, executed_chain} ->
           extract_state_from_chain(executed_chain, state)
+
+        {:ok, executed_chain, extra} ->
+          case extract_state_from_chain(executed_chain, state) do
+            {:ok, final_state} -> {:ok, final_state, extra}
+            {:error, reason} -> {:error, reason}
+          end
 
         {:interrupt, interrupted_chain, interrupt_data} ->
           # Tool calls need human approval - return interrupt with current state
@@ -794,20 +815,59 @@ defmodule Sagents.Agent do
     opts
   end
 
-  defp execute_chain(chain, middleware, agent) do
+  defp validate_until_tool(%Agent{} = agent, opts) do
+    case Keyword.get(opts, :until_tool) do
+      nil ->
+        {:ok, opts}
+
+      tool when is_binary(tool) ->
+        do_validate_tool_names(agent, [tool], opts)
+
+      tools when is_list(tools) ->
+        do_validate_tool_names(agent, tools, opts)
+
+      other ->
+        {:error, "Invalid :until_tool option: expected string or list, got: #{inspect(other)}"}
+    end
+  end
+
+  defp do_validate_tool_names(%Agent{tools: tools}, target_names, opts) do
+    available = MapSet.new(tools, & &1.name)
+    missing = Enum.reject(target_names, &MapSet.member?(available, &1))
+
+    case missing do
+      [] ->
+        {:ok, opts}
+
+      names ->
+        {:error,
+         "until_tool: tool(s) #{inspect(names)} not found. Available: #{inspect(MapSet.to_list(available))}"}
+    end
+  end
+
+  defp execute_chain(chain, middleware, agent, opts) do
     run_opts = build_run_options(agent)
 
     mode_opts =
       run_opts
       |> Keyword.put(:mode, agent.mode || Sagents.Modes.AgentExecution)
       |> Keyword.put(:middleware, middleware)
+      |> maybe_put_until_tool(opts)
+
+    if is_raw_langchain_mode?(agent.mode) do
+      Logger.warning(
+        "Agent #{agent.agent_id} is using raw LangChain mode #{inspect(agent.mode)}. " <>
+          "HITL interrupts and state propagation will NOT be applied. " <>
+          "Consider using Sagents.Modes.AgentExecution with opts instead."
+      )
+    end
 
     case LLMChain.run(chain, mode_opts) do
       {:ok, chain} ->
         {:ok, chain}
 
-      {:ok, chain, _extra} ->
-        {:ok, chain}
+      {:ok, chain, extra} ->
+        {:ok, chain, extra}
 
       {:interrupt, chain, interrupt_data} ->
         {:interrupt, chain, interrupt_data}
@@ -816,11 +876,30 @@ defmodule Sagents.Agent do
         {:pause, chain}
 
       {:error, _chain, %LangChainError{} = reason} ->
-        {:error, reason.message}
+        {:error, reason}
 
       {:error, _chain, reason} ->
-        {:error, "Agent execution failed: #{inspect(reason)}"}
+        {:error, reason}
     end
+  end
+
+  defp maybe_put_until_tool(mode_opts, opts) do
+    case Keyword.get(opts, :until_tool) do
+      nil -> mode_opts
+      until_tool -> Keyword.put(mode_opts, :until_tool, until_tool)
+    end
+  end
+
+  defp is_raw_langchain_mode?(nil), do: false
+  defp is_raw_langchain_mode?(Sagents.Modes.AgentExecution), do: false
+
+  defp is_raw_langchain_mode?(module) when is_atom(module) do
+    module in [
+      LangChain.Chains.LLMChain.Modes.WhileNeedsResponse,
+      LangChain.Chains.LLMChain.Modes.UntilSuccess,
+      LangChain.Chains.LLMChain.Modes.UntilToolUsed,
+      LangChain.Chains.LLMChain.Modes.Step
+    ]
   end
 
   defp extract_state_from_chain(chain, %State{} = original_state) do
@@ -843,6 +922,9 @@ defmodule Sagents.Agent do
               is_struct(result.processed_content, State)
             end)
             |> Enum.map(& &1.processed_content)
+
+          _ ->
+            []
         end
       end)
 
