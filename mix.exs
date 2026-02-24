@@ -156,6 +156,7 @@ defmodule Sagents.MixProject do
       "docs/pubsub_presence.md",
       "docs/middleware.md",
       "docs/middleware_messaging.md",
+      "docs/observability.md",
       "docs/persistence.md"
     ]
   end
