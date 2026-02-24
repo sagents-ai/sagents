@@ -1181,6 +1181,88 @@ defmodule Sagents.Middleware.SubAgentTest do
     end
   end
 
+  describe "execute_subagent encodes HITL interrupt as 3-tuple with InterruptSignal" do
+    setup do
+      agent_id = "parent-signal-#{System.unique_integer([:positive])}"
+
+      {:ok, _sup} =
+        start_supervised({
+          SubAgentsDynamicSupervisor,
+          agent_id: agent_id
+        })
+
+      # Create a subagent config with HITL middleware that interrupts on "test_tool"
+      subagent_config =
+        SubAgent.Config.new!(%{
+          name: "interruptible",
+          description: "Agent that gets interrupted",
+          system_prompt: "Test agent",
+          tools: [test_tool()],
+          middleware: [
+            {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"test_tool" => true}]}
+          ]
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: agent_id,
+          model: test_model(),
+          middleware: [],
+          subagents: [subagent_config]
+        )
+
+      %{agent_id: agent_id, middleware_config: middleware_config}
+    end
+
+    test "returns 3-tuple {:ok, message, %InterruptSignal{}} on sub-agent HITL interrupt", %{
+      middleware_config: config
+    } do
+      # Mock LLMChain.run to return an assistant message with a tool call
+      # The SubAgent has HITL configured for "test_tool", so this will trigger
+      # an interrupt inside the SubAgent's execute_chain_with_hitl
+      LLMChain
+      |> stub(:run, fn chain ->
+        tool_call =
+          LangChain.Message.ToolCall.new!(%{
+            call_id: "tc-1",
+            name: "test_tool",
+            arguments: %{}
+          })
+
+        assistant_msg = Message.new_assistant!(%{tool_calls: [tool_call]})
+
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_msg])
+          |> Map.put(:last_message, assistant_msg)
+          |> Map.put(:needs_response, true)
+          |> Map.put(:exchanged_messages, chain.messages ++ [assistant_msg])
+
+        {:ok, updated_chain}
+      end)
+
+      [task_tool] = SubAgentMiddleware.tools(config)
+
+      args = %{
+        "instructions" => "Do something that triggers HITL",
+        "subagent_type" => "interruptible"
+      }
+
+      context = %{state: State.new!(%{messages: []})}
+
+      result = task_tool.function.(args, context)
+
+      # Should be a 3-tuple with InterruptSignal
+      assert {:ok, message, %Sagents.InterruptSignal{} = signal} = result
+      assert is_binary(message)
+      assert message =~ "requires human approval"
+      assert signal.type == :subagent_hitl
+      assert signal.subagent_type == "interruptible"
+      assert is_binary(signal.sub_agent_id)
+      assert is_map(signal.interrupt_data)
+    end
+  end
+
   describe "block_middleware configuration" do
     alias Sagents.MiddlewareEntry
 

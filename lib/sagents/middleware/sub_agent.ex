@@ -349,7 +349,9 @@ defmodule Sagents.Middleware.SubAgent do
 
   - `{:ok, result}` - SubAgent completed successfully, returns final message
     content
-  - `{:interrupt, interrupt_data}` - SubAgent hit HITL interrupt, needs approval
+  - `{:ok, message, %InterruptSignal{}}` - SubAgent hit HITL interrupt, needs
+    approval. The InterruptSignal is stored in ToolResult.processed_content and
+    detected by the check_post_tool_interrupt pipeline step.
   - `{:error, reason}` - Failed to start or execute SubAgent
 
   ## Example
@@ -401,7 +403,9 @@ defmodule Sagents.Middleware.SubAgent do
   - SubAgents are supervised and cleaned up automatically
   """
   @spec start_subagent(String.t(), String.t(), map(), map(), map()) ::
-          {:ok, String.t()} | {:interrupt, map()} | {:error, String.t()}
+          {:ok, String.t()}
+          | {:ok, String.t(), Sagents.InterruptSignal.t()}
+          | {:error, String.t()}
   def start_subagent(instructions, subagent_type, args, context, config) do
     Logger.debug("Starting SubAgent: #{subagent_type}")
 
@@ -623,11 +627,12 @@ defmodule Sagents.Middleware.SubAgent do
 
       {:interrupt, interrupt_data} ->
         # SubAgent needs HITL approval
-        # Propagate interrupt to parent with enhanced metadata
+        # Return 3-tuple so LangChain stores InterruptSignal in ToolResult.processed_content.
+        # The check_post_tool_interrupt pipeline step will detect it and convert to {:interrupt, ...}
         Logger.info("SubAgent '#{subagent_type}' interrupted for HITL")
 
-        {:interrupt,
-         %{
+        {:ok, "SubAgent '#{subagent_type}' requires human approval before continuing.",
+         %Sagents.InterruptSignal{
            type: :subagent_hitl,
            sub_agent_id: sub_agent_id,
            subagent_type: subagent_type,
@@ -656,11 +661,11 @@ defmodule Sagents.Middleware.SubAgent do
         {:ok, final_result}
 
       {:interrupt, interrupt_data} ->
-        # Another interrupt (e.g., SubAgent needs approval for another tool)
+        # Another interrupt — return 3-tuple with InterruptSignal
         Logger.info("SubAgent '#{subagent_type}' interrupted again")
 
-        {:interrupt,
-         %{
+        {:ok, "SubAgent '#{subagent_type}' requires human approval before continuing.",
+         %Sagents.InterruptSignal{
            type: :subagent_hitl,
            sub_agent_id: sub_agent_id,
            subagent_type: subagent_type,

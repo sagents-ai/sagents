@@ -9,6 +9,7 @@ defmodule Sagents.Mode.Steps do
   alias LangChain.Chains.LLMChain
   alias LangChain.Message
   alias Sagents.State
+  alias Sagents.InterruptSignal
   alias Sagents.MiddlewareEntry
   alias Sagents.Middleware.HumanInTheLoop
 
@@ -70,9 +71,53 @@ defmodule Sagents.Mode.Steps do
 
   def propagate_state(terminal, _opts), do: terminal
 
-  # ── Private Helpers (extracted from Agent) ──────────────────────
+  @doc """
+  Check if the last tool-role message contains an InterruptSignal in its
+  processed_content, indicating a SubAgent HITL interrupt.
 
-  defp update_chain_state_from_tools(chain) do
+  This step runs **after** tool execution and state propagation. It scans
+  the chain's `last_message` for an `InterruptSignal` struct and, if found,
+  converts the pipeline to `{:interrupt, chain, interrupt_data}`.
+  """
+  def check_post_tool_interrupt({:continue, chain}, _opts) do
+    case find_interrupt_signal(chain) do
+      nil ->
+        {:continue, chain}
+
+      %InterruptSignal{} = signal ->
+        interrupt_data = %{
+          type: signal.type,
+          sub_agent_id: signal.sub_agent_id,
+          subagent_type: signal.subagent_type,
+          interrupt_data: signal.interrupt_data
+        }
+
+        {:interrupt, chain, interrupt_data}
+    end
+  end
+
+  def check_post_tool_interrupt(terminal, _opts), do: terminal
+
+  # Scan the chain's last_message for an InterruptSignal in processed_content
+  defp find_interrupt_signal(chain) do
+    case chain.last_message do
+      %Message{role: :tool, tool_results: tool_results} when is_list(tool_results) ->
+        Enum.find_value(tool_results, fn result ->
+          case result.processed_content do
+            %InterruptSignal{} = signal -> signal
+            _ -> nil
+          end
+        end)
+
+      _ ->
+        nil
+    end
+  end
+
+  # ── Helpers (extracted from Agent) ──────────────────────
+
+  @doc false
+  def update_chain_state_from_tools(chain) do
     current_state =
       case chain.custom_context do
         %{state: %State{} = state} -> state
@@ -93,7 +138,8 @@ defmodule Sagents.Mode.Steps do
     end
   end
 
-  defp extract_state_deltas_from_chain(chain) do
+  @doc false
+  def extract_state_deltas_from_chain(chain) do
     chain.messages
     |> Enum.reverse()
     |> Enum.take_while(fn msg ->
@@ -111,5 +157,6 @@ defmodule Sagents.Mode.Steps do
           |> Enum.map(& &1.processed_content)
       end
     end)
+    |> Enum.reverse()
   end
 end
