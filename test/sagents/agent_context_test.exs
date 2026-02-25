@@ -56,6 +56,67 @@ defmodule Sagents.AgentContextTest do
     end
   end
 
+  describe "put/2" do
+    test "sets a single key in the context" do
+      AgentContext.init(%{trace_id: "abc"})
+      assert :ok = AgentContext.put(:request_id, "req-123")
+      assert AgentContext.get() == %{trace_id: "abc", request_id: "req-123"}
+    end
+
+    test "overwrites an existing key" do
+      AgentContext.init(%{trace_id: "abc"})
+      AgentContext.put(:trace_id, "xyz")
+      assert AgentContext.fetch(:trace_id) == "xyz"
+    end
+
+    test "works when no context initialized" do
+      task =
+        Task.async(fn ->
+          AgentContext.put(:key, "value")
+          AgentContext.get()
+        end)
+
+      assert Task.await(task) == %{key: "value"}
+    end
+  end
+
+  describe "merge/1" do
+    test "merges multiple keys into the context" do
+      AgentContext.init(%{trace_id: "abc"})
+      assert :ok = AgentContext.merge(%{request_id: "req-123", correlation_id: "corr-456"})
+
+      assert AgentContext.get() == %{
+               trace_id: "abc",
+               request_id: "req-123",
+               correlation_id: "corr-456"
+             }
+    end
+
+    test "overwrites existing keys" do
+      AgentContext.init(%{trace_id: "abc", tenant_id: 1})
+      AgentContext.merge(%{tenant_id: 2, new_key: "val"})
+      assert AgentContext.fetch(:tenant_id) == 2
+      assert AgentContext.fetch(:trace_id) == "abc"
+      assert AgentContext.fetch(:new_key) == "val"
+    end
+
+    test "works with empty map" do
+      AgentContext.init(%{trace_id: "abc"})
+      AgentContext.merge(%{})
+      assert AgentContext.get() == %{trace_id: "abc"}
+    end
+
+    test "works when no context initialized" do
+      task =
+        Task.async(fn ->
+          AgentContext.merge(%{a: 1, b: 2})
+          AgentContext.get()
+        end)
+
+      assert Task.await(task) == %{a: 1, b: 2}
+    end
+  end
+
   describe "fork/1" do
     test "returns a copy of the current context" do
       ctx = %{trace_id: "abc", tenant_id: 42}

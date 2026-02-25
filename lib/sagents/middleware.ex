@@ -66,6 +66,26 @@ defmodule Sagents.Middleware do
 
   - Module name: `MyMiddleware`
   - Tuple with options: `{MyMiddleware, [enabled: true]}`
+
+  ## Choosing Between AgentContext and State.metadata
+
+  When writing middleware, you will often need to store and retrieve data.
+  Choose the right store based on the persistence test:
+
+  - **Use `AgentContext`** for process-local state that middleware needs to
+    propagate to child processes. Implement `on_fork_context/2` to inject
+    values and register restore functions.
+
+    Example: An OpenTelemetry middleware storing span context.
+
+  - **Use `State.metadata`** for data that must survive serialization and
+    be available after conversation restoration.
+
+    Example: ConversationTitle storing the generated title.
+
+  Never store non-serializable values (PIDs, references, functions) in
+  `State.metadata` — they will be lost on serialization. Use `AgentContext`
+  with restore functions for such values.
   """
   alias Sagents.State
   alias Sagents.MiddlewareEntry

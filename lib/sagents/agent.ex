@@ -241,11 +241,11 @@ defmodule Sagents.Agent do
         false ->
           # Append user middleware to defaults (inject agent_id, model, and filesystem_scope)
           build_default_middleware(model, agent_id, opts) ++
-            inject_agent_context(user_middleware, agent_id, model, filesystem_scope)
+            inject_middleware_init_params(user_middleware, agent_id, model, filesystem_scope)
 
         true ->
           # Use only user-provided middleware (inject agent_id, model, and filesystem_scope)
-          inject_agent_context(user_middleware, agent_id, model, filesystem_scope)
+          inject_middleware_init_params(user_middleware, agent_id, model, filesystem_scope)
       end
 
     # Initialize middleware
@@ -258,8 +258,9 @@ defmodule Sagents.Agent do
     end
   end
 
-  # Inject agent_id, model, and filesystem_scope into user middleware configurations
-  defp inject_agent_context(middleware_list, agent_id, model, filesystem_scope) do
+  # Inject agent_id, model, and filesystem_scope into user middleware configurations.
+  # Named to avoid confusion with AgentContext (which is process-scoped runtime context).
+  defp inject_middleware_init_params(middleware_list, agent_id, model, filesystem_scope) do
     base_context =
       if filesystem_scope do
         [agent_id: agent_id, model: model, filesystem_scope: filesystem_scope]
