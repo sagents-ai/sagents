@@ -213,6 +213,22 @@ defmodule Sagents.State do
   end
 
   @doc """
+  Replace a tool result in the state's messages by `tool_call_id`.
+
+  Delegates to `LangChain.Message.replace_tool_result/3`.
+  """
+  def replace_tool_result(
+        %State{} = state,
+        tool_call_id,
+        %LangChain.Message.ToolResult{} = new_result
+      ) do
+    updated_messages =
+      LangChain.Message.replace_tool_result(state.messages, tool_call_id, new_result)
+
+    %{state | messages: updated_messages}
+  end
+
+  @doc """
   Set metadata value.
   """
   def put_metadata(%State{} = state, key, value) do

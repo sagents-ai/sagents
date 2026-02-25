@@ -382,4 +382,32 @@ defmodule Sagents.StateTest do
       assert reset_state.metadata == %{}
     end
   end
+
+  describe "replace_tool_result/3" do
+    alias LangChain.Message.ToolResult
+
+    test "replaces a tool result by tool_call_id" do
+      placeholder =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "task",
+          content: "placeholder",
+          is_interrupt: true,
+          interrupt_data: %{type: :subagent_hitl}
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [placeholder]})
+      state = State.new!(%{messages: [Message.new_user!("hi"), tool_msg]})
+
+      new_result =
+        ToolResult.new!(%{tool_call_id: "call_1", name: "task", content: "completed"})
+
+      updated = State.replace_tool_result(state, "call_1", new_result)
+
+      tool_message = Enum.find(updated.messages, &(&1.role == :tool))
+      [replaced] = tool_message.tool_results
+      assert replaced.is_interrupt == false
+      assert replaced.tool_call_id == "call_1"
+    end
+  end
 end
