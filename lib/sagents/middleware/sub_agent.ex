@@ -404,6 +404,14 @@ defmodule Sagents.Middleware.SubAgent do
   @spec start_subagent(String.t(), String.t(), map(), map(), map()) ::
           {:ok, String.t()} | {:interrupt, map()} | {:error, String.t()}
   def start_subagent(instructions, subagent_type, args, context, config) do
+    # Restore AgentContext from the snapshot taken at build_chain time.
+    # Needed because async: true tools run in Task.async (LangChain),
+    # which does not inherit the caller's process dictionary. Without this,
+    # fork_with_middleware below starts from an empty context.
+    if agent_ctx = context[:agent_context] do
+      AgentContext.init(agent_ctx)
+    end
+
     Logger.debug("Starting SubAgent: #{subagent_type}")
 
     # Get agent from lookup map

@@ -3,6 +3,7 @@ defmodule Sagents.Middleware.SubAgentTest do
   use Mimic
 
   alias Sagents.Agent
+  alias Sagents.AgentContext
   alias Sagents.Middleware.SubAgent, as: SubAgentMiddleware
   alias Sagents.SubAgent
   alias Sagents.SubAgentsDynamicSupervisor
@@ -1265,6 +1266,121 @@ defmodule Sagents.Middleware.SubAgentTest do
 
       refute subagent_has_task_tool,
              "Subagent's LLMChain should NOT have task tool - SubAgent middleware should be filtered"
+    end
+  end
+
+  describe "AgentContext restoration in async tool execution" do
+    setup do
+      agent_id = "parent-async-ctx-#{System.unique_integer([:positive])}"
+
+      {:ok, _sup} =
+        start_supervised({
+          SubAgentsDynamicSupervisor,
+          agent_id: agent_id
+        })
+
+      model = test_model()
+
+      {:ok, parent_agent} =
+        Agent.new(%{
+          agent_id: agent_id,
+          model: model,
+          base_system_prompt: "Parent",
+          middleware: []
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: agent_id,
+          model: model,
+          middleware: parent_agent.middleware,
+          subagents: []
+        )
+
+      %{
+        agent_id: agent_id,
+        model: model,
+        parent_agent: parent_agent,
+        middleware_config: middleware_config
+      }
+    end
+
+    test "AgentContext is available to sub-agent when execute_task runs inside Task.async",
+         %{
+           agent_id: agent_id,
+           parent_agent: parent_agent,
+           middleware_config: middleware_config
+         } do
+      # Set up AgentContext in the "parent" process (simulating AgentServer)
+      agent_ctx = %{tenant_id: 42, user_id: "user-123", trace_id: "trace-abc"}
+      AgentContext.init(agent_ctx)
+
+      # Snapshot context into custom_context (what build_chain does)
+      context = %{
+        agent_id: agent_id,
+        state: State.new!(%{messages: []}),
+        parent_middleware: parent_agent.middleware,
+        parent_tools: parent_agent.tools,
+        agent_context: AgentContext.get()
+      }
+
+      # Capture the AgentContext that the sub-agent process receives
+      test_pid = self()
+
+      LLMChain
+      |> stub(:run, fn chain ->
+        # Inside the sub-agent's LLMChain.run, read the AgentContext
+        # that was set in SubAgentServer.init (which receives child_context
+        # from fork_with_middleware). Since fork_with_middleware reads from
+        # the process dictionary, we capture what it produces.
+        send(test_pid, {:sub_agent_context, chain.custom_context[:agent_context]})
+
+        assistant_message = Message.new_assistant!(%{content: "Done"})
+
+        {:ok,
+         Map.merge(chain, %{
+           messages: chain.messages ++ [assistant_message],
+           last_message: assistant_message,
+           needs_response: false
+         })}
+      end)
+
+      args = %{
+        "instructions" => "Test async context",
+        "subagent_type" => "general-purpose"
+      }
+
+      # Run execute_task inside Task.async — this simulates LangChain's
+      # async tool execution, which does NOT inherit the process dictionary.
+      task =
+        Task.async(fn ->
+          # Process dictionary is EMPTY here (Task.async doesn't inherit it).
+          # Without the fix, AgentContext.fork_with_middleware will start
+          # from %{} and the sub-agent gets no context.
+          SubAgentMiddleware.start_subagent(
+            "Test async context",
+            "general-purpose",
+            args,
+            context,
+            middleware_config
+          )
+        end)
+
+      assert {:ok, _result} = Task.await(task, 10_000)
+
+      # Verify the sub-agent received the parent's AgentContext data.
+      # The sub-agent's chain.custom_context[:agent_context] should contain
+      # the original tenant_id, user_id, trace_id values.
+      assert_receive {:sub_agent_context, sub_agent_ctx}, 5_000
+
+      assert sub_agent_ctx[:tenant_id] == 42,
+             "Sub-agent should inherit tenant_id from parent AgentContext"
+
+      assert sub_agent_ctx[:user_id] == "user-123",
+             "Sub-agent should inherit user_id from parent AgentContext"
+
+      assert sub_agent_ctx[:trace_id] == "trace-abc",
+             "Sub-agent should inherit trace_id from parent AgentContext"
     end
   end
 
