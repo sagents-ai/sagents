@@ -82,6 +82,7 @@ defmodule Sagents.SubAgentServer do
   use GenServer
   require Logger
 
+  alias Sagents.AgentContext
   alias Sagents.AgentServer
   alias Sagents.ProcessRegistry
   alias Sagents.SubAgent
@@ -244,6 +245,8 @@ defmodule Sagents.SubAgentServer do
   @impl true
   def init(opts) do
     subagent = Keyword.fetch!(opts, :subagent)
+    agent_context = Keyword.get(opts, :agent_context, %{})
+    AgentContext.init(agent_context)
     started_at = System.monotonic_time(:millisecond)
 
     server_state = %ServerState{

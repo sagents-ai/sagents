@@ -213,14 +213,23 @@ defmodule Sagents.State do
   end
 
   @doc """
-  Set metadata value.
+  Set a metadata value.
+
+  Metadata is persistent, conversation-scoped key-value data that is
+  serialized to the database via `StateSerializer` and survives process
+  restarts and Horde redistribution.
+
+  For ephemeral, process-scoped context that propagates to sub-agents
+  (tenant IDs, trace IDs, feature flags), see `Sagents.AgentContext` instead.
   """
   def put_metadata(%State{} = state, key, value) do
     %{state | metadata: Map.put(state.metadata, key, value)}
   end
 
   @doc """
-  Get metadata value.
+  Get a metadata value.
+
+  See `put_metadata/3` for guidance on when to use metadata vs `Sagents.AgentContext`.
   """
   def get_metadata(%State{} = state, key, default \\ nil) do
     Map.get(state.metadata, key, default)

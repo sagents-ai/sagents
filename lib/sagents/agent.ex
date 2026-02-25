@@ -42,6 +42,7 @@ defmodule Sagents.Agent do
   require Logger
 
   alias __MODULE__
+  alias Sagents.AgentContext
   alias Sagents.Middleware
   alias Sagents.State
   alias LangChain.LangChainError
@@ -240,11 +241,11 @@ defmodule Sagents.Agent do
         false ->
           # Append user middleware to defaults (inject agent_id, model, and filesystem_scope)
           build_default_middleware(model, agent_id, opts) ++
-            inject_agent_context(user_middleware, agent_id, model, filesystem_scope)
+            inject_middleware_init_params(user_middleware, agent_id, model, filesystem_scope)
 
         true ->
           # Use only user-provided middleware (inject agent_id, model, and filesystem_scope)
-          inject_agent_context(user_middleware, agent_id, model, filesystem_scope)
+          inject_middleware_init_params(user_middleware, agent_id, model, filesystem_scope)
       end
 
     # Initialize middleware
@@ -257,8 +258,9 @@ defmodule Sagents.Agent do
     end
   end
 
-  # Inject agent_id, model, and filesystem_scope into user middleware configurations
-  defp inject_agent_context(middleware_list, agent_id, model, filesystem_scope) do
+  # Inject agent_id, model, and filesystem_scope into user middleware configurations.
+  # Named to avoid confusion with AgentContext (which is process-scoped runtime context).
+  defp inject_middleware_init_params(middleware_list, agent_id, model, filesystem_scope) do
     base_context =
       if filesystem_scope do
         [agent_id: agent_id, model: model, filesystem_scope: filesystem_scope]
@@ -732,7 +734,9 @@ defmodule Sagents.Agent do
         state: state,
         # Make parent agent's middleware and tools available to tools (e.g., SubAgent middleware)
         parent_middleware: agent.middleware,
-        parent_tools: agent.tools
+        parent_tools: agent.tools,
+        # Snapshot of the process-local agent context for tool access
+        agent_context: AgentContext.get()
       }
     }
 

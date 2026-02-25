@@ -28,6 +28,8 @@ defmodule Sagents.AgentSupervisor do
   - `:conversation_id` - Optional conversation identifier for message persistence (optional, default: nil)
   - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` (optional, default: nil)
   - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` (optional, default: nil)
+  - `:agent_context` - Application-level context map propagated through the agent hierarchy (optional, default: `%{}`).
+    See `Sagents.AgentContext` for details.
 
   ## Examples
 
@@ -146,6 +148,8 @@ defmodule Sagents.AgentSupervisor do
   - `:conversation_id` - Optional conversation identifier for message persistence (optional, default: nil)
   - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` (optional, default: nil)
   - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` (optional, default: nil)
+  - `:agent_context` - Application-level context map propagated through the agent hierarchy (optional, default: `%{}`).
+    See `Sagents.AgentContext` for details.
 
   ## Examples
 
@@ -176,6 +180,12 @@ defmodule Sagents.AgentSupervisor do
         agent: agent,
         pubsub: {Phoenix.PubSub, :my_app_pubsub},
         debug_pubsub: {Phoenix.PubSub, :my_debug_pubsub}
+      )
+
+      # With application context (propagated to sub-agents)
+      {:ok, sup_pid} = AgentSupervisor.start_link(
+        agent: agent,
+        agent_context: %{tenant_id: 42, trace_id: "abc123"}
       )
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -311,6 +321,7 @@ defmodule Sagents.AgentSupervisor do
     agent_persistence = Keyword.get(config, :agent_persistence)
     display_message_persistence = Keyword.get(config, :display_message_persistence)
     presence_module = Keyword.get(config, :presence_module)
+    agent_context = Keyword.get(config, :agent_context)
 
     # Build AgentServer options
     agent_server_opts = [
@@ -366,6 +377,12 @@ defmodule Sagents.AgentSupervisor do
     agent_server_opts =
       if presence_module,
         do: Keyword.put(agent_server_opts, :presence_module, presence_module),
+        else: agent_server_opts
+
+    # Add agent_context if provided
+    agent_server_opts =
+      if agent_context,
+        do: Keyword.put(agent_server_opts, :agent_context, agent_context),
         else: agent_server_opts
 
     # Build child specifications

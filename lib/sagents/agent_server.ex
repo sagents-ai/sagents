@@ -210,6 +210,7 @@ defmodule Sagents.AgentServer do
   require Logger
 
   alias Sagents.Agent
+  alias Sagents.AgentContext
   alias Sagents.State
   alias Sagents.AgentSupervisor
   alias Sagents.Middleware
@@ -255,7 +256,11 @@ defmodule Sagents.AgentServer do
       :presence_module,
       # Whether this server was restored from persisted state (vs fresh start)
       # Used to broadcast :node_transferred event on startup after Horde migration
-      restored: false
+      restored: false,
+      # Application-level context map propagated through the agent hierarchy.
+      # Set via :agent_context option; accessible via AgentContext.get() in
+      # the process and its Task.async children.
+      agent_context: %{}
     ]
 
     @type t :: %__MODULE__{
@@ -286,7 +291,8 @@ defmodule Sagents.AgentServer do
             agent_persistence: module() | nil,
             display_message_persistence: module() | nil,
             presence_module: module() | nil,
-            restored: boolean()
+            restored: boolean(),
+            agent_context: map()
           }
   end
 
@@ -310,6 +316,9 @@ defmodule Sagents.AgentServer do
   - `:conversation_id` - Optional conversation identifier for message persistence (default: nil)
   - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` for state snapshots (default: nil)
   - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` for display messages (default: nil)
+  - `:agent_context` - Application-level context map propagated through the agent hierarchy (default: `%{}`).
+    Accessible via `AgentContext.get()` in the agent process and all sub-agent processes.
+    See `Sagents.AgentContext` for details.
 
   ## Examples
 
@@ -350,6 +359,12 @@ defmodule Sagents.AgentServer do
         agent: agent,
         pubsub: {Phoenix.PubSub, :my_app_pubsub},
         debug_pubsub: {Phoenix.PubSub, :my_debug_pubsub}
+      )
+
+      # With application context (propagated to sub-agents)
+      {:ok, pid} = AgentServer.start_link(
+        agent: agent,
+        agent_context: %{tenant_id: 42, trace_id: "abc123"}
       )
   """
   def start_link(opts) do
@@ -1288,6 +1303,10 @@ defmodule Sagents.AgentServer do
     # When set, agent will track presence on "agent_server:presence" topic
     presence_module = Keyword.get(opts, :presence_module)
 
+    # Application-level context for propagation through agent hierarchy
+    agent_context = Keyword.get(opts, :agent_context, %{})
+    AgentContext.init(agent_context)
+
     server_state = %ServerState{
       agent: updated_agent,
       state: state,
@@ -1308,7 +1327,8 @@ defmodule Sagents.AgentServer do
       agent_persistence: agent_persistence,
       display_message_persistence: display_message_persistence,
       presence_module: presence_module,
-      restored: Keyword.get(opts, :restored, false)
+      restored: Keyword.get(opts, :restored, false),
+      agent_context: agent_context
     }
 
     # Start the inactivity timer
@@ -1389,14 +1409,18 @@ defmodule Sagents.AgentServer do
     # Reset inactivity timer on execution start
     new_state = reset_inactivity_timer(new_state)
 
+    # Fork context through middleware so process-local state (e.g. OTel spans)
+    # is propagated into the Task.async process. Task.async does NOT inherit
+    # the caller's process dictionary.
+    forked_ctx = AgentContext.fork_with_middleware(new_state.agent.middleware)
+
     # Start async execution
     task =
       Task.async(fn ->
+        AgentContext.init(forked_ctx)
         execute_agent(new_state, pubsub_callbacks)
       end)
 
-    # Store task reference if needed, or just let it run
-    # For now, we'll handle the result in handle_info
     {:reply, :ok, Map.put(new_state, :task, task)}
   end
 
@@ -1449,9 +1473,13 @@ defmodule Sagents.AgentServer do
     # Reset inactivity timer on resume
     new_state = reset_inactivity_timer(new_state)
 
+    # Fork context through middleware (same as execute handler)
+    forked_ctx = AgentContext.fork_with_middleware(new_state.agent.middleware)
+
     # Resume execution async (callbacks are built in resume_agent)
     task =
       Task.async(fn ->
+        AgentContext.init(forked_ctx)
         resume_agent(new_state, decisions)
       end)
 

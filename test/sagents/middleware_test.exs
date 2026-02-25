@@ -219,6 +219,36 @@ defmodule Sagents.MiddlewareTest do
     end
   end
 
+  describe "apply_on_fork_context/2" do
+    defmodule ForkContextMiddleware do
+      @behaviour Middleware
+
+      @impl true
+      def on_fork_context(context, config) do
+        Map.put(context, :injected, config.label)
+      end
+    end
+
+    test "applies on_fork_context callback when implemented" do
+      entry = %MiddlewareEntry{
+        id: ForkContextMiddleware,
+        module: ForkContextMiddleware,
+        config: %{label: "traced"}
+      }
+
+      context = %{trace_id: "abc"}
+      result = Middleware.apply_on_fork_context(context, entry)
+      assert result == %{trace_id: "abc", injected: "traced"}
+    end
+
+    test "returns context unchanged when on_fork_context not implemented" do
+      entry = Middleware.init_middleware(MinimalMiddleware)
+      context = %{trace_id: "abc"}
+      result = Middleware.apply_on_fork_context(context, entry)
+      assert result == %{trace_id: "abc"}
+    end
+  end
+
   describe "middleware composition" do
     test "multiple middleware can be initialized" do
       middleware_list = [

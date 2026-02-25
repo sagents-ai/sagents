@@ -60,6 +60,9 @@ state = State.new!(%{
   initial_state: state,
   pubsub: {Phoenix.PubSub, :my_pubsub},
 
+  # Application context (propagated to sub-agents)
+  agent_context: %{tenant_id: tenant_id, trace_id: trace_id},
+
   # Lifecycle options
   inactivity_timeout: 3_600_000,  # 1 hour (default: 5 minutes)
 
@@ -100,6 +103,23 @@ state = State.new!(%{
   pubsub: {Phoenix.PubSub, :my_pubsub}
 )
 ```
+
+### Context Propagation to Sub-Agents
+
+When `:agent_context` is provided, the context map is available in the AgentServer process
+and in all tool functions (which run in `Task.async` and inherit the process dictionary).
+When the agent spawns sub-agents, the SubAgent middleware automatically forks the context
+so child agents receive the same values.
+
+```elixir
+# In a tool function, read the propagated context
+defp my_scoped_query(_args, _context) do
+  tenant_id = Sagents.AgentContext.fetch(:tenant_id)
+  MyApp.Repo.all(from r in Record, where: r.tenant_id == ^tenant_id)
+end
+```
+
+See `Sagents.AgentContext` for the full API.
 
 ## Inactivity Timeout
 
