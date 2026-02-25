@@ -1409,14 +1409,18 @@ defmodule Sagents.AgentServer do
     # Reset inactivity timer on execution start
     new_state = reset_inactivity_timer(new_state)
 
+    # Fork context through middleware so process-local state (e.g. OTel spans)
+    # is propagated into the Task.async process. Task.async does NOT inherit
+    # the caller's process dictionary.
+    forked_ctx = AgentContext.fork_with_middleware(new_state.agent.middleware)
+
     # Start async execution
     task =
       Task.async(fn ->
+        AgentContext.init(forked_ctx)
         execute_agent(new_state, pubsub_callbacks)
       end)
 
-    # Store task reference if needed, or just let it run
-    # For now, we'll handle the result in handle_info
     {:reply, :ok, Map.put(new_state, :task, task)}
   end
 
@@ -1469,9 +1473,13 @@ defmodule Sagents.AgentServer do
     # Reset inactivity timer on resume
     new_state = reset_inactivity_timer(new_state)
 
+    # Fork context through middleware (same as execute handler)
+    forked_ctx = AgentContext.fork_with_middleware(new_state.agent.middleware)
+
     # Resume execution async (callbacks are built in resume_agent)
     task =
       Task.async(fn ->
+        AgentContext.init(forked_ctx)
         resume_agent(new_state, decisions)
       end)
 

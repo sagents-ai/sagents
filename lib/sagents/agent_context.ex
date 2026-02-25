@@ -16,7 +16,9 @@ defmodule Sagents.AgentContext do
   1. **Your application** passes `:agent_context` when starting an agent
   2. **AgentSupervisor** forwards the context to its child AgentServer
   3. **AgentServer.init/1** calls `AgentContext.init/1` to store it in the process dictionary
-  4. **Agent.execute/3** runs in a `Task.async`, which inherits the caller's process dictionary,
+  4. **Agent.execute/3** runs in a `Task.async`. Since `Task.async` does NOT
+     inherit the caller's process dictionary, AgentServer explicitly forks the
+     context via `fork_with_middleware/1` and calls `init/1` in the task,
      so tools and callbacks can read context via `AgentContext.get/0`
   5. **SubAgent middleware** calls `AgentContext.fork_with_middleware/1` to snapshot
      context before spawning a child SubAgentServer. Each middleware's
