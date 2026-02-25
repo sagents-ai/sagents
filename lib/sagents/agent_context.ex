@@ -70,6 +70,24 @@ defmodule Sagents.AgentContext do
     per-user or per-experiment without global lookups.
   - **User info** — Carry `user_id` or `user_email` for audit logging inside
     tool functions.
+
+  ## AgentContext vs State.metadata
+
+  Sagents has two mechanisms for attaching data to agents. Use the right one:
+
+  | | `AgentContext` | `State.metadata` |
+  |---|---|---|
+  | **Storage** | Process dictionary | Ecto field on `State` |
+  | **Persisted to DB?** | No | Yes (serialized to JSONB) |
+  | **Survives restart?** | No | Yes |
+  | **Propagated to sub-agents?** | Yes (automatic) | No (intentional isolation) |
+  | **Access pattern** | `AgentContext.fetch(:key)` | `State.get_metadata(state, key)` |
+  | **Requires state param?** | No | Yes |
+  | **Use for** | tenant_id, trace_id, user_id, feature flags | conversation_title, middleware working state |
+
+  **Rule of thumb**: If the value must survive after the process dies, use
+  `State.metadata`. If the value is ambient context that flows through the
+  agent hierarchy, use `AgentContext`.
   """
 
   require Logger
@@ -123,6 +141,48 @@ defmodule Sagents.AgentContext do
   @spec fetch(atom() | term(), term()) :: term()
   def fetch(key, default \\ nil) do
     Map.get(get(), key, default)
+  end
+
+  @doc """
+  Set a single key in the current process's agent context.
+
+  Updates the process dictionary in-place. Useful for middleware hooks that
+  need to add derived values to the context during execution.
+
+  Does NOT persist — this only updates the process dictionary for the
+  current process.
+
+  ## Examples
+
+      AgentContext.put(:request_id, "req-123")
+      AgentContext.fetch(:request_id)
+      #=> "req-123"
+  """
+  @spec put(atom() | term(), term()) :: :ok
+  def put(key, value) do
+    ctx = get()
+    Process.put(@key, Map.put(ctx, key, value))
+    :ok
+  end
+
+  @doc """
+  Merge a map into the current process's agent context.
+
+  Updates the process dictionary in-place. Useful when middleware needs to
+  add multiple derived values at once.
+
+  Does NOT persist — this only updates the process dictionary for the
+  current process.
+
+  ## Examples
+
+      AgentContext.merge(%{request_id: "req-123", correlation_id: "corr-456"})
+  """
+  @spec merge(map()) :: :ok
+  def merge(values) when is_map(values) do
+    ctx = get()
+    Process.put(@key, Map.merge(ctx, values))
+    :ok
   end
 
   @doc """
