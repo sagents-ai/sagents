@@ -720,3 +720,213 @@ end
 ```
 
 This pattern keeps middleware modular and reusable while allowing fine-grained control over what capabilities each agent receives. The middleware themselves don't need to know about user tiers or permissions—that logic lives in the factory that assembles the stack.
+
+## System Prompt: Static vs Dynamic Content
+
+The `system_prompt(config)` callback is called **once during `Agent.new`**, not on every execution. The result is cached in `agent.assembled_system_prompt` and reused for every LLM call. This is important for prompt caching—a stable system prompt means the LLM provider can cache and reuse it across requests.
+
+### What `config` Contains
+
+The `config` map is whatever your `init/1` returned. Since `system_prompt/1` receives this config, you can interpolate **session-scoped values** that were set at agent creation time:
+
+```elixir
+defmodule MyApp.Middleware.InjectCurrentDate do
+  @behaviour Sagents.Middleware
+
+  @impl true
+  def init(opts) do
+    timezone = Keyword.get(opts, :timezone, "UTC")
+    {:ok, %{timezone: timezone}}
+  end
+
+  @impl true
+  def system_prompt(config) do
+    # Compute the date once at agent creation time
+    date =
+      DateTime.utc_now()
+      |> DateTime.shift_zone!(config.timezone)
+      |> Calendar.strftime("%a, %Y-%m-%d %Z")
+
+    "Today's date is #{date}. The user's timezone is #{config.timezone}."
+  end
+end
+```
+
+This works well for data that is stable for the agent's lifetime: timezone, user name, feature flags, configuration values, etc.
+
+### User-Specific System Prompts
+
+A common pattern is loading user-specific information into the system prompt:
+
+```elixir
+defmodule MyApp.Middleware.UserContext do
+  @behaviour Sagents.Middleware
+
+  @impl true
+  def init(opts) do
+    {:ok, %{user_name: Keyword.fetch!(opts, :name)}}
+  end
+
+  @impl true
+  def system_prompt(config) do
+    "You are talking to #{config.user_name}."
+  end
+end
+
+# In your Factory:
+{MyApp.Middleware.UserContext, [name: user.display_name]}
+```
+
+### Per-Request Dynamic Content
+
+For truly per-request data (data that changes on every LLM call), use `before_model/2` to modify the most recent user message. Note that modifying older user messages breaks prompt caching for those messages, so prefer the system prompt approach when possible.
+
+```elixir
+@impl true
+def before_model(state, config) do
+  # Prepend dynamic data to the last user message
+  updated_messages =
+    List.update_at(state.messages, -1, fn msg ->
+      price = fetch_price()
+      %{msg | content: "<stock_price>$#{price}</stock_price>\n\n" <> msg.content}
+    end)
+
+  {:ok, %{state | messages: updated_messages}}
+end
+```
+
+## Tool Function Context
+
+When a tool function executes, it receives two arguments: the parsed arguments from the LLM and a `context` map.
+
+### What's in `context`
+
+```elixir
+function: fn args, context ->
+  # context.state             - Current Sagents.State (messages, todos, metadata)
+  # context.parent_middleware - Parent agent's middleware entries (used by SubAgent)
+  # context.parent_tools      - Parent agent's tools (used by SubAgent)
+end
+```
+
+The `state` key is the most commonly used—it gives tools access to the full agent state including metadata.
+
+### Accessing Middleware Config in Tools
+
+Middleware config is **not** included in the tool context. Instead, middleware captures its own config via closure when defining tools in `tools/1`:
+
+```elixir
+@impl true
+def tools(config) do
+  [
+    Function.new!(%{
+      name: "my_tool",
+      description: "Does something",
+      parameters_schema: %{type: "object", properties: %{}},
+      # config is captured via closure—available inside the function
+      function: fn args, context -> execute(args, context, config) end
+    })
+  ]
+end
+
+defp execute(_args, context, config) do
+  # config.api_key is from this middleware's init
+  # context.state is the current agent state
+  {:ok, "result"}
+end
+```
+
+This means one middleware's tools **cannot** directly access another middleware's config. See the next section for how to share data across middleware boundaries.
+
+## Cross-Middleware Data Sharing via State Metadata
+
+To share data between middleware, use `State.put_metadata/3` to publish and `State.get_metadata/3` to read.
+
+### Publishing Stable Data via `on_server_start`
+
+For data that is known at init time (timezone, user info, feature flags), publish it in `on_server_start` so it's available from the very first execution, regardless of middleware ordering:
+
+```elixir
+defmodule MyApp.Middleware.InjectCurrentDate do
+  @behaviour Sagents.Middleware
+  alias Sagents.State
+
+  @impl true
+  def init(opts) do
+    {:ok, %{timezone: Keyword.get(opts, :timezone, "UTC")}}
+  end
+
+  @impl true
+  def on_server_start(state, config) do
+    # Store timezone in metadata at startup, before any execution happens.
+    # This ensures all middleware tools can read it from the first request.
+    {:ok, State.put_metadata(state, "timezone", config.timezone)}
+  end
+end
+```
+
+### Reading Shared Data in Tools
+
+Any middleware's tools can read shared metadata via the state in context:
+
+```elixir
+defmodule MyApp.Middleware.Scheduler do
+  @behaviour Sagents.Middleware
+  alias Sagents.State
+
+  @impl true
+  def tools(_config) do
+    [
+      Function.new!(%{
+        name: "schedule_event",
+        description: "Schedule an event",
+        parameters_schema: %{
+          type: "object",
+          properties: %{time: %{type: "string"}},
+          required: ["time"]
+        },
+        function: fn args, context ->
+          # Read timezone published by InjectCurrentDate middleware
+          timezone = State.get_metadata(context.state, "timezone") || "UTC"
+          schedule_in_timezone(args["time"], timezone)
+        end
+      })
+    ]
+  end
+end
+```
+
+### Middleware Ordering and `before_model`
+
+If you publish metadata in `before_model` instead of `on_server_start`, be aware that middleware ordering affects visibility. `before_model` hooks run in list order, so a middleware can only see metadata set by middleware listed **before** it:
+
+```elixir
+middleware: [
+  InjectCurrentDate,  # before_model sets "timezone" in metadata
+  Scheduler,          # before_model CAN read "timezone" (runs second)
+]
+
+# But if reversed:
+middleware: [
+  Scheduler,          # before_model CANNOT read "timezone" yet (runs first)
+  InjectCurrentDate,  # before_model sets "timezone" (runs second)
+]
+```
+
+Tool functions are not affected by this — they execute later during the LLM response, after all `before_model` hooks have run. So a tool defined by Scheduler can always read `"timezone"` regardless of middleware order. The ordering concern only applies to `before_model` hooks reading metadata set by other `before_model` hooks.
+
+For stable config data, prefer `on_server_start` to avoid ordering issues entirely.
+
+### String Keys Required
+
+Metadata is persisted to the database as PostgreSQL JSONB. The `StateSerializer` converts all keys to strings on write, and after a database round-trip keys come back as strings. This means **you must use string keys** for metadata—atom keys will silently break after a restore because `get_metadata(state, :timezone)` won't match `"timezone"`.
+
+```elixir
+# Correct - survives database round-trip
+State.put_metadata(state, "timezone", "America/Denver")
+State.get_metadata(state, "timezone")
+
+# Broken after restore - atom key won't match string key from DB
+State.put_metadata(state, :timezone, "America/Denver")
+State.get_metadata(state, :timezone)  # => nil after DB restore
+```
