@@ -177,13 +177,18 @@ defmodule Sagents.Middleware.TodoList do
     })
   end
 
-  defp execute_write_todos(args, context) do
-    # Args come from LLM as string-keyed map
+  defp execute_write_todos(args, context) when is_map(args) or is_binary(args) do
+    # Normalize args: handle JSON strings and unwrap nested "arguments" key
+    args = args |> unwrap_tool_args() |> ensure_args_map()
     merge = get_boolean_arg(args, "merge", false)
     todos_data = get_arg(args, "todos")
 
-    # Parse TODO data from tool call
-    case parse_todos(todos_data) do
+    # Validate todos_data before parsing
+    if is_nil(todos_data) or not is_list(todos_data) do
+      {:error, "write_todos: missing or invalid todos (expected a list)"}
+    else
+      # Parse TODO data from tool call
+      case parse_todos(todos_data) do
       {:ok, parsed_todos} ->
         updated_state =
           context.state
@@ -201,12 +206,41 @@ defmodule Sagents.Middleware.TodoList do
 
       {:error, reason} ->
         {:error, "Failed to parse TODOs: #{reason}"}
+      end
     end
   end
+
+  defp execute_write_todos(_args, _context),
+    do: {:error, "write_todos: invalid arguments (expected map or JSON string)"}
+
+  defp unwrap_tool_args(%{"arguments" => s}) when is_binary(s) do
+    case Jason.decode(s) do
+      {:ok, m} when is_map(m) -> m
+      _ -> %{}
+    end
+  end
+
+  defp unwrap_tool_args(%{arguments: s}) when is_binary(s), do: unwrap_tool_args(%{"arguments" => s})
+  defp unwrap_tool_args(%{arguments: m}) when is_map(m), do: m
+  defp unwrap_tool_args(args) when is_map(args), do: args
+  defp unwrap_tool_args(_), do: %{}
+
+  defp ensure_args_map(m) when is_map(m), do: m
+
+  defp ensure_args_map(s) when is_binary(s) do
+    case Jason.decode(s) do
+      {:ok, m} when is_map(m) -> m
+      _ -> %{}
+    end
+  end
+
+  defp ensure_args_map(_), do: %{}
 
   defp get_arg(args, key) when is_map(args) do
     args[key] || args[String.to_atom(key)]
   end
+
+  defp get_arg(_args, _key), do: nil
 
   defp get_boolean_arg(args, key, default) when is_map(args) do
     case get_arg(args, key) do
@@ -217,6 +251,8 @@ defmodule Sagents.Middleware.TodoList do
       _ -> default
     end
   end
+
+  defp get_boolean_arg(_args, _key, default), do: default
 
   defp parse_todos(todos_data) when is_list(todos_data) do
     results =
