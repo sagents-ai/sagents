@@ -281,6 +281,8 @@ defmodule Sagents.Middleware.SubAgent do
   ## Private Functions - Task Execution
 
   defp execute_task(args, context, config) do
+    # Normalize args: handle JSON strings from streaming path
+    args = ensure_task_args_map(args)
     instructions = Map.fetch!(args, "instructions")
     subagent_type = Map.fetch!(args, "subagent_type")
 
@@ -307,6 +309,19 @@ defmodule Sagents.Middleware.SubAgent do
         :new
     end
   end
+
+  # Normalize task arguments - handles JSON strings from streaming path
+  defp ensure_task_args_map(s) when is_binary(s) do
+    case Jason.decode(s) do
+      {:ok, m} when is_map(m) -> m
+      _ -> %{}
+    end
+  end
+
+  defp ensure_task_args_map(%{"arguments" => s}) when is_binary(s), do: ensure_task_args_map(s)
+  defp ensure_task_args_map(%{arguments: s}) when is_binary(s), do: ensure_task_args_map(s)
+  defp ensure_task_args_map(m) when is_map(m), do: m
+  defp ensure_task_args_map(_), do: %{}
 
   @doc """
   Starts and executes a new SubAgent to delegate work.
