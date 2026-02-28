@@ -379,7 +379,14 @@ defmodule Sagents.Agent do
       initialized_middleware
       |> Enum.flat_map(&Middleware.get_tools/1)
 
-    all_tools = base_tools ++ middleware_tools
+    # Deduplicate by function name; first occurrence wins
+    # This prevents API errors from providers that reject duplicate function definitions (e.g., xAI/Grok)
+    all_tools =
+      (base_tools ++ middleware_tools)
+      |> Enum.uniq_by(fn
+        %{name: name} when is_binary(name) -> name
+        _ -> :erlang.unique_integer([:positive])
+      end)
 
     put_change(changeset, :tools, all_tools)
   end
