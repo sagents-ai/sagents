@@ -619,20 +619,38 @@ defmodule Sagents.Middleware.SubAgent do
       {:ok, final_result} ->
         # SubAgent completed successfully
         Logger.debug("SubAgent #{sub_agent_id} completed")
-        {:ok, final_result}
+
+        # LangChain ToolResult requires non-blank content
+        result =
+          if is_binary(final_result) and String.trim(final_result) != "" do
+            final_result
+          else
+            "(SubAgent completed with no text output.)"
+          end
+
+        {:ok, result}
 
       {:interrupt, interrupt_data} ->
-        # SubAgent needs HITL approval
-        # Propagate interrupt to parent with enhanced metadata
-        Logger.info("SubAgent '#{subagent_type}' interrupted for HITL")
+        # SubAgent needs HITL approval but LangChain tool execution cannot propagate
+        # {:interrupt, ...} (normalize_execution_result would turn it into an error).
+        # Convert to a descriptive result so the parent LLM can handle it.
+        action_names =
+          case interrupt_data do
+            %{action_requests: reqs} when is_list(reqs) ->
+              Enum.map_join(reqs, ", ", fn r ->
+                r[:tool_name] || r["tool_name"] || "unknown"
+              end)
 
-        {:interrupt,
-         %{
-           type: :subagent_hitl,
-           sub_agent_id: sub_agent_id,
-           subagent_type: subagent_type,
-           interrupt_data: interrupt_data
-         }}
+            _ ->
+              "unknown tools"
+          end
+
+        Logger.info("SubAgent '#{subagent_type}' needs approval for: #{action_names}")
+
+        {:ok,
+         "SubAgent '#{subagent_type}' requires human approval for: #{action_names}. " <>
+           "These tools need user confirmation. Please call these tools directly " <>
+           "from the main agent so the user can approve them."}
 
       {:error, reason} ->
         Logger.error("SubAgent #{sub_agent_id} failed: #{inspect(reason)}")
