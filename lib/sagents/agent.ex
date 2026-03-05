@@ -1050,15 +1050,9 @@ defmodule Sagents.Agent do
   end
 
   defp is_raw_langchain_mode?(nil), do: false
-  defp is_raw_langchain_mode?(Sagents.Modes.AgentExecution), do: false
 
   defp is_raw_langchain_mode?(module) when is_atom(module) do
-    module in [
-      LangChain.Chains.LLMChain.Modes.WhileNeedsResponse,
-      LangChain.Chains.LLMChain.Modes.UntilSuccess,
-      LangChain.Chains.LLMChain.Modes.UntilToolUsed,
-      LangChain.Chains.LLMChain.Modes.Step
-    ]
+    String.starts_with?(Atom.to_string(module), "Elixir.LangChain.Chains.LLMChain.Modes.")
   end
 
   defp extract_state_from_chain(chain, %State{} = original_state) do
