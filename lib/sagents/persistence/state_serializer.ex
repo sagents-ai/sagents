@@ -358,7 +358,8 @@ defmodule Sagents.Persistence.StateSerializer do
       "tool_call_id" => tool_result.tool_call_id,
       "name" => tool_result.name,
       "content" => serialize_content(tool_result.content),
-      "is_error" => tool_result.is_error
+      "is_error" => tool_result.is_error,
+      "is_interrupt" => tool_result.is_interrupt
     }
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
@@ -370,7 +371,8 @@ defmodule Sagents.Persistence.StateSerializer do
            tool_call_id: data["tool_call_id"],
            name: data["name"],
            content: deserialize_content(data["content"]),
-           is_error: data["is_error"] || false
+           is_error: data["is_error"] || false,
+           is_interrupt: data["is_interrupt"] || false
          }) do
       {:ok, tool_result} -> tool_result
       {:error, _} -> raise "Failed to deserialize tool result: #{inspect(data)}"

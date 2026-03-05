@@ -70,7 +70,7 @@ defmodule Sagents.DisplayMessagePersistence do
   @callback save_message(conversation_id :: String.t(), message :: LangChain.Message.t()) ::
               {:ok, list()} | {:error, term()}
 
-  @type tool_status :: :executing | :completed | :failed
+  @type tool_status :: :executing | :completed | :failed | :interrupted
 
   @doc """
   Update the status of a persisted tool call display message.
@@ -80,7 +80,7 @@ defmodule Sagents.DisplayMessagePersistence do
 
   ## Parameters
 
-  - `status` — The new status: `:executing`, `:completed`, or `:failed`
+  - `status` — The new status: `:executing`, `:completed`, `:failed`, or `:interrupted`
   - `tool_info` — Map with at minimum `:call_id`, plus status-specific fields:
 
     | Status | Fields |
@@ -88,6 +88,7 @@ defmodule Sagents.DisplayMessagePersistence do
     | `:executing` | `%{call_id: "...", name: "...", display_text: "..."}` |
     | `:completed` | `%{call_id: "...", name: "...", result: "..."}` |
     | `:failed` | `%{call_id: "...", name: "...", error: "..."}` |
+    | `:interrupted` | `%{call_id: "...", display_text: "..."}` |
 
   ## Returns
 
@@ -96,4 +97,28 @@ defmodule Sagents.DisplayMessagePersistence do
   """
   @callback update_tool_status(status :: tool_status(), tool_info :: map()) ::
               {:ok, term()} | {:error, :not_found | term()}
+
+  @doc """
+  Resolve an interrupted tool result display message with actual result content.
+
+  Called after a sub-agent resumes and completes. Updates the persisted tool result
+  display message to clear the interrupt flag and replace placeholder content with
+  the actual result.
+
+  Optional callback — implementations that don't need this can skip it.
+
+  ## Parameters
+
+  - `tool_call_id` — The tool call ID matching the interrupted tool result
+  - `result_content` — The actual result content string
+
+  ## Returns
+
+  - `{:ok, updated_message}` — Updated record, broadcast to LiveViews
+  - `{:error, :not_found}` — No matching interrupted tool result exists
+  """
+  @callback resolve_tool_result(tool_call_id :: String.t(), result_content :: String.t()) ::
+              {:ok, term()} | {:error, :not_found | term()}
+
+  @optional_callbacks [resolve_tool_result: 2]
 end

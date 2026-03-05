@@ -6,6 +6,7 @@ Application.put_env(:langchain, :openai_key, System.get_env("OPENAI_API_KEY", ""
 Mimic.copy(Req)
 Mimic.copy(LangChain.ChatModels.ChatAnthropic)
 Mimic.copy(LangChain.ChatModels.ChatOpenAI)
+Mimic.copy(Sagents.SubAgentServer)
 
 # Start a shared PubSub for tests
 {:ok, _} = Phoenix.PubSub.Supervisor.start_link(name: :test_pubsub)

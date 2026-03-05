@@ -107,6 +107,7 @@ defmodule Sagents.Mode.Steps do
 
         tool_results when is_list(tool_results) ->
           tool_results
+          |> Enum.reject(& &1.is_interrupt)
           |> Enum.filter(fn result -> is_struct(result.processed_content, State) end)
           |> Enum.map(& &1.processed_content)
       end

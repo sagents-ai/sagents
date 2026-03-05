@@ -208,6 +208,9 @@ defmodule Sagents.SubAgentServer do
           {:ok, String.t()} | {:interrupt, map()} | {:error, term()}
   def resume(sub_agent_id, decisions) when is_binary(sub_agent_id) and is_list(decisions) do
     GenServer.call(get_name(sub_agent_id), {:resume, decisions}, :infinity)
+  catch
+    :exit, {:noproc, _} ->
+      {:error, "SubAgent process #{sub_agent_id} is no longer running"}
   end
 
   @doc """
@@ -237,6 +240,25 @@ defmodule Sagents.SubAgentServer do
   @spec get_subagent(String.t()) :: SubAgent.t()
   def get_subagent(sub_agent_id) when is_binary(sub_agent_id) do
     GenServer.call(get_name(sub_agent_id), :get_subagent)
+  end
+
+  @doc """
+  Stop a SubAgentServer process.
+
+  Called after the sub-agent has completed or errored to free the process.
+  This is a synchronous call that waits for the process to terminate.
+
+  Returns `:ok` if stopped successfully, or `:ok` if the process was already
+  gone (idempotent).
+  """
+  @spec stop(String.t()) :: :ok
+  def stop(sub_agent_id) when is_binary(sub_agent_id) do
+    case whereis(sub_agent_id) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal)
+    end
+  catch
+    :exit, {:noproc, _} -> :ok
   end
 
   ## Server Callbacks

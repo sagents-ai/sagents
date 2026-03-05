@@ -428,7 +428,8 @@ defmodule Sagents.Middleware.HumanInTheLoop do
         %{
           tool_call_id: tc.call_id,
           tool_name: tc.name,
-          arguments: tc.arguments || %{}
+          arguments: tc.arguments || %{},
+          display_text: tc.display_text
         }
       end)
 
