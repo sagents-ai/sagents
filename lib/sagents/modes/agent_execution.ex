@@ -46,6 +46,7 @@ defmodule Sagents.Modes.AgentExecution do
     |> check_pre_tool_hitl(opts)
     |> execute_tools()
     |> propagate_state(opts)
+    |> check_tool_interrupts(opts)
     |> maybe_check_until_tool(opts)
     |> continue_or_done_safe(&do_run/2, opts)
   end

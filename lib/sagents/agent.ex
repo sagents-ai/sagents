@@ -49,6 +49,8 @@ defmodule Sagents.Agent do
   alias LangChain.Chains.LLMChain
   alias Sagents.MiddlewareEntry
   alias Sagents.Middleware.HumanInTheLoop
+  alias Sagents.SubAgentServer
+  alias LangChain.Message.ToolResult
 
   @primary_key false
   embedded_schema do
@@ -542,6 +544,48 @@ defmodule Sagents.Agent do
     # Ensure agent_id is set in state (library handles this automatically)
     state = %{state | agent_id: agent.agent_id}
 
+    case classify_interrupt(state.interrupt_data) do
+      :direct_hitl ->
+        resume_direct_hitl(agent, state, decisions, opts)
+
+      {:subagent_hitl, sub_agent_id, subagent_type, tool_call_id, _inner_interrupt_data} ->
+        resume_subagent_hitl(
+          agent,
+          state,
+          sub_agent_id,
+          subagent_type,
+          tool_call_id,
+          decisions,
+          opts
+        )
+
+      :unknown ->
+        {:error, "Unknown interrupt type in state.interrupt_data"}
+    end
+  end
+
+  defp classify_interrupt(nil), do: :unknown
+
+  defp classify_interrupt(%{type: :subagent_hitl} = data) do
+    {:subagent_hitl, data.sub_agent_id, data.subagent_type, data.tool_call_id,
+     data.interrupt_data}
+  end
+
+  defp classify_interrupt(%{type: :multiple_interrupts} = data) do
+    # Multiple simultaneous interrupts — surface first, queue rest
+    case data.interrupts do
+      [first | _rest] ->
+        classify_interrupt(first)
+
+      _ ->
+        :unknown
+    end
+  end
+
+  defp classify_interrupt(%{action_requests: _}), do: :direct_hitl
+  defp classify_interrupt(_), do: :unknown
+
+  defp resume_direct_hitl(agent, state, decisions, opts) do
     # Find the HumanInTheLoop middleware in the stack
     hitl_middleware =
       Enum.find(agent.middleware, fn %MiddlewareEntry{module: module} ->
@@ -553,20 +597,116 @@ defmodule Sagents.Agent do
         {:error, "Agent does not have HumanInTheLoop middleware configured"}
 
       %MiddlewareEntry{module: module, config: config} ->
-        # Validate decisions first
         case module.process_decisions(state, decisions, config) do
           {:ok, ^state} ->
-            # Validation passed, now execute the approved/edited tools
-            execute_approved_tools_and_update_state(
-              agent,
-              state,
-              decisions,
-              opts
-            )
+            execute_approved_tools_and_update_state(agent, state, decisions, opts)
 
           {:error, reason} ->
             {:error, reason}
         end
+    end
+  end
+
+  defp resume_subagent_hitl(
+         agent,
+         state,
+         sub_agent_id,
+         subagent_type,
+         tool_call_id,
+         decisions,
+         opts
+       ) do
+    callbacks = Keyword.get(opts, :callbacks)
+
+    # Direct call to SubAgentServer — no chain rebuild, no tool re-execution
+    case SubAgentServer.resume(sub_agent_id, decisions) do
+      {:ok, result} ->
+        # Sub-agent completed — stop its process (no longer needed)
+        SubAgentServer.stop(sub_agent_id)
+
+        # Fire callback before continuing execution so UI updates in real-time
+        fire_callback(callbacks, :on_subagent_resolved, [
+          %{type: :subagent_hitl, tool_call_id: tool_call_id, subagent_type: subagent_type},
+          :completed
+        ])
+
+        # Patch the placeholder tool result with real content
+        new_tool_result =
+          ToolResult.new!(%{
+            tool_call_id: tool_call_id,
+            content: result,
+            name: "task",
+            is_interrupt: false
+          })
+
+        patched_state = State.replace_tool_result(state, tool_call_id, new_tool_result)
+
+        # Check for more pending interrupts or continue execution
+        maybe_resume_next_pending_or_continue(agent, patched_state, opts)
+
+      {:interrupt, new_inner_interrupt_data} ->
+        # Sub-agent interrupted again — update interrupt_data, stay interrupted
+        updated_interrupt = %{
+          type: :subagent_hitl,
+          sub_agent_id: sub_agent_id,
+          subagent_type: subagent_type,
+          tool_call_id: tool_call_id,
+          interrupt_data: new_inner_interrupt_data
+        }
+
+        {:interrupt, %{state | interrupt_data: updated_interrupt}, updated_interrupt}
+
+      {:error, reason} ->
+        # Sub-agent failed — stop its process (can't be resumed)
+        SubAgentServer.stop(sub_agent_id)
+
+        # Fire callback before continuing execution so UI updates in real-time
+        fire_callback(callbacks, :on_subagent_resolved, [
+          %{type: :subagent_hitl, tool_call_id: tool_call_id, subagent_type: subagent_type},
+          :failed
+        ])
+
+        # Create error tool result
+        error_result =
+          ToolResult.new!(%{
+            tool_call_id: tool_call_id,
+            content: "SubAgent resume failed: #{inspect(reason)}",
+            name: "task",
+            is_error: true,
+            is_interrupt: false
+          })
+
+        patched_state = State.replace_tool_result(state, tool_call_id, error_result)
+        # Continue execution — LLM will see the error in tool results
+        execute(agent, patched_state, opts)
+    end
+  end
+
+  defp maybe_resume_next_pending_or_continue(agent, state, opts) do
+    case pop_pending_interrupt(state) do
+      {:next, next_interrupt, remaining_state} ->
+        # More pending sub-agent interrupts — surface the next one
+        {:interrupt, remaining_state, next_interrupt}
+
+      :none ->
+        # All interrupts drained — continue normal execution
+        execute(agent, state, opts)
+    end
+  end
+
+  defp pop_pending_interrupt(state) do
+    case state.interrupt_data do
+      %{type: :multiple_interrupts, interrupts: [next | rest]} when rest != [] ->
+        remaining_interrupt = %{type: :multiple_interrupts, interrupts: rest}
+        remaining_state = %{state | interrupt_data: remaining_interrupt}
+        {:next, next, remaining_state}
+
+      %{type: :multiple_interrupts, interrupts: [last]} ->
+        remaining_state = %{state | interrupt_data: last}
+        {:next, last, remaining_state}
+
+      _ ->
+        :none
     end
   end
 
@@ -699,7 +839,19 @@ defmodule Sagents.Agent do
          result <- execute_chain(chain, agent.middleware, agent, opts) do
       case result do
         {:ok, executed_chain} ->
-          extract_state_from_chain(executed_chain, state)
+          case extract_state_from_chain(executed_chain, state) do
+            {:ok, final_state} ->
+              # Check if the last message was cancelled due to a streaming error
+              # (e.g. content filtering). The error is stored in message metadata
+              # by LLMChain.cancel_delta/3.
+              case check_for_streaming_error(final_state) do
+                nil -> {:ok, final_state}
+                error -> {:error, error}
+              end
+
+            {:error, reason} ->
+              {:error, reason}
+          end
 
         {:ok, executed_chain, extra} ->
           case extract_state_from_chain(executed_chain, state) do
@@ -722,6 +874,13 @@ defmodule Sagents.Agent do
         {:error, reason} ->
           {:error, reason}
       end
+    end
+  end
+
+  defp check_for_streaming_error(%State{messages: messages}) do
+    case List.last(messages) do
+      %Message{status: :cancelled, metadata: %{streaming_error: error}} -> error
+      _ -> nil
     end
   end
 

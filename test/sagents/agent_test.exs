@@ -991,6 +991,210 @@ defmodule Sagents.AgentTest do
     end
   end
 
+  describe "resume/4 classify_interrupt dispatch" do
+    setup :verify_on_exit!
+
+    test "returns error for unknown interrupt type" do
+      {:ok, agent} =
+        Agent.new(%{
+          model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"})
+        })
+
+      state = State.new!(%{interrupt_data: %{type: :unknown_type}})
+
+      assert {:error, "Unknown interrupt type in state.interrupt_data"} =
+               Agent.resume(agent, state, [])
+    end
+
+    test "returns error for nil interrupt_data" do
+      {:ok, agent} =
+        Agent.new(%{
+          model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"})
+        })
+
+      state = State.new!()
+
+      assert {:error, "Unknown interrupt type in state.interrupt_data"} =
+               Agent.resume(agent, state, [])
+    end
+
+    test "dispatches to subagent resume when interrupt_data.type is :subagent_hitl" do
+      {:ok, agent} =
+        Agent.new(%{
+          model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"})
+        })
+
+      # Mock SubAgentServer.resume to return success
+      expect(Sagents.SubAgentServer, :resume, fn "sub-agent-1", [%{type: :approve}] ->
+        {:ok, "Sub-agent completed successfully."}
+      end)
+
+      # Mock the ChatAnthropic call for the continue execution after sub-agent completes
+      expect(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Done!")]}
+      end)
+
+      # Create a state with sub-agent interrupt data and a tool message with interrupt placeholder
+      tool_result =
+        LangChain.Message.ToolResult.new!(%{
+          tool_call_id: "call_task_1",
+          name: "task",
+          content: "SubAgent 'researcher' requires human approval.",
+          is_interrupt: true,
+          interrupt_data: %{type: :subagent_hitl, sub_agent_id: "sub-agent-1"}
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [tool_result]})
+
+      assistant_msg =
+        Message.new_assistant!(%{
+          tool_calls: [
+            LangChain.Message.ToolCall.new!(%{
+              call_id: "call_task_1",
+              name: "task",
+              arguments: %{}
+            })
+          ]
+        })
+
+      state =
+        State.new!(%{
+          messages: [Message.new_user!("Do research"), assistant_msg, tool_msg],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-agent-1",
+            subagent_type: "researcher",
+            tool_call_id: "call_task_1",
+            interrupt_data: %{action_requests: []}
+          }
+        })
+
+      decisions = [%{type: :approve}]
+
+      result = Agent.resume(agent, state, decisions)
+      assert {:ok, final_state} = result
+
+      # The placeholder tool result should have been replaced
+      tool_message = Enum.find(final_state.messages, &(&1.role == :tool))
+      [replaced_result] = tool_message.tool_results
+      assert replaced_result.is_interrupt == false
+    end
+
+    test "sub-agent re-interrupts during resume" do
+      {:ok, agent} =
+        Agent.new(%{
+          model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"})
+        })
+
+      new_inner_data = %{action_requests: [%{tool_name: "file_write"}]}
+
+      expect(Sagents.SubAgentServer, :resume, fn "sub-agent-1", [%{type: :approve}] ->
+        {:interrupt, new_inner_data}
+      end)
+
+      tool_result =
+        LangChain.Message.ToolResult.new!(%{
+          tool_call_id: "call_task_1",
+          name: "task",
+          content: "placeholder",
+          is_interrupt: true,
+          interrupt_data: %{type: :subagent_hitl}
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [tool_result]})
+
+      state =
+        State.new!(%{
+          messages: [Message.new_user!("Do research"), tool_msg],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-agent-1",
+            subagent_type: "researcher",
+            tool_call_id: "call_task_1",
+            interrupt_data: %{action_requests: [%{tool_name: "web_search"}]}
+          }
+        })
+
+      result = Agent.resume(agent, state, [%{type: :approve}])
+
+      assert {:interrupt, updated_state, updated_interrupt} = result
+      assert updated_interrupt.type == :subagent_hitl
+      assert updated_interrupt.sub_agent_id == "sub-agent-1"
+      assert updated_interrupt.interrupt_data == new_inner_data
+      assert updated_state.interrupt_data == updated_interrupt
+    end
+
+    test "sub-agent error during resume creates error tool result and continues" do
+      {:ok, agent} =
+        Agent.new(%{
+          model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"})
+        })
+
+      expect(Sagents.SubAgentServer, :resume, fn "sub-agent-1", [%{type: :approve}] ->
+        {:error, :process_not_found}
+      end)
+
+      # The agent will continue execution after patching error — mock the LLM
+      expect(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("The sub-agent failed, sorry.")]}
+      end)
+
+      tool_result =
+        LangChain.Message.ToolResult.new!(%{
+          tool_call_id: "call_task_1",
+          name: "task",
+          content: "placeholder",
+          is_interrupt: true,
+          interrupt_data: %{type: :subagent_hitl}
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [tool_result]})
+
+      state =
+        State.new!(%{
+          messages: [Message.new_user!("Do research"), tool_msg],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-agent-1",
+            subagent_type: "researcher",
+            tool_call_id: "call_task_1",
+            interrupt_data: %{}
+          }
+        })
+
+      result = Agent.resume(agent, state, [%{type: :approve}])
+      assert {:ok, final_state} = result
+
+      # The error tool result should be in the messages
+      tool_message = Enum.find(final_state.messages, &(&1.role == :tool))
+      [error_result] = tool_message.tool_results
+      assert error_result.is_error == true
+      assert error_result.is_interrupt == false
+    end
+
+    test "dispatches to direct HITL when interrupt_data has action_requests" do
+      {:ok, agent} =
+        Agent.new(%{
+          model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"}),
+          interrupt_on: %{"tool1" => :always}
+        })
+
+      state =
+        State.new!(%{
+          messages: [Message.new_user!("hi")],
+          interrupt_data: %{
+            action_requests: [%{tool_call_id: "call_1", tool_name: "tool1"}],
+            hitl_tool_call_ids: ["call_1"]
+          }
+        })
+
+      # direct_hitl path requires HITL middleware validation + chain rebuild
+      # For this test, we just verify it takes the right path (not :unknown)
+      result = Agent.resume(agent, state, [%{type: :approve}])
+      refute match?({:error, "Unknown interrupt type" <> _}, result)
+    end
+  end
+
   # A test mode module that implements the Mode behaviour.
   # It notifies the test process that it was called, then delegates
   # to the default AgentExecution so the rest of execution completes normally.

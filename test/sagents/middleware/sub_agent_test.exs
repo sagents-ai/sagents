@@ -5,6 +5,7 @@ defmodule Sagents.Middleware.SubAgentTest do
   alias Sagents.Agent
   alias Sagents.Middleware.SubAgent, as: SubAgentMiddleware
   alias Sagents.SubAgent
+  alias Sagents.SubAgentServer
   alias Sagents.SubAgentsDynamicSupervisor
   alias Sagents.State
   alias Sagents.Middleware.TodoList
@@ -12,6 +13,7 @@ defmodule Sagents.Middleware.SubAgentTest do
   alias LangChain.ChatModels.ChatAnthropic
   alias LangChain.Function
   alias LangChain.Message
+  alias LangChain.Message.ToolCall
   alias LangChain.Chains.LLMChain
 
   setup :set_mimic_global
@@ -253,6 +255,222 @@ defmodule Sagents.Middleware.SubAgentTest do
       # Should get error because supervisor doesn't exist
       assert {:error, reason} = task_tool.function.(args, context)
       assert reason =~ "Failed to start SubAgent"
+    end
+  end
+
+  describe "task tool interrupt propagation" do
+    setup do
+      agent_id = "interrupt-test-parent-#{System.unique_integer([:positive])}"
+
+      start_supervised({
+        SubAgentsDynamicSupervisor,
+        agent_id: agent_id
+      })
+
+      %{parent_agent_id: agent_id}
+    end
+
+    test "execute_subagent returns {:interrupt, msg, data} when sub-agent interrupts",
+         %{parent_agent_id: parent_agent_id} do
+      # Create a subagent config with HITL gating on "dangerous_tool"
+      hitl_config =
+        SubAgent.Config.new!(%{
+          name: "hitl_agent",
+          description: "Agent with HITL",
+          system_prompt: "Test agent",
+          tools: [
+            Function.new!(%{
+              name: "dangerous_tool",
+              description: "A dangerous tool",
+              function: fn _args, _context -> {:ok, "done"} end
+            })
+          ],
+          interrupt_on: %{"dangerous_tool" => true}
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: parent_agent_id,
+          model: test_model(),
+          middleware: [],
+          subagents: [hitl_config]
+        )
+
+      [task_tool] = SubAgentMiddleware.tools(middleware_config)
+
+      # Mock LLMChain.run to return an assistant message with a HITL-gated tool call
+      tool_call =
+        ToolCall.new!(%{
+          call_id: "tc_dangerous_1",
+          name: "dangerous_tool",
+          arguments: %{"target" => "important_file"}
+        })
+
+      assistant_msg = Message.new_assistant!(%{tool_calls: [tool_call]})
+
+      LLMChain
+      |> stub(:run, fn chain, _opts ->
+        # Simulate the mode pipeline: LLM returns a tool call, then
+        # check_pre_tool_hitl detects it's HITL-gated and returns interrupt.
+        # The chain has the assistant message with tool calls in exchanged_messages.
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_msg])
+          |> Map.put(:last_message, assistant_msg)
+          |> Map.put(:needs_response, true)
+
+        # Return interrupt as the mode pipeline would when HITL triggers
+        interrupt_data = %{
+          action_requests: [
+            %{
+              tool_call_id: "tc_dangerous_1",
+              tool_name: "dangerous_tool",
+              arguments: %{"target" => "important_file"}
+            }
+          ],
+          hitl_tool_call_ids: ["tc_dangerous_1"]
+        }
+
+        {:interrupt, updated_chain, interrupt_data}
+      end)
+
+      args = %{"instructions" => "Do something dangerous", "subagent_type" => "hitl_agent"}
+      context = %{state: State.new!(%{messages: []})}
+
+      # Execute the task tool — should return 3-tuple interrupt
+      assert {:interrupt, display_msg, interrupt_data} = task_tool.function.(args, context)
+
+      # Verify display message contains the subagent type name
+      assert display_msg =~ "hitl_agent"
+      assert display_msg =~ "human approval"
+
+      # Verify interrupt data structure
+      assert interrupt_data.type == :subagent_hitl
+      assert is_binary(interrupt_data.sub_agent_id)
+      assert interrupt_data.subagent_type == "hitl_agent"
+
+      # Verify inner interrupt data from the sub-agent
+      assert is_map(interrupt_data.interrupt_data)
+      assert is_list(interrupt_data.interrupt_data.action_requests)
+      [action_req] = interrupt_data.interrupt_data.action_requests
+      assert action_req.tool_name == "dangerous_tool"
+
+      # SubAgentServer process should still be alive (needs resume)
+      assert SubAgentServer.whereis(interrupt_data.sub_agent_id) != nil
+    end
+
+    test "resume_subagent returns {:interrupt, msg, data} on re-interrupt",
+         %{parent_agent_id: parent_agent_id} do
+      hitl_config =
+        SubAgent.Config.new!(%{
+          name: "multi_hitl",
+          description: "Agent with multiple HITL tools",
+          system_prompt: "Test agent",
+          tools: [
+            Function.new!(%{
+              name: "write_file",
+              description: "Write a file",
+              function: fn _args, _context -> {:ok, "written"} end
+            }),
+            Function.new!(%{
+              name: "delete_file",
+              description: "Delete a file",
+              function: fn _args, _context -> {:ok, "deleted"} end
+            })
+          ],
+          interrupt_on: %{"write_file" => true, "delete_file" => true}
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: parent_agent_id,
+          model: test_model(),
+          middleware: [],
+          subagents: [hitl_config]
+        )
+
+      [task_tool] = SubAgentMiddleware.tools(middleware_config)
+
+      # First call: LLM returns write_file tool call → interrupt
+      write_call =
+        ToolCall.new!(%{
+          call_id: "tc_write_1",
+          name: "write_file",
+          arguments: %{"path" => "test.txt"}
+        })
+
+      write_msg = Message.new_assistant!(%{tool_calls: [write_call]})
+
+      call_count = :counters.new(1, [:atomics])
+
+      # Second call: after resume, LLM returns delete_file tool call → re-interrupt
+      delete_call =
+        ToolCall.new!(%{
+          call_id: "tc_delete_1",
+          name: "delete_file",
+          arguments: %{"path" => "old.txt"}
+        })
+
+      delete_msg = Message.new_assistant!(%{tool_calls: [delete_call]})
+
+      LLMChain
+      |> stub(:run, fn chain, _opts ->
+        count = :counters.get(call_count, 1)
+        :counters.add(call_count, 1, 1)
+
+        {msg, tool_call} =
+          if count == 0, do: {write_msg, write_call}, else: {delete_msg, delete_call}
+
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [msg])
+          |> Map.put(:last_message, msg)
+          |> Map.put(:needs_response, true)
+
+        # Simulate the mode pipeline returning interrupt for HITL-gated tool
+        interrupt_data = %{
+          action_requests: [
+            %{
+              tool_call_id: tool_call.call_id,
+              tool_name: tool_call.name,
+              arguments: tool_call.arguments
+            }
+          ],
+          hitl_tool_call_ids: [tool_call.call_id]
+        }
+
+        {:interrupt, updated_chain, interrupt_data}
+      end)
+
+      args = %{"instructions" => "Do file ops", "subagent_type" => "multi_hitl"}
+      context = %{state: State.new!(%{messages: []})}
+
+      # First execution → interrupt for write_file
+      assert {:interrupt, _msg1, data1} = task_tool.function.(args, context)
+      assert data1.type == :subagent_hitl
+      sub_agent_id = data1.sub_agent_id
+
+      # Resume with approve → sub-agent executes write_file, then LLM returns
+      # delete_file → re-interrupt
+      resume_context = %{
+        state: State.new!(%{messages: []}),
+        resume_info: %{
+          sub_agent_id: sub_agent_id,
+          subagent_type: "multi_hitl",
+          decisions: [%{type: :approve}]
+        }
+      }
+
+      assert {:interrupt, msg2, data2} =
+               task_tool.function.(args, resume_context)
+
+      assert msg2 =~ "multi_hitl"
+      assert data2.type == :subagent_hitl
+      assert data2.sub_agent_id == sub_agent_id
+
+      # Inner interrupt data should now be for delete_file
+      [action_req] = data2.interrupt_data.action_requests
+      assert action_req.tool_name == "delete_file"
     end
   end
 

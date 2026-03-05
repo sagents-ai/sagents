@@ -124,7 +124,10 @@ defmodule Sagents.State do
     - `{:error, reason}` - Deserialization failed
   """
   def from_serialized(agent_id, data) when is_binary(agent_id) and is_map(data) do
-    Sagents.Persistence.StateSerializer.deserialize_state(agent_id, data)
+    case Sagents.Persistence.StateSerializer.deserialize_state(agent_id, data) do
+      {:ok, state} -> {:ok, clean_stale_interrupts(state)}
+      error -> error
+    end
   end
 
   @doc """
@@ -210,6 +213,22 @@ defmodule Sagents.State do
   """
   def add_messages(%State{} = state, messages) when is_list(messages) do
     %{state | messages: state.messages ++ messages}
+  end
+
+  @doc """
+  Replace a tool result in the state's messages by `tool_call_id`.
+
+  Delegates to `LangChain.Message.replace_tool_result/3`.
+  """
+  def replace_tool_result(
+        %State{} = state,
+        tool_call_id,
+        %LangChain.Message.ToolResult{} = new_result
+      ) do
+    updated_messages =
+      LangChain.Message.replace_tool_result(state.messages, tool_call_id, new_result)
+
+    %{state | messages: updated_messages}
   end
 
   @doc """
@@ -352,5 +371,46 @@ defmodule Sagents.State do
       todos: [],
       metadata: %{}
     }
+  end
+
+  @doc """
+  Replace any stale interrupt placeholder tool results with error messages.
+
+  Called after loading state from the database. Interrupted tool results
+  reference sub-agent processes that no longer exist, so they must be
+  converted to error results before the LLM sees them.
+
+  This is idempotent — if there are no stale interrupts, it's a no-op.
+  """
+  @spec clean_stale_interrupts(t()) :: t()
+  def clean_stale_interrupts(%State{} = state) do
+    cleaned_messages =
+      Enum.map(state.messages, fn message ->
+        case message do
+          %LangChain.Message{role: :tool, tool_results: results} when is_list(results) ->
+            cleaned_results =
+              Enum.map(results, fn
+                %LangChain.Message.ToolResult{is_interrupt: true} = tr ->
+                  %{
+                    tr
+                    | content:
+                        "Tool execution was interrupted and could not be resumed " <>
+                          "(agent was restarted). The sub-agent's work was lost.",
+                      is_interrupt: false,
+                      is_error: true
+                  }
+
+                other ->
+                  other
+              end)
+
+            %{message | tool_results: cleaned_results}
+
+          other ->
+            other
+        end
+      end)
+
+    %{state | messages: cleaned_messages}
   end
 end
