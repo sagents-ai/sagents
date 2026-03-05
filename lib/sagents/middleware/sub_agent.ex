@@ -414,23 +414,28 @@ defmodule Sagents.Middleware.SubAgent do
       {:ok, agent_config} ->
         # Create SubAgent struct from pre-configured agent
         # Check if it's a Compiled struct (with initial_messages) or just an Agent
+        # Pass parent metadata so SubAgent tools have access to session context
+        parent_meta = get_in(context, [:state, Access.key(:metadata)]) || %{}
+
         subagent =
           case agent_config do
             %SubAgent.Compiled{} = compiled ->
-              # Use new_from_compiled to include initial_messages
+              # Use new_from_compiled to include initial_messages + parent metadata
               SubAgent.new_from_compiled(
                 parent_agent_id: config.agent_id,
                 instructions: instructions,
                 compiled_agent: compiled.agent,
-                initial_messages: compiled.initial_messages || []
+                initial_messages: compiled.initial_messages || [],
+                parent_metadata: parent_meta
               )
 
             agent ->
-              # Regular Agent struct from Config
+              # Regular Agent struct from Config + parent metadata
               SubAgent.new_from_config(
                 parent_agent_id: config.agent_id,
                 instructions: instructions,
-                agent_config: agent
+                agent_config: agent,
+                parent_metadata: parent_meta
               )
           end
 
@@ -507,12 +512,15 @@ defmodule Sagents.Middleware.SubAgent do
             interrupt_on: nil
           )
 
-        # Create SubAgent struct
+        # Create SubAgent struct with parent metadata for tool context
+        parent_meta = get_in(context, [:state, Access.key(:metadata)]) || %{}
+
         subagent =
           SubAgent.new_from_config(
             parent_agent_id: config.agent_id,
             instructions: instructions,
-            agent_config: agent_config
+            agent_config: agent_config,
+            parent_metadata: parent_meta
           )
 
         # Get supervisor and start SubAgent (same as pre-configured)

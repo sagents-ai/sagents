@@ -163,7 +163,9 @@ defmodule Sagents.SubAgent do
   - `:parent_agent_id` - Parent's agent ID (required)
   - `:instructions` - Task description (required)
   - `:agent_config` - Agent struct with tools, model, middleware (required)
-  - `:parent_state` - Parent agent's current state (required)
+  - `:parent_metadata` - Parent agent's metadata map to inherit (optional).
+    Contains context like `conversation_db_id`, `terminal_session_id`, etc.
+    that tools may need. Defaults to `%{}`.
 
   ## Examples
 
@@ -171,13 +173,14 @@ defmodule Sagents.SubAgent do
         parent_agent_id: "main-agent",
         instructions: "Research renewable energy impacts",
         agent_config: agent_struct,
-        parent_state: parent_state
+        parent_metadata: %{"conversation_db_id" => "abc123"}
       )
   """
   def new_from_config(opts) do
     parent_agent_id = Keyword.fetch!(opts, :parent_agent_id)
     instructions = Keyword.fetch!(opts, :instructions)
     agent_config = Keyword.fetch!(opts, :agent_config)
+    parent_metadata = Keyword.get(opts, :parent_metadata, %{})
 
     # Generate unique ID
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
@@ -185,9 +188,9 @@ defmodule Sagents.SubAgent do
     # Build the chain with system prompt + user message
     messages = build_initial_messages(agent_config.assembled_system_prompt, instructions)
 
-    # Create SubAgent's OWN state - fresh and independent from parent
-    # This ensures true isolation
-    subagent_state = State.new!(%{agent_id: sub_agent_id})
+    # Create SubAgent's OWN state - fresh but with parent metadata for tool context
+    # Metadata includes terminal_session_id, conversation_db_id etc. needed by tools
+    subagent_state = State.new!(%{agent_id: sub_agent_id, metadata: parent_metadata || %{}})
 
     # Build custom_context with SubAgent's OWN state (not parent's!)
     # Tools in SubAgent will access/modify SubAgent's state, not parent's
@@ -228,8 +231,10 @@ defmodule Sagents.SubAgent do
   - `:parent_agent_id` - Parent's agent ID (required)
   - `:instructions` - Task description (required)
   - `:compiled_agent` - Pre-built Agent struct (required)
-  - `:parent_state` - Parent agent's current state (required)
   - `:initial_messages` - Optional initial message sequence (default: [])
+  - `:parent_metadata` - Parent agent's metadata map to inherit (optional).
+    Contains context like `conversation_db_id`, `terminal_session_id`, etc.
+    that tools may need. Defaults to `%{}`.
 
   ## Examples
 
@@ -237,8 +242,8 @@ defmodule Sagents.SubAgent do
         parent_agent_id: "main-agent",
         instructions: "Extract structured data",
         compiled_agent: data_extractor_agent,
-        parent_state: parent_state,
-        initial_messages: [prep_message]
+        initial_messages: [prep_message],
+        parent_metadata: %{"conversation_db_id" => "abc123"}
       )
   """
   def new_from_compiled(opts) do
@@ -246,6 +251,7 @@ defmodule Sagents.SubAgent do
     instructions = Keyword.fetch!(opts, :instructions)
     compiled_agent = Keyword.fetch!(opts, :compiled_agent)
     initial_messages = Keyword.get(opts, :initial_messages, [])
+    parent_metadata = Keyword.get(opts, :parent_metadata, %{})
 
     # Generate unique ID
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
@@ -255,9 +261,9 @@ defmodule Sagents.SubAgent do
     user_message = Message.new_user!(instructions)
     all_messages = system_messages ++ initial_messages ++ [user_message]
 
-    # Create SubAgent's OWN state - fresh and independent from parent
-    # This ensures true isolation and prevents memory waste from parent's message history
-    subagent_state = State.new!(%{agent_id: sub_agent_id})
+    # Create SubAgent's OWN state - fresh but with parent metadata for tool context
+    # Metadata includes terminal_session_id, conversation_db_id etc. needed by tools
+    subagent_state = State.new!(%{agent_id: sub_agent_id, metadata: parent_metadata || %{}})
 
     # Build custom_context with SubAgent's OWN state (not parent's!)
     # Tools in SubAgent will access/modify SubAgent's state, not parent's
