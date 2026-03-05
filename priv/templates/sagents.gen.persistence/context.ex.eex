@@ -333,7 +333,7 @@ defmodule <%= @context_module %> do
       from m in DisplayMessage,
         where: fragment("?->>'call_id' = ?", m.content, ^call_id),
         where: m.content_type == "tool_call",
-        where: m.status in ["pending", "executing"]
+        where: m.status in ["pending", "executing", "interrupted"]
 
     case Repo.one(query) do
       nil ->
@@ -377,7 +377,7 @@ defmodule <%= @context_module %> do
       from m in DisplayMessage,
         where: fragment("?->>'call_id' = ?", m.content, ^call_id),
         where: m.content_type == "tool_call",
-        where: m.status in ["pending", "executing"]
+        where: m.status in ["pending", "executing", "interrupted"]
 
     case Repo.one(query) do
       nil ->
@@ -391,6 +391,147 @@ defmodule <%= @context_module %> do
           "status" => "failed",
           "metadata" => updated_metadata
         })
+        |> Repo.update()
+    end
+  end
+
+  @doc """
+  Updates a tool call message to "interrupted" status and adds interrupt information.
+
+  This is called when a tool execution is interrupted (e.g., sub-agent HITL).
+  Accepts tool calls in "pending" or "executing" status.
+
+  ## Parameters
+    - call_id: The tool call ID
+    - interrupt_info: Map containing interrupt details (e.g., %{"display_text" => "Sub-agent awaiting approval"})
+
+  ## Returns
+    - {:ok, %DisplayMessage{}} on success
+    - {:error, :not_found} if no pending/executing tool call with this call_id exists
+    - {:error, changeset} on validation failure
+  """
+  @spec interrupt_tool_call(String.t(), map()) ::
+          {:ok, DisplayMessage.t()} | {:error, :not_found | Ecto.Changeset.t()}
+  def interrupt_tool_call(call_id, interrupt_info \\ %{}) do
+    query =
+      from m in DisplayMessage,
+        where: fragment("?->>'call_id' = ?", m.content, ^call_id),
+        where: m.content_type == "tool_call",
+        where: m.status in ["pending", "executing"]
+
+    case Repo.one(query) do
+      nil ->
+        {:error, :not_found}
+
+      message ->
+        updated_metadata = Map.merge(message.metadata, interrupt_info)
+
+        message
+        |> DisplayMessage.changeset(%{
+          "status" => "interrupted",
+          "metadata" => updated_metadata
+        })
+        |> Repo.update()
+    end
+  end
+
+  @doc """
+  Records an HITL decision (approved/rejected) on a tool call display message.
+
+  Adds `"hitl_decision"` to the tool call's metadata so the UI can display
+  a discreet indicator of what the user decided. The metadata persists through
+  subsequent status transitions (executing → completed/failed) since those
+  operations merge metadata.
+
+  ## Parameters
+    - call_id: The tool call ID
+    - decision: "approved" or "rejected"
+
+  ## Returns
+    - {:ok, %DisplayMessage{}} on success
+    - {:error, :not_found} if no tool call with this call_id exists
+    - {:error, changeset} on validation failure
+  """
+  @spec record_hitl_decision(String.t(), String.t()) ::
+          {:ok, DisplayMessage.t()} | {:error, :not_found | Ecto.Changeset.t()}
+  def record_hitl_decision(call_id, decision) when decision in ["approved", "rejected"] do
+    # Update tool_call display message metadata
+    tool_call_query =
+      from m in DisplayMessage,
+        where: fragment("?->>'call_id' = ?", m.content, ^call_id),
+        where: m.content_type == "tool_call"
+
+    result =
+      case Repo.one(tool_call_query) do
+        nil ->
+          {:error, :not_found}
+
+        message ->
+          updated_metadata = Map.put(message.metadata, "hitl_decision", decision)
+
+          message
+          |> DisplayMessage.changeset(%{"metadata" => updated_metadata})
+          |> Repo.update()
+      end
+
+    # Also stamp the matching tool_result display message content
+    tool_result_query =
+      from m in DisplayMessage,
+        where: fragment("?->>'tool_call_id' = ?", m.content, ^call_id),
+        where: m.content_type == "tool_result"
+
+    case Repo.one(tool_result_query) do
+      nil ->
+        :ok
+
+      tr_msg ->
+        updated_content = Map.put(tr_msg.content, "hitl_decision", decision)
+
+        tr_msg
+        |> DisplayMessage.changeset(%{"content" => updated_content})
+        |> Repo.update()
+    end
+
+    result
+  end
+
+  @doc """
+  Resolves an interrupted tool result display message after a sub-agent resumes.
+
+  Finds a tool_result display message matching the given tool_call_id where
+  is_interrupt is true in the content JSON, and updates it to clear the interrupt
+  flag and replace the content with the actual result.
+
+  ## Parameters
+    - tool_call_id: The tool call ID to find the matching tool result
+    - result_content: The actual result content string to replace the interrupt placeholder
+
+  ## Returns
+    - {:ok, %DisplayMessage{}} on success
+    - {:error, :not_found} if no matching interrupted tool result exists
+    - {:error, changeset} on validation failure
+  """
+  @spec resolve_interrupted_tool_result(String.t(), String.t()) ::
+          {:ok, DisplayMessage.t()} | {:error, :not_found | Ecto.Changeset.t()}
+  def resolve_interrupted_tool_result(tool_call_id, result_content) do
+    query =
+      from m in DisplayMessage,
+        where: fragment("?->>'tool_call_id' = ?", m.content, ^tool_call_id),
+        where: m.content_type == "tool_result",
+        where: fragment("(?->>'is_interrupt')::boolean = true", m.content)
+
+    case Repo.one(query) do
+      nil ->
+        {:error, :not_found}
+
+      message ->
+        updated_content =
+          message.content
+          |> Map.put("is_interrupt", false)
+          |> Map.put("content", result_content)
+
+        message
+        |> DisplayMessage.changeset(%{"content" => updated_content})
         |> Repo.update()
     end
   end

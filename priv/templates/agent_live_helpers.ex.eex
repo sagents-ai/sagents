@@ -118,6 +118,7 @@ defmodule <%= module %> do
   - `:loading` - false
   - `:pending_tools` - []
   - `:interrupt_data` - nil
+  - `:hitl_decisions` - []
   - `:messages` stream - empty (reset: true)
   """
   def init_agent_state(socket) do
@@ -132,6 +133,7 @@ defmodule <%= module %> do
     |> assign(:loading, false)
     |> assign(:pending_tools, [])
     |> assign(:interrupt_data, nil)
+    |> assign(:hitl_decisions, [])
     |> stream(:messages, [], reset: true)
   end
 
@@ -221,6 +223,15 @@ defmodule <%= module %> do
         |> assign(:agent_status, agent_status)
         |> stream(:messages, display_messages, reset: true)
         |> assign(:has_messages, has_messages)
+
+      # Restore HITL state if agent is interrupted (e.g. after LiveView reconnect)
+      socket =
+        if agent_status == :interrupted do
+          info = AgentServer.get_info(agent_id)
+          handle_status_interrupted(socket, info.interrupt_data)
+        else
+          socket
+        end
 
       {:ok, socket}
     rescue
@@ -328,6 +339,7 @@ defmodule <%= module %> do
     socket
     |> assign(:loading, false)
     |> assign(:agent_status, :idle)
+    |> assign(:streaming_delta, nil)
   end
 
   @doc """
@@ -358,22 +370,18 @@ defmodule <%= module %> do
   @doc """
   Handles agent status change to :error (execution failed).
 
-  Formats error message, creates assistant message with error, and updates status.
+  The error message is persisted as a display message by AgentServer and arrives
+  via `{:display_message_saved, ...}`. This handler just updates UI state and
+  shows a flash notification.
   """
   def handle_status_error(socket, reason) do
     error_text = format_error_message(reason)
 
-    error_message =
-      create_or_persist_message(
-        socket,
-        :assistant,
-        error_text
-      )
-
     socket
     |> assign(:loading, false)
     |> assign(:agent_status, :error)
-    |> stream_insert(:messages, error_message)
+    |> assign(:streaming_delta, nil)
+    |> put_flash(:error, error_text)
   end
 
   @doc """
@@ -382,13 +390,23 @@ defmodule <%= module %> do
   Extracts action requests from interrupt data and updates status.
   """
   def handle_status_interrupted(socket, interrupt_data) do
-    action_requests = Map.get(interrupt_data, :action_requests, [])
+    action_requests = extract_action_requests(interrupt_data)
 
     socket
     |> assign(:loading, false)
     |> assign(:agent_status, :interrupted)
     |> assign(:pending_tools, action_requests)
     |> assign(:interrupt_data, interrupt_data)
+  end
+
+  # Sub-agent HITL: action_requests are nested inside interrupt_data.interrupt_data
+  defp extract_action_requests(%{type: :subagent_hitl, interrupt_data: inner}) do
+    Map.get(inner, :action_requests, [])
+  end
+
+  # Direct HITL: action_requests are at the top level
+  defp extract_action_requests(interrupt_data) do
+    Map.get(interrupt_data, :action_requests, [])
   end
 
   # === MESSAGING HANDLERS ===
@@ -604,6 +622,82 @@ defmodule <%= module %> do
       end
     else
       create_fallback_message(message_type, text)
+    end
+  end
+
+  # === HITL DECISION HANDLERS ===
+
+  @doc """
+  Handles a single HITL approve/reject decision.
+
+  Accumulates decisions and only resumes the agent once all pending tools are decided.
+  Returns the updated socket (caller wraps in `{:noreply, socket}`).
+
+  ## Parameters
+
+  - `socket` - The LiveView socket
+  - `index` - Index of the tool in pending_tools to decide on
+  - `decision_type` - `:approve` or `:reject`
+
+  ## Example
+
+      def handle_event("approve_tool", %{"index" => index_str}, socket) do
+        {:noreply, AgentLiveHelpers.handle_hitl_decision(socket, String.to_integer(index_str), :approve)}
+      end
+  """
+  def handle_hitl_decision(socket, index, decision_type) do
+    pending_tools = socket.assigns.pending_tools
+    decision_label = if decision_type == :approve, do: "approved", else: "rejected"
+
+    # Record decision on the display message for UI indicator
+    persist_hitl_decision(socket, pending_tools, index, decision_label)
+
+    Logger.info("#{String.capitalize(decision_label)} tool at index #{index}")
+
+    # Accumulate this decision and remove the tool from pending
+    accumulated = (socket.assigns[:hitl_decisions] || []) ++ [%{type: decision_type}]
+    remaining_tools = List.delete_at(pending_tools, index)
+
+    if remaining_tools == [] do
+      # All tools decided — resume the agent with the full decisions list
+      case AgentServer.resume(socket.assigns.agent_id, accumulated) do
+        :ok ->
+          socket
+          |> assign(:agent_status, :running)
+          |> assign(:loading, true)
+          |> assign(:pending_tools, [])
+          |> assign(:interrupt_data, nil)
+          |> assign(:hitl_decisions, [])
+          |> put_flash(:info, "Agent resuming")
+
+        {:error, reason} ->
+          Logger.error("Failed to resume agent: #{inspect(reason)}")
+          put_flash(socket, :error, "Failed to resume agent: #{inspect(reason)}")
+      end
+    else
+      # More tools to decide — update UI to show the next one
+      socket
+      |> assign(:pending_tools, remaining_tools)
+      |> assign(:hitl_decisions, accumulated)
+    end
+  end
+
+  # Persist HITL decision on the correct tool call display message.
+  # For sub-agent HITL, the action_request's tool_call_id belongs to the sub-agent's
+  # inner tool call, not the parent's "task" tool call. Use the parent's tool_call_id
+  # from the top-level interrupt_data instead.
+  defp persist_hitl_decision(socket, pending_tools, index, decision) do
+    interrupt_data = socket.assigns[:interrupt_data]
+    tool = Enum.at(pending_tools, index)
+
+    call_id =
+      case interrupt_data do
+        %{type: :subagent_hitl, tool_call_id: parent_call_id} -> parent_call_id
+        _ -> tool[:tool_call_id]
+      end
+
+    if call_id do
+      <%= conversations_alias %>.record_hitl_decision(call_id, decision)
     end
   end
 
