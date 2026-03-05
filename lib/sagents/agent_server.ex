@@ -216,6 +216,7 @@ defmodule Sagents.AgentServer do
   alias Sagents.MiddlewareEntry
   alias Sagents.Persistence.StateSerializer
   alias Sagents.ProcessRegistry
+  alias LangChain.Message
   alias LangChain.Message.ContentPart
 
   @typedoc "Status of the agent server"
@@ -2025,6 +2026,14 @@ defmodule Sagents.AgentServer do
         }
 
         broadcast_tool_event(server_state, :failed, tool_info)
+      end,
+
+      # Sub-agent HITL resolution callback
+      # Fired from Agent.resume_subagent_hitl after the sub-agent completes/fails,
+      # BEFORE the main agent continues execution. This ensures the UI updates
+      # the tool call status in real-time rather than waiting for the full LLM cycle.
+      on_subagent_resolved: fn interrupt_data, status ->
+        maybe_update_subagent_tool_display(server_state, interrupt_data, status)
       end
     }
   end
@@ -2060,14 +2069,15 @@ defmodule Sagents.AgentServer do
     middleware_callbacks = Middleware.collect_callbacks(server_state.agent.middleware)
     callbacks = [pubsub_callbacks | middleware_callbacks]
 
+    # Note: Sub-agent tool display updates happen via on_subagent_resolved callback
+    # fired from Agent.resume_subagent_hitl BEFORE the main agent continues execution.
+    # This ensures real-time UI updates rather than waiting for the full LLM cycle.
     case Agent.resume(server_state.agent, server_state.state, decisions, callbacks: callbacks) do
       {:ok, new_state} ->
-        # Broadcast state changes
         broadcast_state_changes(server_state, new_state)
         {:ok, new_state}
 
       {:interrupt, interrupted_state, interrupt_data} ->
-        # Another interrupt occurred during resume
         broadcast_state_changes(server_state, interrupted_state)
         {:interrupt, interrupted_state, interrupt_data}
 
@@ -2110,6 +2120,9 @@ defmodule Sagents.AgentServer do
         interrupt_data: interrupt_data
     }
 
+    # Update sub-agent tool call display message to "interrupted"
+    maybe_update_subagent_tool_display(updated_state, interrupt_data, :interrupted)
+
     # Persist agent state on interrupt
     maybe_persist_state(updated_state, :on_interrupt)
 
@@ -2134,6 +2147,9 @@ defmodule Sagents.AgentServer do
 
     # Persist agent state on error
     maybe_persist_state(updated_state, :on_error)
+
+    # Persist an assistant message describing the error so it survives page reloads
+    persist_error_as_display_message(updated_state, reason)
 
     broadcast_event(updated_state, {:status_changed, :error, reason})
     update_presence_status(updated_state, :error)
@@ -2241,6 +2257,67 @@ defmodule Sagents.AgentServer do
     end
   end
 
+  # Update the display message for a sub-agent tool call on interrupt/resume
+  defp maybe_update_subagent_tool_display(
+         server_state,
+         %{type: :subagent_hitl, tool_call_id: tool_call_id},
+         :interrupted
+       ) do
+    broadcast_tool_event(server_state, :interrupted, %{
+      call_id: tool_call_id,
+      display_text: "Task awaiting approval"
+    })
+  end
+
+  defp maybe_update_subagent_tool_display(
+         server_state,
+         %{type: :subagent_hitl, tool_call_id: tool_call_id},
+         :completed
+       ) do
+    broadcast_tool_event(server_state, :completed, %{
+      call_id: tool_call_id,
+      name: "task",
+      result: "Task completed",
+      display_text: "Task completed"
+    })
+
+    # Also resolve the interrupted tool result display message
+    maybe_resolve_tool_result(server_state, tool_call_id, "Task completed")
+  end
+
+  defp maybe_update_subagent_tool_display(
+         server_state,
+         %{type: :subagent_hitl, tool_call_id: tool_call_id},
+         :failed
+       ) do
+    broadcast_tool_event(server_state, :failed, %{
+      call_id: tool_call_id,
+      name: "task",
+      error: "Task failed"
+    })
+
+    # Also resolve the interrupted tool result display message
+    maybe_resolve_tool_result(server_state, tool_call_id, "Task failed")
+  end
+
+  # Not a sub-agent interrupt — no tool display update needed
+  defp maybe_update_subagent_tool_display(_server_state, _interrupt_data, _status), do: :ok
+
+  # Resolve the interrupted tool result display message if the persistence module supports it
+  defp maybe_resolve_tool_result(%ServerState{} = server_state, tool_call_id, result_content) do
+    module = server_state.display_message_persistence
+
+    if module && function_exported?(module, :resolve_tool_result, 2) do
+      case module.resolve_tool_result(tool_call_id, result_content) do
+        {:ok, updated_msg} ->
+          broadcast_event(server_state, {:display_message_updated, updated_msg})
+
+        {:error, _} ->
+          :ok
+      end
+    end
+  end
+
   # Save message via DisplayMessagePersistence behaviour and broadcast display messages
   defp maybe_save_and_broadcast_message(server_state, message) do
     if server_state.display_message_persistence && server_state.conversation_id do
@@ -2266,6 +2343,22 @@ defmodule Sagents.AgentServer do
       # No persistence configured — just broadcast the message event
       broadcast_event(server_state, {:llm_message, message})
     end
+  end
+
+  # Create and persist an assistant message for the error so it shows up on page reload.
+  defp persist_error_as_display_message(server_state, reason) do
+    error_text = format_error_for_display(reason)
+    error_message = Message.new_assistant!(error_text)
+    maybe_save_and_broadcast_message(server_state, error_message)
+  end
+
+  defp format_error_for_display(%LangChain.LangChainError{message: message})
+       when is_binary(message) do
+    "Sorry, I encountered an error: #{message}"
+  end
+
+  defp format_error_for_display(reason) do
+    "Sorry, I encountered an error: #{inspect(reason)}"
   end
 
   defp broadcast_event(%ServerState{} = server_state, event) do

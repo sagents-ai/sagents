@@ -410,4 +410,105 @@ defmodule Sagents.StateTest do
       assert replaced.tool_call_id == "call_1"
     end
   end
+
+  describe "clean_stale_interrupts/1" do
+    alias LangChain.Message.ToolResult
+
+    test "converts is_interrupt: true tool results to error results" do
+      interrupt_result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "task",
+          content: "'researcher' requires human approval.",
+          is_interrupt: true,
+          interrupt_data: %{type: :subagent_hitl, sub_agent_id: "sa-1"}
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [interrupt_result]})
+      state = State.new!(%{messages: [Message.new_user!("hi"), tool_msg]})
+
+      cleaned = State.clean_stale_interrupts(state)
+
+      tool_message = Enum.find(cleaned.messages, &(&1.role == :tool))
+      [result] = tool_message.tool_results
+
+      assert result.is_interrupt == false
+      assert result.is_error == true
+      assert result.content =~ "interrupted and could not be resumed"
+      assert result.content =~ "sub-agent's work was lost"
+      assert result.tool_call_id == "call_1"
+    end
+
+    test "leaves non-interrupt tool results untouched" do
+      normal_result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "search",
+          content: "search results here"
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [normal_result]})
+      state = State.new!(%{messages: [Message.new_user!("hi"), tool_msg]})
+
+      cleaned = State.clean_stale_interrupts(state)
+
+      tool_message = Enum.find(cleaned.messages, &(&1.role == :tool))
+      [result] = tool_message.tool_results
+
+      assert result.is_interrupt == false
+      assert result.is_error == false
+      assert result.content == [LangChain.Message.ContentPart.text!("search results here")]
+    end
+
+    test "handles mixed interrupt and normal results in same message" do
+      interrupt_result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "task",
+          content: "requires approval",
+          is_interrupt: true
+        })
+
+      normal_result =
+        ToolResult.new!(%{
+          tool_call_id: "call_2",
+          name: "search",
+          content: "found results"
+        })
+
+      tool_msg =
+        Message.new_tool_result!(%{
+          content: nil,
+          tool_results: [interrupt_result, normal_result]
+        })
+
+      state = State.new!(%{messages: [tool_msg]})
+
+      cleaned = State.clean_stale_interrupts(state)
+
+      [cleaned_interrupt, cleaned_normal] =
+        Enum.find(cleaned.messages, &(&1.role == :tool)).tool_results
+
+      # Interrupt result was cleaned
+      assert cleaned_interrupt.is_interrupt == false
+      assert cleaned_interrupt.is_error == true
+      assert cleaned_interrupt.content =~ "interrupted"
+
+      # Normal result was left alone
+      assert cleaned_normal.is_interrupt == false
+      assert cleaned_normal.is_error == false
+    end
+
+    test "is a no-op when no interrupts exist" do
+      state = State.new!(%{messages: [Message.new_user!("hello")]})
+      cleaned = State.clean_stale_interrupts(state)
+      assert cleaned.messages == state.messages
+    end
+
+    test "is a no-op on empty state" do
+      state = State.new!()
+      cleaned = State.clean_stale_interrupts(state)
+      assert cleaned.messages == []
+    end
+  end
 end

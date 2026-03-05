@@ -454,8 +454,10 @@ defmodule Sagents.SubAgent do
         action_requests
       )
 
-    # Add callbacks to chain once at entry point (not in the loop)
-    chain_with_callbacks = maybe_add_callbacks(chain, callbacks)
+    # Reset callbacks before re-adding — the chain from the initial execute()
+    # already has callbacks attached. Without clearing, they'd stack and fire twice.
+    chain_clean = %{chain | callbacks: []}
+    chain_with_callbacks = maybe_add_callbacks(chain_clean, callbacks)
 
     # Use LLMChain to execute tool calls with decisions
     # This handles approve/edit/reject logic and creates tool result messages
@@ -940,6 +942,12 @@ defmodule Sagents.SubAgent do
     # Build middleware stack (filters out SubAgent middleware)
     middleware = subagent_middleware_stack(default_middleware, config.middleware)
 
+    # Append HITL middleware if interrupt_on is configured on this sub-agent.
+    # This must be done explicitly because replace_default_middleware: true
+    # skips build_default_middleware where HITL would normally be added.
+    middleware =
+      Sagents.Middleware.HumanInTheLoop.maybe_append(middleware, config.interrupt_on)
+
     # Create the agent with explicit middleware (replace defaults to avoid duplication)
     Sagents.Agent.new!(
       %{
@@ -948,8 +956,7 @@ defmodule Sagents.SubAgent do
         tools: config.tools,
         middleware: middleware
       },
-      replace_default_middleware: true,
-      interrupt_on: config.interrupt_on
+      replace_default_middleware: true
     )
   end
 

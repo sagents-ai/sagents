@@ -601,10 +601,21 @@ defmodule Sagents.Agent do
          decisions,
          opts
        ) do
+    callbacks = Keyword.get(opts, :callbacks)
+
     # Direct call to SubAgentServer — no chain rebuild, no tool re-execution
     case SubAgentServer.resume(sub_agent_id, decisions) do
       {:ok, result} ->
-        # Sub-agent completed — patch the placeholder tool result with real content
+        # Sub-agent completed — stop its process (no longer needed)
+        SubAgentServer.stop(sub_agent_id)
+
+        # Fire callback before continuing execution so UI updates in real-time
+        fire_callback(callbacks, :on_subagent_resolved, [
+          %{type: :subagent_hitl, tool_call_id: tool_call_id, subagent_type: subagent_type},
+          :completed
+        ])
+
+        # Patch the placeholder tool result with real content
         new_tool_result =
           ToolResult.new!(%{
             tool_call_id: tool_call_id,
@@ -631,7 +642,16 @@ defmodule Sagents.Agent do
         {:interrupt, %{state | interrupt_data: updated_interrupt}, updated_interrupt}
 
       {:error, reason} ->
-        # Sub-agent process may have terminated — create error tool result
+        # Sub-agent failed — stop its process (can't be resumed)
+        SubAgentServer.stop(sub_agent_id)
+
+        # Fire callback before continuing execution so UI updates in real-time
+        fire_callback(callbacks, :on_subagent_resolved, [
+          %{type: :subagent_hitl, tool_call_id: tool_call_id, subagent_type: subagent_type},
+          :failed
+        ])
+
+        # Create error tool result
         error_result =
           ToolResult.new!(%{
             tool_call_id: tool_call_id,
@@ -804,7 +824,19 @@ defmodule Sagents.Agent do
          result <- execute_chain(chain, agent.middleware, agent) do
       case result do
         {:ok, executed_chain} ->
-          extract_state_from_chain(executed_chain, state)
+          case extract_state_from_chain(executed_chain, state) do
+            {:ok, final_state} ->
+              # Check if the last message was cancelled due to a streaming error
+              # (e.g. content filtering). The error is stored in message metadata
+              # by LLMChain.cancel_delta/3.
+              case check_for_streaming_error(final_state) do
+                nil -> {:ok, final_state}
+                error -> {:error, error}
+              end
+
+            {:error, reason} ->
+              {:error, reason}
+          end
 
         {:interrupt, interrupted_chain, interrupt_data} ->
           # Tool calls need human approval - return interrupt with current state
@@ -821,6 +853,13 @@ defmodule Sagents.Agent do
         {:error, reason} ->
           {:error, reason}
       end
+    end
+  end
+
+  defp check_for_streaming_error(%State{messages: messages}) do
+    case List.last(messages) do
+      %Message{status: :cancelled, metadata: %{streaming_error: error}} -> error
+      _ -> nil
     end
   end
 

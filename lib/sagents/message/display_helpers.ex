@@ -163,7 +163,8 @@ defmodule Sagents.Message.DisplayHelpers do
           "tool_call_id" => tool_result.tool_call_id,
           "name" => tool_result.name,
           "content" => content_str,
-          "is_error" => tool_result.is_error
+          "is_error" => tool_result.is_error,
+          "is_interrupt" => Map.get(tool_result, :is_interrupt, false)
         }
       }
     end)

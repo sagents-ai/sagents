@@ -752,34 +752,72 @@ defmodule MyApp.Middleware.InjectCurrentDate do
 end
 ```
 
-This works well for data that is stable for the agent's lifetime: timezone, user name, feature flags, configuration values, etc.
+This works well for data that is stable for the agent's lifetime: timezone, feature flags, configuration values, etc.
 
-### User-Specific System Prompts
+### User Context via `before_model` (Recommended)
 
-A common pattern is loading user-specific information into the system prompt:
+User-controlled content (names, preferences, etc.) should be injected into **user messages**, not the system prompt. Putting user-controlled strings in the system prompt creates a prompt injection vector — a user could set their name to something like `"Ignore all previous instructions..."` and hijack the agent's behavior.
+
+Instead, use `before_model/2` to prepend user context to the first user message:
 
 ```elixir
 defmodule MyApp.Middleware.UserContext do
   @behaviour Sagents.Middleware
 
+  alias LangChain.Message.ContentPart
+
   @impl true
   def init(opts) do
-    {:ok, %{user_name: Keyword.fetch!(opts, :name)}}
+    scope = Keyword.get(opts, :scope)
+    first_name = get_in(scope, [Access.key(:user), Access.key(:first_name)])
+    {:ok, %{first_name: first_name}}
   end
 
   @impl true
-  def system_prompt(config) do
-    "You are talking to #{config.user_name}."
+  def before_model(state, config) do
+    if config.first_name do
+      {:ok, maybe_prepend_user_context(state, config.first_name)}
+    else
+      {:ok, state}
+    end
+  end
+
+  # Only prepend to the first user message, and only when it's the last
+  # message (just added). On subsequent turns the first user message is
+  # no longer last, so it won't be modified again — preserving prompt caching.
+  defp maybe_prepend_user_context(state, first_name) do
+    last = List.last(state.messages)
+
+    if last && last.role == :user && !has_prior_user_message?(state.messages) do
+      context = "<user_information>The user's first name is #{first_name}.</user_information>\n\n"
+      updated = %{last | content: prepend_context(last.content, context)}
+      %{state | messages: List.replace_at(state.messages, -1, updated)}
+    else
+      state
+    end
+  end
+
+  # Message content can be a string or a list of ContentPart structs.
+  # For lists, insert a new text part rather than mutating an existing one.
+  defp prepend_context(content, text) when is_binary(content), do: text <> content
+  defp prepend_context(parts, text) when is_list(parts),
+    do: [ContentPart.text!(text) | parts]
+  defp prepend_context(nil, text), do: text
+
+  defp has_prior_user_message?(messages) do
+    messages |> Enum.drop(-1) |> Enum.any?(&(&1.role == :user))
   end
 end
 
 # In your Factory:
-{MyApp.Middleware.UserContext, [name: user.display_name]}
+{MyApp.Middleware.UserContext, [scope: current_scope]}
 ```
+
+This approach keeps user-controlled content in a clearly delimited XML tag within the user message, where the model can distinguish it from instructions.
 
 ### Per-Request Dynamic Content
 
-For truly per-request data (data that changes on every LLM call), use `before_model/2` to modify the most recent user message. Note that modifying older user messages breaks prompt caching for those messages, so prefer the system prompt approach when possible.
+For truly per-request data (data that changes on every LLM call), use `before_model/2` to modify the most recent user message. Note that modifying older user messages breaks prompt caching for those messages, so only modify the latest message when possible.
 
 ```elixir
 @impl true

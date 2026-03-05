@@ -166,7 +166,8 @@ defmodule Sagents.Middleware.HumanInTheLoopTest do
       assert action == %{
                tool_call_id: "call_123",
                tool_name: "write_file",
-               arguments: %{"path" => "test.txt", "content" => "Hello"}
+               arguments: %{"path" => "test.txt", "content" => "Hello"},
+               display_text: nil
              }
 
       assert review_configs["write_file"] == %{allowed_decisions: [:approve, :edit, :reject]}
@@ -215,13 +216,15 @@ defmodule Sagents.Middleware.HumanInTheLoopTest do
       assert Enum.at(actions, 0) == %{
                tool_call_id: "call_1",
                tool_name: "write_file",
-               arguments: %{"path" => "file1.txt"}
+               arguments: %{"path" => "file1.txt"},
+               display_text: nil
              }
 
       assert Enum.at(actions, 1) == %{
                tool_call_id: "call_2",
                tool_name: "delete_file",
-               arguments: %{"path" => "old.txt"}
+               arguments: %{"path" => "old.txt"},
+               display_text: nil
              }
 
       assert review_configs["write_file"] == %{allowed_decisions: [:approve, :reject]}
