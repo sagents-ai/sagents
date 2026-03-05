@@ -74,7 +74,7 @@ defmodule Sagents.SubAgentServerTest do
         |> Map.put(:needs_response, false)
 
       LLMChain
-      |> stub(:run, fn _chain ->
+      |> stub(:run, fn _chain, _opts ->
         {:ok, updated_chain}
       end)
 
@@ -104,7 +104,7 @@ defmodule Sagents.SubAgentServerTest do
         |> Map.put(:needs_response, false)
 
       LLMChain
-      |> expect(:run, fn _chain ->
+      |> expect(:run, fn _chain, _opts ->
         {:ok, updated_chain}
       end)
 
@@ -124,7 +124,7 @@ defmodule Sagents.SubAgentServerTest do
 
       # Mock LLMChain.run to return error with correct format
       LLMChain
-      |> expect(:run, fn chain ->
+      |> expect(:run, fn chain, _opts ->
         {:error, chain, :something_went_wrong}
       end)
 
@@ -186,7 +186,7 @@ defmodule Sagents.SubAgentServerTest do
         |> Map.put(:needs_response, false)
 
       LLMChain
-      |> stub(:run, fn _chain ->
+      |> stub(:run, fn _chain, _opts ->
         {:ok, updated_chain}
       end)
 
@@ -229,7 +229,7 @@ defmodule Sagents.SubAgentServerTest do
         |> Map.put(:needs_response, false)
 
       LLMChain
-      |> stub(:run, fn _chain ->
+      |> stub(:run, fn _chain, _opts ->
         {:ok, updated_chain}
       end)
 
@@ -262,7 +262,7 @@ defmodule Sagents.SubAgentServerTest do
 
       # Mock LLMChain.run to return error with correct format
       LLMChain
-      |> expect(:run, fn chain ->
+      |> expect(:run, fn chain, _opts ->
         {:error, chain, :resume_failed}
       end)
 
@@ -302,7 +302,7 @@ defmodule Sagents.SubAgentServerTest do
         |> Map.put(:needs_response, false)
 
       LLMChain
-      |> expect(:run, fn _chain ->
+      |> expect(:run, fn _chain, _opts ->
         # Simulate LLM calls and work
         Process.sleep(100)
         {:ok, updated_chain}
@@ -348,7 +348,7 @@ defmodule Sagents.SubAgentServerTest do
         |> Map.put(:needs_response, false)
 
       LLMChain
-      |> stub(:run, fn _chain ->
+      |> stub(:run, fn _chain, _opts ->
         # Simulate work during resume
         Process.sleep(100)
         {:ok, updated_chain}
@@ -363,6 +363,111 @@ defmodule Sagents.SubAgentServerTest do
       assert elapsed >= 100
       assert is_binary(result)
       assert result == "Done"
+    end
+  end
+
+  describe "execute/1 - until_tool 3-tuple" do
+    test "returns {:ok, result, extra} when SubAgent returns 3-tuple with extra data" do
+      agent = create_test_agent()
+      subagent = create_subagent(agent: agent)
+
+      # Set until_tool on the subagent to trigger 3-tuple return
+      subagent = %{subagent | until_tool: "finish_tool"}
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
+
+      # Mock LLMChain.run to return 3-tuple (until_tool completion)
+      assistant_message = Message.new_assistant!(%{content: "Task done via until_tool"})
+
+      updated_chain =
+        subagent.chain
+        |> Map.put(:messages, subagent.chain.messages ++ [assistant_message])
+        |> Map.put(:last_message, assistant_message)
+        |> Map.put(:needs_response, false)
+
+      extra_data = %{tool_name: "finish_tool", tool_args: %{"result" => "42"}}
+
+      LLMChain
+      |> stub(:run, fn _chain, _opts ->
+        {:ok, updated_chain, extra_data}
+      end)
+
+      assert {:ok, result, extra} = SubAgentServer.execute(subagent.id)
+      assert is_binary(result)
+      assert result == "Task done via until_tool"
+      assert extra == extra_data
+      assert SubAgentServer.get_status(subagent.id) == :completed
+    end
+
+    test "returns {:ok, result} without extra when SubAgent returns normal 2-tuple" do
+      agent = create_test_agent()
+      subagent = create_subagent(agent: agent)
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
+
+      # Mock LLMChain.run to return normal 2-tuple
+      assistant_message = Message.new_assistant!(%{content: "Normal completion"})
+
+      updated_chain =
+        subagent.chain
+        |> Map.put(:messages, subagent.chain.messages ++ [assistant_message])
+        |> Map.put(:last_message, assistant_message)
+        |> Map.put(:needs_response, false)
+
+      LLMChain
+      |> stub(:run, fn _chain, _opts ->
+        {:ok, updated_chain}
+      end)
+
+      assert {:ok, result} = SubAgentServer.execute(subagent.id)
+      assert result == "Normal completion"
+    end
+  end
+
+  describe "resume/2 - until_tool 3-tuple" do
+    test "returns {:ok, result, extra} when SubAgent resume returns 3-tuple" do
+      agent = create_test_agent()
+      subagent = create_subagent(agent: agent)
+
+      # Set until_tool and interrupted status
+      interrupted_subagent = %{
+        subagent
+        | status: :interrupted,
+          until_tool: "finish_tool",
+          interrupt_data: %{action_requests: [], hitl_tool_call_ids: []}
+      }
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: interrupted_subagent)
+
+      # Mock LLMChain.execute_tool_calls_with_decisions
+      LLMChain
+      |> stub(:execute_tool_calls_with_decisions, fn chain, _tool_calls, _decisions ->
+        chain
+      end)
+
+      # Mock LLMChain.run to return 3-tuple (until_tool completion after resume)
+      assistant_message =
+        Message.new_assistant!(%{content: "Resumed and completed via until_tool"})
+
+      updated_chain =
+        interrupted_subagent.chain
+        |> Map.put(:messages, interrupted_subagent.chain.messages ++ [assistant_message])
+        |> Map.put(:last_message, assistant_message)
+        |> Map.put(:needs_response, false)
+
+      extra_data = %{tool_name: "finish_tool", tool_args: %{"answer" => "done"}}
+
+      LLMChain
+      |> stub(:run, fn _chain, _opts ->
+        {:ok, updated_chain, extra_data}
+      end)
+
+      decisions = [%{type: :approve}]
+      assert {:ok, result, extra} = SubAgentServer.resume(interrupted_subagent.id, decisions)
+      assert is_binary(result)
+      assert result == "Resumed and completed via until_tool"
+      assert extra == extra_data
+      assert SubAgentServer.get_status(interrupted_subagent.id) == :completed
     end
   end
 end
