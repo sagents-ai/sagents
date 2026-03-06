@@ -43,7 +43,7 @@ Add `sagents` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:sagents, "~> 0.2.1"}
+    {:sagents, "~> 0.3.0"}
   ]
 end
 ```
