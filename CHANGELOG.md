@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.3.0
+
+Adds structured agent completion (`until_tool`), interruptible tools for improved HITL workflows, middleware-based observability callbacks, and custom execution modes. Requires LangChain `~> 0.6.1`.
+
+### Added
+- `until_tool` option for structured agent completion — agents loop until a specific target tool is called, returning the tool result as a 3-tuple `{:ok, state, %ToolResult{}}`. Works with both `Agent.execute/3` and SubAgent, including HITL interrupt/resume cycles [#3](https://github.com/sagents-ai/sagents/pull/3)
+- `callbacks/1` optional behaviour callback on `Middleware` — middleware can now declare LangChain-compatible callback handler maps for observability (OpenTelemetry, metrics, etc.), composable and self-contained within middleware [#6](https://github.com/sagents-ai/sagents/pull/6)
+- `Middleware.get_callbacks/1` and `Middleware.collect_callbacks/1` for extracting and aggregating middleware callback maps [#6](https://github.com/sagents-ai/sagents/pull/6)
+- `mode` field on `Agent` — allows specifying a custom `LLMChain.Mode` implementation instead of the default `Sagents.Modes.AgentExecution` [#17](https://github.com/sagents-ai/sagents/pull/17)
+- Tool interruption and resumption at the base Agent level, fixing SubAgent interrupt/resume flows [#24](https://github.com/sagents-ai/sagents/pull/24)
+- `Mode.Steps.continue_or_done_safe/4` — enforces the `until_tool` contract by returning an error if the LLM stops without calling the target tool [#3](https://github.com/sagents-ai/sagents/pull/3)
+- Observability guide documentation [#19](https://github.com/sagents-ai/sagents/pull/19)
+- Middleware documentation [#24](https://github.com/sagents-ai/sagents/pull/24)
+- Detection and warning when agents use built-in lower-level LangChain run modes that bypass Sagents HITL/state propagation [#3](https://github.com/sagents-ai/sagents/pull/3)
+
+### Changed
+- SubAgent execution refactored from custom `execute_chain_with_hitl/2` to unified `LLMChain.run/2` via `AgentExecution` mode — same pipeline as Agent [#3](https://github.com/sagents-ai/sagents/pull/3)
+- `AgentServer.execute_agent/2` and `resume_agent/2` now combine PubSub callbacks with middleware callbacks and handle 3-tuple returns from `Agent.execute/3` [#6](https://github.com/sagents-ai/sagents/pull/6), [#3](https://github.com/sagents-ai/sagents/pull/3)
+- `build_llm_callbacks` renamed to `build_pubsub_callbacks` to clarify its purpose [#6](https://github.com/sagents-ai/sagents/pull/6)
+- Requires `langchain ~> 0.6.1` (up from `~> 0.5.3`) for interruptible tool support [#24](https://github.com/sagents-ai/sagents/pull/24)
+- Updated `mix sagents.setup` template generators for new patterns [#24](https://github.com/sagents-ai/sagents/pull/24)
+
+### Fixed
+- `AgentServer.agent_info/1` crashing with `KeyError: key :messages not found` — now uses `get_state/1` instead of `export_state/1` [#25](https://github.com/sagents-ai/sagents/pull/25)
+
 ## v0.2.1
 
 Agent execution now uses LangChain's new customizable run mode system. The duplicated execution loops in `Agent` (`execute_chain_with_state_updates` and `execute_chain_with_hitl`) have been replaced by a single composable mode — `Sagents.Modes.AgentExecution` — built from pipe-friendly step functions.
