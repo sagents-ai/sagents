@@ -720,7 +720,7 @@ defmodule Sagents.AgentServer do
         nil
 
       pid ->
-        state = export_state(agent_id)
+        state = get_state(agent_id)
         status = get_status(agent_id)
 
         %{

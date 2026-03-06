@@ -145,6 +145,37 @@ defmodule Sagents.AgentServerTest do
     end
   end
 
+  describe "agent_info/1" do
+    test "returns info map with message_count and has_interrupt" do
+      agent = create_test_agent(agent_id: "test_agent")
+      agent_id = agent.agent_id
+
+      initial_state =
+        State.new!(%{agent_id: "test_agent", messages: [Message.new_user!("Hello")]})
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      info = AgentServer.agent_info(agent_id)
+
+      assert info.agent_id == agent_id
+      assert is_pid(info.pid)
+      assert info.status == :idle
+      assert info.message_count == 1
+      assert info.has_interrupt == false
+      assert info.state == initial_state
+    end
+
+    test "returns nil for non-existent agent" do
+      assert AgentServer.agent_info("non-existent-agent") == nil
+    end
+  end
+
   describe "get_info/1" do
     test "returns comprehensive server info" do
       agent = create_test_agent()
