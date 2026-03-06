@@ -233,7 +233,7 @@ defmodule Sagents.Middleware.SubAgentTest do
 
       # Mock LLMChain.run to verify metadata was inherited
       LLMChain
-      |> stub(:run, fn chain ->
+      |> stub(:run, fn chain, _mode_opts ->
         subagent_state = chain.custom_context.state
         assert subagent_state.metadata["user_id"] == "usr-123"
         assert subagent_state.metadata["organization_id"] == "org-456"
@@ -763,7 +763,7 @@ defmodule Sagents.Middleware.SubAgentTest do
     } do
       # Mock LLMChain.run to capture the chain and verify metadata
       LLMChain
-      |> stub(:run, fn chain ->
+      |> stub(:run, fn chain, _mode_opts ->
         # Verify the subagent's state has inherited metadata
         subagent_state = chain.custom_context.state
         assert subagent_state.metadata["user_id"] == "usr-123"
@@ -1546,7 +1546,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       test_pid = self()
 
       LLMChain
-      |> stub(:run, fn chain ->
+      |> stub(:run, fn chain, _mode_opts ->
         # Inside the sub-agent's LLMChain.run, read the AgentContext
         # that was set in SubAgentServer.init (which receives child_context
         # from fork_with_middleware). Since fork_with_middleware reads from
