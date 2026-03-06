@@ -6,12 +6,14 @@ A sage is a person who has attained wisdom and is often characterized by sound j
 
 ## Key Features
 
-- **Human-In-The-Loop (HITL)** - Customizable permission system that pauses execution for approval on sensitive operations
+- **Human-In-The-Loop (HITL)** - Customizable permission system that pauses execution for approval on sensitive operations, including parallel tool calls where each action can be individually approved/rejected. Works across both main agents and SubAgents — interrupts propagate up to the parent for approval and resume seamlessly
+- **Composable Execution Modes** - Agent run loops are explicit Elixir pipelines built from reusable steps. Mix and match built-in steps (`call_llm`, `execute_tools`, `check_pre_tool_hitl`, `propagate_state`, etc.) or write your own. Different agents can use different modes in the same application
+- **Structured Agent Completion (`until_tool`)** - Force agents to loop until they call a specific tool, returning the result as a clean `{:ok, state, %ToolResult{}}` tuple. No more hoping the LLM follows your output format — get structured data you can pattern match on
 - **SubAgents** - Delegate complex tasks to specialized child agents for efficient context management and parallel execution
 - **GenServer Architecture** - Each agent runs as a supervised OTP process with automatic lifecycle management
 - **Phoenix.Presence Integration** - Smart resource management that knows when to shut down idle agents
 - **PubSub Real-Time Events** - Stream agent state, messages, and events to multiple LiveView subscribers
-- **Middleware System** - Extensible plugin architecture for adding capabilities to agents
+- **Middleware System** - Extensible plugin architecture for adding capabilities to agents, including composable observability callbacks for OpenTelemetry, metrics, or custom logging
 - **Cluster-Aware Distribution** - Optional Horde-based distribution for running agents across a cluster of nodes with automatic state migration, or run locally on a single node (the default)
 - **State Persistence** - Save and restore agent conversations via optional behaviour modules for agent state and display messages
 - **Virtual Filesystem** - Isolated, in-memory file operations with optional persistence
@@ -201,6 +203,25 @@ decisions = [
 :ok = AgentServer.resume("my-agent-1", decisions)
 ```
 
+### 5. Structured Completion with `until_tool`
+
+Force an agent to return structured output by calling a specific tool:
+
+```elixir
+# Agent loops until "deliver_answer" is called, then returns the tool result
+case Agent.execute(agent, state, until_tool: "deliver_answer") do
+  {:ok, final_state, %ToolResult{} = result} ->
+    # Structured data from the target tool
+    IO.inspect(result.content)
+
+  {:error, reason} ->
+    # LLM stopped without calling the target tool
+    IO.puts("Error: #{inspect(reason)}")
+end
+```
+
+This works through HITL interrupt/resume cycles and with SubAgents — the contract is enforced at every level.
+
 ## Provided Middleware
 
 Sagents includes several pre-built middleware components:
@@ -339,6 +360,73 @@ defmodule MyApp.CustomMiddleware do
   end
 end
 ```
+
+## Custom Execution Modes
+
+Agent execution in Sagents is an explicit pipeline, not a black box. The default mode composes built-in steps from both LangChain and Sagents:
+
+```elixir
+# This is the entire default run loop (Sagents.Modes.AgentExecution)
+defp do_run(chain, opts) do
+  {:continue, chain}
+  |> call_llm()
+  |> check_max_runs(Keyword.put_new(opts, :max_runs, 50))
+  |> check_pause(opts)
+  |> check_pre_tool_hitl(opts)
+  |> execute_tools()
+  |> propagate_state(opts)
+  |> check_tool_interrupts(opts)
+  |> maybe_check_until_tool(opts)
+  |> continue_or_done_safe(&do_run/2, opts)
+end
+```
+
+Every step follows a simple contract: `{:continue, chain}` means keep going, any other tuple (`:ok`, `:error`, `:interrupt`, `:pause`) is terminal and passes through unchanged. Write your own steps using the same pattern and drop them into the pipeline.
+
+### Creating a Custom Mode
+
+```elixir
+defmodule MyApp.Modes.Simple do
+  @behaviour LangChain.Chains.LLMChain.Mode
+  import LangChain.Chains.LLMChain.Mode.Steps
+
+  @impl true
+  def run(chain, opts) do
+    chain = ensure_mode_state(chain)
+
+    {:continue, chain}
+    |> call_llm()
+    |> execute_tools()
+    |> check_max_runs(opts)
+    |> continue_or_done(&run/2, opts)
+  end
+end
+```
+
+Assign a mode per agent — one agent can be a strict tool-caller, another fully conversational:
+
+```elixir
+{:ok, agent} = Agent.new(%{
+  model: model,
+  mode: MyApp.Modes.Simple,
+  # ...
+})
+```
+
+### Available Built-In Steps
+
+| Step | Source | What it does |
+|------|--------|-------------|
+| `call_llm()` | LangChain | Single LLM call, tracks run count |
+| `execute_tools()` | LangChain | Execute pending tool calls |
+| `check_max_runs(opts)` | LangChain | Safety limit on LLM calls |
+| `check_pause(opts)` | LangChain | Infrastructure drain / node migration |
+| `check_until_tool(opts)` | LangChain | Terminate when target tool is called |
+| `check_tool_interrupts(opts)` | LangChain | Detect tool-level interrupts |
+| `continue_or_done(run_fn, opts)` | LangChain | Loop or return |
+| `check_pre_tool_hitl(opts)` | Sagents | HITL approval check before tool execution |
+| `propagate_state(opts)` | Sagents | Merge tool result state deltas back |
+| `continue_or_done_safe(run_fn, opts)` | Sagents | Loop or return, with `until_tool` enforcement |
 
 ## Quick Setup
 
@@ -721,6 +809,7 @@ See [Conversations Architecture](docs/conversations_architecture.md) for the com
 - [Lifecycle Management](docs/lifecycle.md) - Process supervision, timeouts, and shutdown
 - [PubSub & Presence](docs/pubsub_presence.md) - Real-time events and viewer tracking
 - [Middleware Development](docs/middleware.md) - Building custom middleware
+- [Observability](docs/observability.md) - Middleware-based callbacks for OpenTelemetry, metrics, and logging
 - [State Persistence](docs/persistence.md) - Saving and restoring conversations
 - [Middleware Messaging](docs/middleware_messaging.md) - Async messaging between middleware and AgentServer
 - [Architecture Overview](docs/architecture.md) - System design and data flow
