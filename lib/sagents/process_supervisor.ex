@@ -21,6 +21,13 @@ defmodule Sagents.ProcessSupervisor do
         distribution_strategy: Horde.UniformDistribution
   """
 
+  @compile {:no_warn_undefined,
+            [
+              Horde.DynamicSupervisor,
+              Sagents.Horde.AgentsSupervisorImpl,
+              Sagents.Horde.FileSystemSupervisorImpl
+            ]}
+
   @agent_supervisor_name Sagents.AgentsDynamicSupervisor
   @filesystem_supervisor_name Sagents.FileSystem.FileSystemSupervisor
 

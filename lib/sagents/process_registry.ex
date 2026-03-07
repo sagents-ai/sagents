@@ -21,6 +21,8 @@ defmodule Sagents.ProcessRegistry do
   so it automatically discovers other nodes in the Erlang cluster.
   """
 
+  @compile {:no_warn_undefined, [Horde.Registry, Sagents.Horde.RegistryImpl]}
+
   @registry_name Sagents.Registry
 
   # ---------------------------------------------------------------------------
