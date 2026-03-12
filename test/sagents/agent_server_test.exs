@@ -77,6 +77,25 @@ defmodule Sagents.AgentServerTest do
 
       assert AgentServer.get_status(agent_id) == :idle
     end
+
+    test "threads state returned from on_server_start middleware" do
+      agent =
+        create_test_agent(
+          middleware: [{Sagents.TestOnServerStartMetadataMiddleware, [key: "scope", value: 123]}]
+        )
+
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      state = AgentServer.get_state(agent_id)
+      assert State.get_metadata(state, "scope") == 123
+    end
   end
 
   describe "get_state/1" do
