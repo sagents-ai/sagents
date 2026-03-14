@@ -87,6 +87,7 @@ defmodule Sagents.MixProject do
       groups_for_modules: [
         "Core Agent": [
           Sagents.Agent,
+          Sagents.AgentContext,
           Sagents.AgentServer,
           Sagents.AgentSupervisor,
           Sagents.State,

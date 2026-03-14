@@ -298,6 +298,49 @@ Parent agent calls spawn_subagent tool
 └───────────────────────────────────────┘
 ```
 
+### Context Propagation
+
+`AgentContext` provides process-local context that flows through the entire agent hierarchy without
+threading it through every function call:
+
+```
+Application (LiveView / Controller / Job)
+        │
+        │  agent_context: %{tenant_id: 42, trace_id: "abc"}
+        ▼
+┌───────────────────────────────────────┐
+│  AgentSupervisor.start_link/1         │
+│  Forwards :agent_context to children  │
+└───────────────────────────────────────┘
+        │
+        ▼
+┌───────────────────────────────────────┐
+│  AgentServer.init/1                   │
+│  AgentContext.init(context)           │
+│  → stored in process dictionary       │
+└───────────────────────────────────────┘
+        │
+        │  Task.async (inherits PD)
+        ▼
+┌───────────────────────────────────────┐
+│  Agent.execute / Tool functions       │
+│  AgentContext.get()                   │
+│  → %{tenant_id: 42, trace_id: "abc"} │
+└───────────────────────────────────────┘
+        │
+        │  AgentContext.fork/1 (snapshot)
+        ▼
+┌───────────────────────────────────────┐
+│  SubAgentServer.init/1                │
+│  AgentContext.init(forked_context)    │
+│  → same context in child process      │
+└───────────────────────────────────────┘
+```
+
+Context is stored in the process dictionary for zero-cost reads. At process boundaries
+(spawning sub-agents), `AgentContext.fork/1` creates a snapshot that is explicitly passed
+to the child. See `Sagents.AgentContext` for the full API.
+
 ## State Persistence
 
 ### What Gets Persisted
