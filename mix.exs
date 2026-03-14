@@ -157,7 +157,8 @@ defmodule Sagents.MixProject do
       "docs/middleware.md",
       "docs/middleware_messaging.md",
       "docs/observability.md",
-      "docs/persistence.md"
+      "docs/persistence.md",
+      "docs/filesystem_setup.md"
     ]
   end
 

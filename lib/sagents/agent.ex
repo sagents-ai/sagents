@@ -10,7 +10,7 @@ defmodule Sagents.Agent do
       # Create agent with default middleware
       {:ok, agent} = Agent.new(%{
         agent_id: "my-agent-1",
-        model: ChatAnthropic.new!(%{model: "claude-3-5-sonnet-20241022"}),
+        model: ChatAnthropic.new!(%{model: "claude-sonnet-4-6"}),
         base_system_prompt: "You are a helpful assistant."
       })
 
@@ -146,7 +146,7 @@ defmodule Sagents.Agent do
       # Basic agent
       {:ok, agent} = Agent.new(%{
         agent_id: "basic-agent",
-        model: ChatAnthropic.new!(%{model: "claude-3-5-sonnet-20241022"}),
+        model: ChatAnthropic.new!(%{model: "claude-sonnet-4-6"}),
         base_system_prompt: "You are helpful."
       })
 

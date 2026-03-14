@@ -72,7 +72,7 @@ defmodule Sagents.TestingHelpers do
   # Helper to create a mock model
   def mock_model do
     ChatAnthropic.new!(%{
-      model: "claude-3-5-sonnet-20241022",
+      model: "claude-sonnet-4-6",
       api_key: "test_key"
     })
   end
@@ -137,7 +137,7 @@ defmodule Sagents.TestingHelpers do
     # Create a minimal test agent
     model =
       ChatAnthropic.new!(%{
-        model: "claude-3-5-sonnet-20241022",
+        model: "claude-sonnet-4-6",
         api_key: "test_key"
       })
 

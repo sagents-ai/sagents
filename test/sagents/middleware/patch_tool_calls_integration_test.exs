@@ -13,7 +13,7 @@ defmodule PatchToolCallsIntegrationTest do
   describe "integration with Agent" do
     setup do
       # Create a simple model for testing (won't actually call it)
-      model = ChatAnthropic.new!(%{model: "claude-3-5-sonnet-20241022", stream: false})
+      model = ChatAnthropic.new!(%{model: "claude-sonnet-4-6", stream: false})
 
       {:ok, agent} =
         Agent.new(%{
@@ -116,7 +116,7 @@ defmodule PatchToolCallsIntegrationTest do
     end
 
     test "works with custom middleware stack", _context do
-      model = ChatAnthropic.new!(%{model: "claude-3-5-sonnet-20241022", stream: false})
+      model = ChatAnthropic.new!(%{model: "claude-sonnet-4-6", stream: false})
 
       {:ok, agent} =
         Agent.new(%{

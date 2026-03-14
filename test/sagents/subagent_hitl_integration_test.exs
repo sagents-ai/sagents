@@ -46,7 +46,7 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
 
   defp test_model do
     ChatAnthropic.new!(%{
-      model: "claude-3-5-sonnet-20241022",
+      model: "claude-sonnet-4-6",
       api_key: "test_key"
     })
   end
