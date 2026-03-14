@@ -18,7 +18,7 @@ defmodule Sagents do
 
       # Create an agent
       {:ok, agent} = Sagents.new(
-        model: ChatAnthropic.new!(%{model: "claude-3-5-sonnet-20241022"}),
+        model: ChatAnthropic.new!(%{model: "claude-sonnet-4-6"}),
         system_prompt: "You are a helpful assistant."
       )
 
@@ -122,7 +122,7 @@ defmodule Sagents do
 
       # Basic agent
       {:ok, agent} = Sagents.new(
-        model: ChatAnthropic.new!(%{model: "claude-3-5-sonnet-20241022"}),
+        model: ChatAnthropic.new!(%{model: "claude-sonnet-4-6"}),
         system_prompt: "You are helpful."
       )
 

@@ -15,7 +15,7 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
 
   defp create_test_model do
     ChatAnthropic.new!(%{
-      model: "claude-3-5-sonnet-20241022",
+      model: "claude-sonnet-4-6",
       temperature: 0,
       stream: false
     })
