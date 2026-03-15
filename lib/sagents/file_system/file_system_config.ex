@@ -12,6 +12,10 @@ defmodule Sagents.FileSystem.FileSystemConfig do
   - `:persistence_module` - Module implementing the Persistence behaviour
   - `:debounce_ms` - Milliseconds of inactivity before auto-persist (default: 5000)
   - `:readonly` - Whether files in this directory are read-only (default: false)
+  - `:default` - When true, this config acts as a fallback for any file that doesn't
+    match a specific `base_directory` config (default: false). When `default: true`,
+    `base_directory` is optional — if omitted, the sentinel value `"__default__"` is
+    used internally as an identifier.
   - `:storage_opts` - Backend-specific options passed to persistence module
 
   ## Examples
@@ -40,6 +44,13 @@ defmodule Sagents.FileSystem.FileSystemConfig do
         debounce_ms: 30000,
         storage_opts: [bucket: "shared-assets", region: "us-east-1"]
       })
+
+      # Default catch-all config (no base_directory needed)
+      {:ok, config} = FileSystemConfig.new(%{
+        default: true,
+        persistence_module: MyApp.DBPersistence,
+        storage_opts: [repo: MyApp.Repo]
+      })
   """
 
   use Ecto.Schema
@@ -54,6 +65,7 @@ defmodule Sagents.FileSystem.FileSystemConfig do
     field :persistence_module, :any, virtual: true
     field :debounce_ms, :integer, default: 5000
     field :readonly, :boolean, default: false
+    field :default, :boolean, default: false
     field :storage_opts, :any, virtual: true, default: []
   end
 
@@ -62,6 +74,7 @@ defmodule Sagents.FileSystem.FileSystemConfig do
           persistence_module: module(),
           debounce_ms: non_neg_integer(),
           readonly: boolean(),
+          default: boolean(),
           storage_opts: keyword()
         }
 
@@ -74,13 +87,15 @@ defmodule Sagents.FileSystem.FileSystemConfig do
 
   ## Required Fields
 
-  - `:base_directory` - Virtual directory path (without leading/trailing slashes)
+  - `:base_directory` - Virtual directory path (without leading/trailing slashes).
+    Optional when `default: true` — if omitted, the sentinel `"__default__"` is used internally.
   - `:persistence_module` - Module implementing Persistence behaviour
 
   ## Optional Fields
 
   - `:debounce_ms` - Auto-persist delay in milliseconds (default: 5000)
   - `:readonly` - Read-only flag (default: false)
+  - `:default` - When true, acts as a catch-all for unmatched paths (default: false)
   - `:storage_opts` - Backend-specific options (default: [])
 
   ## Returns
@@ -134,9 +149,10 @@ defmodule Sagents.FileSystem.FileSystemConfig do
   """
   def changeset(config \\ %FileSystemConfig{}, attrs) do
     config
-    |> cast(attrs, [:base_directory, :debounce_ms, :readonly])
+    |> cast(attrs, [:base_directory, :debounce_ms, :readonly, :default])
     |> put_persistence_module(attrs)
     |> put_storage_opts(attrs)
+    |> maybe_set_default_base_directory()
     |> validate_required([:base_directory, :persistence_module])
     |> validate_base_directory()
     |> validate_number(:debounce_ms, greater_than_or_equal_to: 0)
@@ -159,12 +175,29 @@ defmodule Sagents.FileSystem.FileSystemConfig do
     put_change(changeset, :storage_opts, [])
   end
 
+  # When default: true and no base_directory provided, set sentinel value.
+  # Ecto cast converts "" to nil for string fields, so we only need to check for nil.
+  defp maybe_set_default_base_directory(changeset) do
+    is_default = get_field(changeset, :default) || false
+    has_base_dir = get_field(changeset, :base_directory)
+
+    if is_default && is_nil(has_base_dir) do
+      put_change(changeset, :base_directory, "__default__")
+    else
+      changeset
+    end
+  end
+
   defp validate_base_directory(changeset) do
-    changeset
-    |> validate_format(:base_directory, ~r/^[^\/]/, message: "must not start with /")
-    |> validate_format(:base_directory, ~r/[^\/]$/, message: "must not end with /")
-    |> validate_format(:base_directory, ~r/^[^.]+$/, message: "must not contain .")
-    |> validate_length(:base_directory, min: 1)
+    if get_field(changeset, :base_directory) == "__default__" do
+      changeset
+    else
+      changeset
+      |> validate_format(:base_directory, ~r/^[^\/]/, message: "must not start with /")
+      |> validate_format(:base_directory, ~r/[^\/]$/, message: "must not end with /")
+      |> validate_format(:base_directory, ~r/^[^.]+$/, message: "must not contain .")
+      |> validate_length(:base_directory, min: 1)
+    end
   end
 
   defp validate_persistence_module(changeset) do
@@ -223,6 +256,12 @@ defmodule Sagents.FileSystem.FileSystemConfig do
       [path: "/data", scope_key: {:agent, "agent-123"}, base_directory: "user_files"]
   """
   @spec build_storage_opts(t(), tuple()) :: keyword()
+  def build_storage_opts(%FileSystemConfig{default: true} = config, scope_key)
+      when is_tuple(scope_key) do
+    config.storage_opts
+    |> Keyword.put(:scope_key, scope_key)
+  end
+
   def build_storage_opts(%FileSystemConfig{} = config, scope_key) when is_tuple(scope_key) do
     config.storage_opts
     |> Keyword.put(:scope_key, scope_key)

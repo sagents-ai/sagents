@@ -571,11 +571,15 @@ defmodule Sagents.FileSystem.FileSystemState do
     scope_key
   end
 
-  # Find the persistence config that matches a given path
+  # Find the persistence config that matches a given path.
+  # Checks specific (non-default) configs first, then falls back to the default config.
   defp find_config_for_path(state, path) do
     Enum.find_value(state.persistence_configs, fn {_base_dir, config} ->
-      if FileSystemConfig.matches_path?(config, path), do: config
-    end)
+      if !config.default && FileSystemConfig.matches_path?(config, path), do: config
+    end) ||
+      Enum.find_value(state.persistence_configs, fn {_base_dir, config} ->
+        if config.default, do: config
+      end)
   end
 
   defp schedule_persist(%FileSystemState{} = state, path, config) do

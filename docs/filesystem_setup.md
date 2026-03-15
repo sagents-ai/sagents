@@ -273,6 +273,28 @@ Configure it in place of `Disk`:
 
 The `storage_opts` keyword list is passed through to every persistence callback, so you can include whatever context your implementation needs (`user_id`, `tenant_id`, S3 bucket name, etc.).
 
+## Default Configs — Catch-All Persistence
+
+When you want a single persistence backend to handle **all** file paths (not just a specific directory), set `default: true` on your `FileSystemConfig`. This makes it a catch-all that matches any path not claimed by a more specific config.
+
+With `default: true`, the `base_directory` field is **optional** — if omitted, a sentinel value is used internally. This is useful when all files should go to one backend regardless of path:
+
+```elixir
+# All files persisted to DB, no directory restriction
+{:ok, fs_config} = FileSystemConfig.new(%{
+  default: true,
+  persistence_module: MyApp.FileSystem.DBPersistence,
+  debounce_ms: 5_000,
+  storage_opts: [user_id: user_id]
+})
+
+{:ok, _pid} = FileSystem.ensure_filesystem({:user, user_id}, [fs_config])
+```
+
+With this setup, the agent can write to any path — `/notes.txt`, `/projects/plan.md`, `/deep/nested/file.txt` — and all files are persisted through the same backend.
+
+You can still provide an explicit `base_directory` with `default: true` if you want a meaningful label, but it is not required and has no effect on path matching.
+
 ## Multiple Persistence Backends
 
 A single `FileSystemServer` can serve files from multiple backends simultaneously. Pass a list of `FileSystemConfig` structs, one per virtual directory:
@@ -301,6 +323,37 @@ A single `FileSystemServer` can serve files from multiple backends simultaneousl
 ```
 
 The agent will see both directories via `ls` but will receive an error if it tries to write to `/Reference/`.
+
+### Default Config with Specific Overrides
+
+You can combine a `default: true` catch-all with specific directory overrides. The specific configs take priority for their directories, and everything else falls through to the default:
+
+```elixir
+# Default: all files go to DB
+{:ok, default_config} = FileSystemConfig.new(%{
+  default: true,
+  persistence_module: MyApp.FileSystem.DBPersistence,
+  storage_opts: [user_id: user_id]
+})
+
+# Override: /Reference/* served read-only from S3
+{:ok, reference_config} = FileSystemConfig.new(%{
+  base_directory: "Reference",
+  persistence_module: MyApp.S3Persistence,
+  readonly: true,
+  storage_opts: [bucket: "my-app-shared", prefix: "reference-docs/"]
+})
+
+{:ok, _pid} = FileSystem.ensure_filesystem(
+  {:user, user_id},
+  [default_config, reference_config]
+)
+```
+
+With this setup:
+- `/Reference/guide.pdf` → read-only S3 config (specific match wins)
+- `/notes.txt` → writable DB config (default catch-all)
+- `/projects/plan.md` → writable DB config (default catch-all)
 
 ## Pre-Populating Files at Runtime
 

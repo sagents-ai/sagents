@@ -35,7 +35,9 @@ defmodule Sagents.FileSystem.Persistence do
 
   All callbacks receive `opts` as their second parameter, which includes:
   - `:agent_id` - The agent's unique identifier
-  - `:base_directory` - The virtual directory (from `FileSystemConfig`)
+  - `:base_directory` - The virtual directory (from `FileSystemConfig`). Note: this key
+    is **not present** for default configs (`default: true`), since the default config
+    catches all paths and has no meaningful base directory.
   - All custom options from `FileSystemConfig.storage_opts`
 
   ### write_to_storage/2
