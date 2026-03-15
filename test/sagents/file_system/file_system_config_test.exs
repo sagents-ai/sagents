@@ -140,6 +140,51 @@ defmodule Sagents.FileSystem.FileSystemConfigTest do
     end
   end
 
+  describe "default config without base_directory" do
+    test "creates default config without base_directory using sentinel" do
+      assert {:ok, config} =
+               FileSystemConfig.new(%{
+                 default: true,
+                 persistence_module: Disk
+               })
+
+      assert config.base_directory == "__default__"
+      assert config.default == true
+    end
+
+    test "creates default config with explicit base_directory" do
+      assert {:ok, config} =
+               FileSystemConfig.new(%{
+                 default: true,
+                 base_directory: "my_label",
+                 persistence_module: Disk
+               })
+
+      assert config.base_directory == "my_label"
+      assert config.default == true
+    end
+
+    test "non-default config still requires base_directory" do
+      assert {:error, changeset} = FileSystemConfig.new(%{persistence_module: Disk})
+      assert %{base_directory: ["can't be blank"]} = errors_on(changeset)
+    end
+
+    test "build_storage_opts with sentinel does not include base_directory" do
+      {:ok, config} =
+        FileSystemConfig.new(%{
+          default: true,
+          persistence_module: Disk,
+          storage_opts: [path: "/data"]
+        })
+
+      opts = FileSystemConfig.build_storage_opts(config, {:agent, "agent-123"})
+
+      assert Keyword.get(opts, :scope_key) == {:agent, "agent-123"}
+      assert Keyword.get(opts, :path) == "/data"
+      refute Keyword.has_key?(opts, :base_directory)
+    end
+  end
+
   describe "matches_path?/2" do
     setup do
       {:ok, config} =

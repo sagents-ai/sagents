@@ -240,6 +240,119 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
     end
   end
 
+  describe "default config without base_directory" do
+    setup do
+      agent_id = "test_agent_#{System.unique_integer([:positive])}"
+      {:ok, state} = FileSystemState.new(scope_key: {:agent, agent_id})
+      %{state: state}
+    end
+
+    test "default config catches all paths", %{state: state} do
+      defmodule TestPersistenceDefault1 do
+        @behaviour Sagents.FileSystem.Persistence
+
+        def write_to_storage(_entry, _opts), do: :ok
+        def load_from_storage(_entry, _opts), do: {:error, :enoent}
+        def delete_from_storage(_entry, _opts), do: :ok
+        def list_persisted_files(_agent_id, _opts), do: {:ok, []}
+      end
+
+      {:ok, config} =
+        FileSystemConfig.new(%{
+          default: true,
+          persistence_module: TestPersistenceDefault1
+        })
+
+      {:ok, state} = FileSystemState.register_persistence(state, config)
+
+      # Files at any path should be persisted via the default config
+      assert {:ok, state} = FileSystemState.write_file(state, "/notes.txt", "notes", [])
+      assert state.files["/notes.txt"].persistence == :persisted
+
+      assert {:ok, state} = FileSystemState.write_file(state, "/deep/nested/file.md", "deep", [])
+      assert state.files["/deep/nested/file.md"].persistence == :persisted
+    end
+
+    test "mixed: specific config + default without base_directory", %{state: state} do
+      defmodule TestPersistenceDefault2 do
+        @behaviour Sagents.FileSystem.Persistence
+
+        def write_to_storage(_entry, _opts), do: :ok
+        def load_from_storage(_entry, _opts), do: {:error, :enoent}
+        def delete_from_storage(_entry, _opts), do: :ok
+        def list_persisted_files(_agent_id, _opts), do: {:ok, []}
+      end
+
+      # Register specific config for "Memories"
+      {:ok, specific_config} =
+        FileSystemConfig.new(%{
+          base_directory: "Memories",
+          persistence_module: TestPersistenceDefault2
+        })
+
+      {:ok, state} = FileSystemState.register_persistence(state, specific_config)
+
+      # Register default config without base_directory
+      {:ok, default_config} =
+        FileSystemConfig.new(%{
+          default: true,
+          persistence_module: TestPersistenceDefault2
+        })
+
+      {:ok, state} = FileSystemState.register_persistence(state, default_config)
+
+      # Files in /Memories/ go to specific config (persisted)
+      assert {:ok, state} =
+               FileSystemState.write_file(state, "/Memories/note.txt", "memory", [])
+
+      assert state.files["/Memories/note.txt"].persistence == :persisted
+
+      # Files elsewhere go to default config (persisted)
+      assert {:ok, state} = FileSystemState.write_file(state, "/other/file.txt", "other", [])
+      assert state.files["/other/file.txt"].persistence == :persisted
+    end
+
+    test "default + readonly override", %{state: state} do
+      defmodule TestPersistenceDefault3 do
+        @behaviour Sagents.FileSystem.Persistence
+
+        def write_to_storage(_entry, _opts), do: :ok
+        def load_from_storage(_entry, _opts), do: {:error, :enoent}
+        def delete_from_storage(_entry, _opts), do: :ok
+        def list_persisted_files(_agent_id, _opts), do: {:ok, []}
+      end
+
+      # Default writable config
+      {:ok, default_config} =
+        FileSystemConfig.new(%{
+          default: true,
+          persistence_module: TestPersistenceDefault3
+        })
+
+      {:ok, state} = FileSystemState.register_persistence(state, default_config)
+
+      # Readonly config for "Reference"
+      {:ok, readonly_config} =
+        FileSystemConfig.new(%{
+          base_directory: "Reference",
+          persistence_module: TestPersistenceDefault3,
+          readonly: true
+        })
+
+      {:ok, state} = FileSystemState.register_persistence(state, readonly_config)
+
+      # Writing to default path succeeds
+      assert {:ok, state} = FileSystemState.write_file(state, "/notes.txt", "notes", [])
+      assert state.files["/notes.txt"].persistence == :persisted
+
+      # Writing to readonly path is rejected
+      assert {:error, reason, _state} =
+               FileSystemState.write_file(state, "/Reference/guide.pdf", "data", [])
+
+      assert reason =~ "read-only"
+    end
+  end
+
   describe "stats/1" do
     setup do
       agent_id = "test_agent_#{System.unique_integer([:positive])}"
