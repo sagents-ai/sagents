@@ -44,6 +44,13 @@ defmodule Sagents.FileSystem.FileSystemConfig do
         debounce_ms: 30000,
         storage_opts: [bucket: "shared-assets", region: "us-east-1"]
       })
+
+      # Default catch-all config (no base_directory needed)
+      {:ok, config} = FileSystemConfig.new(%{
+        default: true,
+        persistence_module: MyApp.DBPersistence,
+        storage_opts: [repo: MyApp.Repo]
+      })
   """
 
   use Ecto.Schema
@@ -80,13 +87,15 @@ defmodule Sagents.FileSystem.FileSystemConfig do
 
   ## Required Fields
 
-  - `:base_directory` - Virtual directory path (without leading/trailing slashes)
+  - `:base_directory` - Virtual directory path (without leading/trailing slashes).
+    Optional when `default: true` — if omitted, the sentinel `"__default__"` is used internally.
   - `:persistence_module` - Module implementing Persistence behaviour
 
   ## Optional Fields
 
   - `:debounce_ms` - Auto-persist delay in milliseconds (default: 5000)
   - `:readonly` - Read-only flag (default: false)
+  - `:default` - When true, acts as a catch-all for unmatched paths (default: false)
   - `:storage_opts` - Backend-specific options (default: [])
 
   ## Returns

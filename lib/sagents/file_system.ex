@@ -15,12 +15,20 @@ defmodule Sagents.FileSystem do
 
   ## Usage
 
-      # Start a filesystem (idempotent)
+      # Start a filesystem with a specific directory (idempotent)
       {:ok, config} = FileSystemConfig.new(%{
-        scope_key: {:user, 123},
         base_directory: "Documents",
         persistence_module: Disk,
         storage_opts: [path: "/data/users/123"]
+      })
+
+      {:ok, pid} = FileSystem.ensure_filesystem({:user, 123}, [config])
+
+      # Or use a default config that catches all paths (no base_directory needed)
+      {:ok, config} = FileSystemConfig.new(%{
+        default: true,
+        persistence_module: MyApp.DBPersistence,
+        storage_opts: [user_id: 123]
       })
 
       {:ok, pid} = FileSystem.ensure_filesystem({:user, 123}, [config])

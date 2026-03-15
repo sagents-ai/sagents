@@ -47,7 +47,9 @@ defmodule Sagents.FileSystem.Persistence.Disk do
   ## Storage Options
 
   - `:path` - Base directory for file storage (required)
-  - `:base_directory` - Virtual directory name (automatically added by FileSystemConfig)
+  - `:base_directory` - Virtual directory name (automatically added by FileSystemConfig).
+    Not present for default configs (`default: true`), in which case files are stored
+    directly under the storage path without any directory prefix stripping.
 
   ## File Organization
 
