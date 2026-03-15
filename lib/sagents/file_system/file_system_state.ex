@@ -576,8 +576,7 @@ defmodule Sagents.FileSystem.FileSystemState do
   defp find_config_for_path(state, path) do
     Enum.find_value(state.persistence_configs, fn {_base_dir, config} ->
       if !config.default && FileSystemConfig.matches_path?(config, path), do: config
-    end)
-    ||
+    end) ||
       Enum.find_value(state.persistence_configs, fn {_base_dir, config} ->
         if config.default, do: config
       end)
