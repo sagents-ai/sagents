@@ -8,6 +8,7 @@ defmodule Sagents do
   - **TODO Management**: Task planning and progress tracking
   - **Virtual Filesystem**: File operations for agent workflows
   - **Task Delegation**: Hierarchical sub-agents for complex tasks
+  - **Context Propagation**: Pass tenant IDs, trace IDs, and feature flags through agent hierarchies via `Sagents.AgentContext`
   - **Context Management**: Automatic summarization and optimization
   - **Observability**: Custom telemetry and tracing via middleware callbacks (see [Observability Guide](docs/observability.md))
 
