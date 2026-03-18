@@ -62,6 +62,8 @@ defmodule Sagents.Agent do
     field :middleware, {:array, :any}, default: [], virtual: true
     field :name, :string
     field :filesystem_scope, :any, virtual: true
+    # Caller-supplied context merged into LLMChain.custom_context for tool functions.
+    field :tool_context, :map, default: %{}, virtual: true
     # Timeout for async tool execution. Integer (ms) or :infinity.
     # Overrides application config when set. See LLMChain docs for details.
     field :async_tool_timeout, :any, virtual: true
@@ -87,6 +89,7 @@ defmodule Sagents.Agent do
     :middleware,
     :name,
     :filesystem_scope,
+    :tool_context,
     :async_tool_timeout,
     :fallback_models,
     :before_fallback,
@@ -908,12 +911,16 @@ defmodule Sagents.Agent do
       llm: agent.model,
       verbose: false,
       # verbose: true,
-      custom_context: %{
-        state: state,
-        # Make parent agent's middleware and tools available to tools (e.g., SubAgent middleware)
-        parent_middleware: agent.middleware,
-        parent_tools: agent.tools
-      }
+      custom_context:
+        Map.merge(
+          agent.tool_context || %{},
+          %{
+            state: state,
+            # Make parent agent's middleware and tools available to tools (e.g., SubAgent middleware)
+            parent_middleware: agent.middleware,
+            parent_tools: agent.tools
+          }
+        )
     }
 
     # Add async_tool_timeout if explicitly set on agent
