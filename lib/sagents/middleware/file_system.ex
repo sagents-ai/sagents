@@ -28,6 +28,8 @@ defmodule Sagents.Middleware.FileSystem do
   - `:memories_prefix` - Path prefix for long-term persisted files (default: "memories")
   - `:enabled_tools` - List of tool names to enable (default: all tools)
   - `:custom_tool_descriptions` - Map of custom descriptions per tool
+  - `:entry_to_map` - Function that converts a `FileEntry` to a JSON-friendly map for LLM
+    tool results (default: `&Sagents.Middleware.FileSystem.default_entry_to_map/1`)
 
   ### Selective Tool Enabling
 
@@ -55,6 +57,22 @@ defmodule Sagents.Middleware.FileSystem do
           }
         ]
       )
+
+  ### Custom Entry-to-Map Function
+
+  The `entry_to_map` option controls how `FileEntry` structs are serialized to
+  JSON maps in LLM tool results (used by `ls`, `write_file`, etc.). The default
+  implementation returns path, title, entry_type, file_type, persistence, size,
+  and id (when present). Override it to include application-specific fields:
+
+      {Sagents.Middleware.FileSystem, [
+        filesystem_scope: {:project, project_id},
+        entry_to_map: fn %FileEntry{} = entry ->
+          Sagents.Middleware.FileSystem.default_entry_to_map(entry)
+          |> Map.put(:genre, entry.metadata && entry.metadata.custom["genre"])
+          |> Sagents.Middleware.FileSystem.maybe_add_field(:tags, entry.metadata && entry.metadata.custom["tags"])
+        end
+      ]}
 
   ### Persistence Configuration
 
@@ -120,15 +138,16 @@ defmodule Sagents.Middleware.FileSystem do
 
   require Logger
   alias LangChain.Function
+  alias Sagents.FileSystem.FileEntry
   alias Sagents.FileSystemServer
 
   @system_prompt """
   ## Filesystem Tools
 
   You have access to a virtual filesystem with these tools:
-  - `ls`: List files (optionally filter with patterns)
+  - `ls`: List files — returns a JSON array of file entries with metadata (path, title, file_type, size, etc.)
   - `read_file`: Read file contents with line numbers and pagination
-  - `write_file`: Create new files (cannot overwrite existing files)
+  - `write_file`: Create new files — returns JSON metadata of the created file
   - `edit_file`: Modify existing files with string replacement
   - `search_text`: Search for text patterns in specific files or across all files
   - `edit_lines`: Replace a block of lines by line number range
@@ -193,7 +212,8 @@ defmodule Sagents.Middleware.FileSystem do
           "edit_lines",
           "delete_file"
         ]),
-      custom_tool_descriptions: Keyword.get(opts, :custom_tool_descriptions, %{})
+      custom_tool_descriptions: Keyword.get(opts, :custom_tool_descriptions, %{}),
+      entry_to_map: Keyword.get(opts, :entry_to_map, &__MODULE__.default_entry_to_map/1)
     }
 
     {:ok, config}
@@ -237,6 +257,47 @@ defmodule Sagents.Middleware.FileSystem do
     # Files are stored in state.files as %{file_path => content}
     []
   end
+
+  @doc """
+  Converts a FileEntry to a JSON-friendly map for LLM tool results.
+
+  Does not include content (which could be very large). Includes size
+  from metadata when available. Only includes `id` if it has a value.
+
+  This is the default implementation used by the `entry_to_map` config
+  option. Override it by providing a custom function in middleware config:
+
+      {Sagents.Middleware.FileSystem, [
+        filesystem_scope: {:project, project_id},
+        entry_to_map: &MyApp.custom_entry_to_map/1
+      ]}
+  """
+  @spec default_entry_to_map(FileEntry.t()) :: map()
+  def default_entry_to_map(%FileEntry{} = entry) do
+    %{
+      path: entry.path,
+      title: entry.title,
+      entry_type: entry.entry_type,
+      file_type: entry.file_type,
+      persistence: entry.persistence,
+      size: entry.metadata && entry.metadata.size
+    }
+    |> maybe_add_field(:id, entry.id)
+  end
+
+  @doc """
+  Conditionally adds a key-value pair to a map. If the value is nil, the map
+  is returned unchanged. Useful as a helper when building custom `entry_to_map`
+  functions.
+
+  ## Example
+
+      Sagents.Middleware.FileSystem.default_entry_to_map(entry)
+      |> Sagents.Middleware.FileSystem.maybe_add_field(:tags, custom["tags"])
+  """
+  @spec maybe_add_field(map(), atom(), any()) :: map()
+  def maybe_add_field(map, _key, nil), do: map
+  def maybe_add_field(map, key, value), do: Map.put(map, key, value)
 
   # Tool builders
 
@@ -543,25 +604,22 @@ defmodule Sagents.Middleware.FileSystem do
   defp execute_ls_tool(args, _context, config) do
     pattern = get_arg(args, "pattern")
 
-    # List all files using FileSystemServer
-    all_files = FileSystemServer.list_files(config.filesystem_scope)
+    # List all entries using FileSystemServer (returns FileEntry structs with metadata)
+    all_entries = FileSystemServer.list_entries(config.filesystem_scope)
 
     # Apply pattern filtering
-    filtered_files = filter_by_pattern(all_files, pattern)
+    filtered_entries = filter_entries_by_pattern(all_entries, pattern)
 
-    message =
-      if Enum.empty?(filtered_files) do
-        if pattern do
-          "No files match pattern: #{pattern}"
-        else
-          "No files in filesystem"
-        end
+    if Enum.empty?(filtered_entries) do
+      if pattern do
+        {:ok, "No files match pattern: #{pattern}"}
       else
-        header = if pattern, do: "Files matching '#{pattern}':\n", else: "Files:\n"
-        header <> Enum.join(filtered_files, "\n")
+        {:ok, "No files in filesystem"}
       end
-
-    {:ok, message}
+    else
+      entry_maps = Enum.map(filtered_entries, &config.entry_to_map.(&1))
+      {:ok, Jason.encode!(entry_maps)}
+    end
   rescue
     e ->
       {:error, "Filesystem not available: #{Exception.message(e)}"}
@@ -576,8 +634,8 @@ defmodule Sagents.Middleware.FileSystem do
     with {:ok, normalized_path} <- validate_path(file_path) do
       # Read file using FileSystemServer (handles lazy loading automatically)
       case FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
-        {:ok, content} ->
-          format_file_content(content, normalized_path, offset, limit)
+        {:ok, entry} ->
+          format_file_content(entry.content || "", normalized_path, offset, limit)
 
         {:error, :enoent} ->
           {:error, "File not found: #{normalized_path}"}
@@ -656,8 +714,8 @@ defmodule Sagents.Middleware.FileSystem do
                    normalized_path,
                    content
                  ) do
-              :ok ->
-                {:ok, "File created successfully: #{normalized_path}"}
+              {:ok, entry} ->
+                {:ok, Jason.encode!(config.entry_to_map.(entry))}
 
               {:error, reason} ->
                 {:error, "Failed to create file: #{inspect(reason)}"}
@@ -687,11 +745,11 @@ defmodule Sagents.Middleware.FileSystem do
         with {:ok, normalized_path} <- validate_path(file_path) do
           # Read current content using FileSystemServer
           case FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
-            {:ok, content} ->
+            {:ok, entry} ->
               perform_edit(
                 config.filesystem_scope,
                 normalized_path,
-                content,
+                entry.content || "",
                 old_string,
                 new_string,
                 replace_all
@@ -803,12 +861,12 @@ defmodule Sagents.Middleware.FileSystem do
 
       true ->
         with {:ok, normalized_path} <- validate_path(file_path),
-             {:ok, content} <-
+             {:ok, entry} <-
                FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
           perform_line_edit(
             config.filesystem_scope,
             normalized_path,
-            content,
+            entry.content || "",
             start_line,
             end_line,
             new_content
@@ -828,8 +886,10 @@ defmodule Sagents.Middleware.FileSystem do
 
   defp search_single_file(filesystem_scope, file_path, regex, context_lines, max_results) do
     with {:ok, normalized_path} <- validate_path(file_path),
-         {:ok, content} <- FileSystemServer.read_file(filesystem_scope, normalized_path) do
-      {matches, truncated} = find_matches_in_content(content, regex, context_lines, max_results)
+         {:ok, entry} <- FileSystemServer.read_file(filesystem_scope, normalized_path) do
+      {matches, truncated} =
+        find_matches_in_content(entry.content || "", regex, context_lines, max_results)
+
       format_search_results([{normalized_path, matches}], max_results, truncated)
     else
       {:error, :enoent} ->
@@ -855,9 +915,9 @@ defmodule Sagents.Middleware.FileSystem do
           {acc, match_count, truncated}
         else
           case FileSystemServer.read_file(filesystem_scope, file_path) do
-            {:ok, content} ->
+            {:ok, entry} ->
               {matches, file_truncated} =
-                find_matches_in_content(content, regex, context_lines, remaining)
+                find_matches_in_content(entry.content || "", regex, context_lines, remaining)
 
               if Enum.empty?(matches) do
                 {acc, match_count, truncated}
@@ -1036,7 +1096,7 @@ defmodule Sagents.Middleware.FileSystem do
 
   defp write_edit(filesystem_scope, file_path, updated_content, success_message) do
     case FileSystemServer.write_file(filesystem_scope, file_path, updated_content) do
-      :ok ->
+      {:ok, _entry} ->
         {:ok, success_message}
 
       {:error, reason} ->
@@ -1076,7 +1136,7 @@ defmodule Sagents.Middleware.FileSystem do
 
         # Write the updated content
         case FileSystemServer.write_file(filesystem_scope, file_path, updated_content) do
-          :ok ->
+          {:ok, _entry} ->
             {:ok,
              "File edited successfully: #{file_path}\nReplaced #{lines_replaced_count} lines (#{start_line}-#{end_line})"}
 
@@ -1115,9 +1175,9 @@ defmodule Sagents.Middleware.FileSystem do
     end
   end
 
-  defp filter_by_pattern(files, nil), do: files
+  defp filter_entries_by_pattern(entries, nil), do: entries
 
-  defp filter_by_pattern(files, pattern) do
+  defp filter_entries_by_pattern(entries, pattern) do
     # Convert wildcard pattern to regex
     # "*summary*" -> ~r/.*summary.*/
     # "Chapter 1/*" -> ~r/Chapter 1\/.*/
@@ -1128,7 +1188,7 @@ defmodule Sagents.Middleware.FileSystem do
       |> String.replace("*", ".*")
       |> then(&Regex.compile!(&1))
 
-    Enum.filter(files, &Regex.match?(regex_pattern, &1))
+    Enum.filter(entries, &Regex.match?(regex_pattern, &1.path))
   end
 
   # Path validation and security

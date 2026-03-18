@@ -42,6 +42,26 @@ defmodule Sagents.FileSystem.FileEntryTest do
       assert error =~ "path"
       assert error =~ "cannot contain .."
     end
+
+    test "rejects paths with null bytes in segments" do
+      assert {:error, error} = FileEntry.new_memory_file("/bad\0name/file.txt", "data")
+      assert error =~ "invalid segment"
+    end
+
+    test "rejects paths with leading whitespace in segments" do
+      assert {:error, error} = FileEntry.new_memory_file("/ leading/file.txt", "data")
+      assert error =~ "invalid segment"
+    end
+
+    test "rejects paths with trailing whitespace in segments" do
+      assert {:error, error} = FileEntry.new_memory_file("/trailing /file.txt", "data")
+      assert error =~ "invalid segment"
+    end
+
+    test "rejects paths with empty segments (double slashes)" do
+      assert {:error, error} = FileEntry.new_memory_file("/path//file.txt", "data")
+      assert error =~ "invalid segment"
+    end
   end
 
   describe "new_persisted_file/3" do
@@ -244,6 +264,252 @@ defmodule Sagents.FileSystem.FileEntryTest do
       assert {:ok, loaded} = FileEntry.mark_loaded(entry, "loaded content")
       assert [loaded.persistence, loaded.loaded, loaded.dirty] == [:persisted, true, false]
       assert loaded.content == "loaded content"
+    end
+  end
+
+  describe "valid_name?/1" do
+    test "accepts normal names" do
+      assert FileEntry.valid_name?("My Document")
+      assert FileEntry.valid_name?("hero-character")
+      assert FileEntry.valid_name?("Notes (Draft)")
+      assert FileEntry.valid_name?("café")
+    end
+
+    test "rejects empty string" do
+      refute FileEntry.valid_name?("")
+    end
+
+    test "rejects names containing /" do
+      refute FileEntry.valid_name?("path/segment")
+    end
+
+    test "rejects names containing null bytes" do
+      refute FileEntry.valid_name?("bad\0name")
+    end
+
+    test "rejects names with leading/trailing whitespace" do
+      refute FileEntry.valid_name?(" leading")
+      refute FileEntry.valid_name?("trailing ")
+      refute FileEntry.valid_name?("  both  ")
+    end
+
+    test "rejects non-binary values" do
+      refute FileEntry.valid_name?(nil)
+      refute FileEntry.valid_name?(123)
+    end
+  end
+
+  describe "new_directory/2" do
+    test "creates a directory entry" do
+      assert {:ok, entry} = FileEntry.new_directory("/Characters")
+
+      assert entry.path == "/Characters"
+      assert entry.entry_type == :directory
+      assert entry.content == nil
+      assert entry.loaded == true
+      assert entry.persistence == :persisted
+      assert entry.dirty == true
+    end
+
+    test "creates directory with title and custom metadata" do
+      assert {:ok, entry} =
+               FileEntry.new_directory("/Characters",
+                 title: "Characters",
+                 custom: %{"position" => 1}
+               )
+
+      assert entry.title == "Characters"
+      assert entry.metadata.custom == %{"position" => 1}
+    end
+
+    test "creates memory directory" do
+      assert {:ok, entry} = FileEntry.new_directory("/temp", persistence: :memory)
+
+      assert entry.persistence == :memory
+      assert entry.dirty == false
+    end
+  end
+
+  describe "directory?/1" do
+    test "returns true for directory entries" do
+      {:ok, entry} = FileEntry.new_directory("/test")
+      assert FileEntry.directory?(entry)
+    end
+
+    test "returns false for file entries" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data")
+      refute FileEntry.directory?(entry)
+    end
+  end
+
+  describe "update_content/3 with directories" do
+    test "rejects content updates on directory entries" do
+      {:ok, dir} = FileEntry.new_directory("/test")
+      assert {:error, :directory_has_no_content} = FileEntry.update_content(dir, "some content")
+    end
+  end
+
+  describe "update_content/3 preserves metadata" do
+    test "preserves custom metadata on content update" do
+      {:ok, entry} =
+        FileEntry.new_persisted_file("/test.txt", "original",
+          custom: %{"tags" => ["draft"], "author" => "Alice"}
+        )
+
+      clean = FileEntry.mark_clean(entry)
+
+      assert {:ok, updated} = FileEntry.update_content(clean, "modified")
+
+      assert updated.content == "modified"
+      assert updated.dirty == true
+      # Custom metadata preserved
+      assert updated.metadata.custom == %{"tags" => ["draft"], "author" => "Alice"}
+      # created_at preserved
+      assert updated.metadata.created_at == entry.metadata.created_at
+      # modified_at updated
+      assert DateTime.compare(updated.metadata.modified_at, entry.metadata.modified_at) in [
+               :gt,
+               :eq
+             ]
+    end
+  end
+
+  describe "title field" do
+    test "new_memory_file accepts title option" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data", title: "My Doc")
+      assert entry.title == "My Doc"
+    end
+
+    test "new_persisted_file accepts title option" do
+      {:ok, entry} = FileEntry.new_persisted_file("/test.txt", "data", title: "My Doc")
+      assert entry.title == "My Doc"
+    end
+
+    test "title defaults to nil" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data")
+      assert entry.title == nil
+    end
+  end
+
+  describe "id field" do
+    test "defaults to nil on all factory functions" do
+      {:ok, mem} = FileEntry.new_memory_file("/test.txt", "data")
+      assert mem.id == nil
+
+      {:ok, per} = FileEntry.new_persisted_file("/test.txt", "data")
+      assert per.id == nil
+
+      {:ok, idx} = FileEntry.new_indexed_file("/test.txt")
+      assert idx.id == nil
+
+      {:ok, dir} = FileEntry.new_directory("/test")
+      assert dir.id == nil
+    end
+
+    test "factory functions accept id option" do
+      {:ok, mem} = FileEntry.new_memory_file("/test.txt", "data", id: "mem-1")
+      assert mem.id == "mem-1"
+
+      {:ok, per} = FileEntry.new_persisted_file("/test.txt", "data", id: "per-1")
+      assert per.id == "per-1"
+
+      {:ok, idx} = FileEntry.new_indexed_file("/test.txt", id: "idx-1")
+      assert idx.id == "idx-1"
+
+      {:ok, dir} = FileEntry.new_directory("/test", id: "dir-1")
+      assert dir.id == "dir-1"
+    end
+
+    test "survives update_content" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data", id: "abc")
+      {:ok, updated} = FileEntry.update_content(entry, "new data")
+      assert updated.id == "abc"
+    end
+
+    test "survives mark_loaded" do
+      {:ok, entry} = FileEntry.new_indexed_file("/test.txt", id: "abc")
+      {:ok, loaded} = FileEntry.mark_loaded(entry, "content")
+      assert loaded.id == "abc"
+    end
+  end
+
+  describe "file_type field" do
+    test "defaults to markdown for file factory functions" do
+      {:ok, mem} = FileEntry.new_memory_file("/test.txt", "data")
+      assert mem.file_type == "markdown"
+
+      {:ok, per} = FileEntry.new_persisted_file("/test.txt", "data")
+      assert per.file_type == "markdown"
+
+      {:ok, idx} = FileEntry.new_indexed_file("/test.txt")
+      assert idx.file_type == "markdown"
+    end
+
+    test "defaults to nil for directories" do
+      {:ok, dir} = FileEntry.new_directory("/test")
+      assert dir.file_type == nil
+    end
+
+    test "factory functions accept file_type option" do
+      {:ok, mem} = FileEntry.new_memory_file("/test.json", "[]", file_type: "json")
+      assert mem.file_type == "json"
+
+      {:ok, per} = FileEntry.new_persisted_file("/test.pdf", "data", file_type: "pdf")
+      assert per.file_type == "pdf"
+
+      {:ok, idx} = FileEntry.new_indexed_file("/test.png", file_type: "image")
+      assert idx.file_type == "image"
+    end
+
+    test "survives update_content" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data", file_type: "json")
+      {:ok, updated} = FileEntry.update_content(entry, "new data")
+      assert updated.file_type == "json"
+    end
+
+    test "survives mark_loaded" do
+      {:ok, entry} = FileEntry.new_indexed_file("/test.txt", file_type: "pdf")
+      {:ok, loaded} = FileEntry.mark_loaded(entry, "content")
+      assert loaded.file_type == "pdf"
+    end
+  end
+
+  describe "new_indexed_file/2 with options" do
+    test "accepts title and entry_type" do
+      {:ok, entry} =
+        FileEntry.new_indexed_file("/Characters",
+          title: "Characters",
+          entry_type: :directory
+        )
+
+      assert entry.title == "Characters"
+      assert entry.entry_type == :directory
+      assert entry.loaded == true
+      assert entry.content == nil
+    end
+
+    test "accepts metadata" do
+      {:ok, metadata} = FileMetadata.new("", custom: %{"position" => 1})
+
+      {:ok, entry} =
+        FileEntry.new_indexed_file("/test.txt", metadata: metadata)
+
+      assert entry.metadata.custom == %{"position" => 1}
+    end
+  end
+
+  describe "mark_loaded/2 preserves metadata" do
+    test "preserves custom metadata when loading content" do
+      {:ok, metadata} = FileMetadata.new("", custom: %{"tags" => ["important"]})
+
+      {:ok, entry} = FileEntry.new_indexed_file("/test.txt", metadata: metadata)
+
+      assert {:ok, loaded} = FileEntry.mark_loaded(entry, "loaded content")
+
+      assert loaded.content == "loaded content"
+      assert loaded.loaded == true
+      # Custom metadata preserved
+      assert loaded.metadata.custom == %{"tags" => ["important"]}
     end
   end
 end

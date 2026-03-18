@@ -68,10 +68,7 @@ defmodule Sagents.FileSystem.FileMetadataTest do
       Process.sleep(10)
 
       new_content = "modified"
-      changeset = FileMetadata.update_for_modification(metadata, new_content)
-      assert changeset.valid?
-
-      updated_metadata = Ecto.Changeset.apply_changes(changeset)
+      assert {:ok, updated_metadata} = FileMetadata.update_for_modification(metadata, new_content)
 
       # created_at should remain unchanged
       assert updated_metadata.created_at == original_created_at

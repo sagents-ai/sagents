@@ -49,6 +49,7 @@ defmodule Sagents.MixProject do
       # Required dependencies
       {:phoenix_pubsub, "~> 2.1"},
       {:ecto, "~> 3.10 or ~> 3.11"},
+      {:jason, "~> 1.0"},
 
       # Optional dependencies
       {:phoenix, "~> 1.7", optional: true},
