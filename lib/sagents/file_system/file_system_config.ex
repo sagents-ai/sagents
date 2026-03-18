@@ -236,7 +236,7 @@ defmodule Sagents.FileSystem.FileSystemConfig do
   @spec matches_path?(t(), String.t()) :: boolean()
   def matches_path?(%FileSystemConfig{base_directory: base_dir}, path) do
     prefix = "/" <> base_dir
-    String.starts_with?(path, prefix <> "/")
+    path == prefix or String.starts_with?(path, prefix <> "/")
   end
 
   @doc """

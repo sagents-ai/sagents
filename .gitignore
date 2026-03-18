@@ -24,3 +24,4 @@ sagents-*.tar
 
 # local dev environment variables
 .envrc
+.env

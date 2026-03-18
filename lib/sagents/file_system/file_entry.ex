@@ -53,6 +53,10 @@ defmodule Sagents.FileSystem.FileEntry do
     field :path, :string
     # Human-readable display name
     field :title, :string
+    # Optional stable identifier for referencing files by ID
+    field :id, :string
+    # LLM-readable file type: "markdown", "image", "pdf", "json", etc.
+    field :file_type, :string, default: "markdown"
     # Whether this is a file or directory
     field :entry_type, Ecto.Enum, values: [:file, :directory], default: :file
     # Content is always string for LLM text-based work
@@ -69,6 +73,8 @@ defmodule Sagents.FileSystem.FileEntry do
   @type t :: %FileEntry{
           path: String.t(),
           title: String.t() | nil,
+          id: String.t() | nil,
+          file_type: String.t() | nil,
           entry_type: :file | :directory,
           content: String.t() | nil,
           persistence: :memory | :persisted,
@@ -82,7 +88,17 @@ defmodule Sagents.FileSystem.FileEntry do
   """
   def changeset(entry \\ %FileEntry{}, attrs) do
     entry
-    |> cast(attrs, [:path, :title, :entry_type, :content, :persistence, :loaded, :dirty])
+    |> cast(attrs, [
+      :path,
+      :title,
+      :id,
+      :file_type,
+      :entry_type,
+      :content,
+      :persistence,
+      :loaded,
+      :dirty
+    ])
     |> cast_embed(:metadata, with: &FileMetadata.changeset/2)
     |> validate_path()
     |> validate_required([:persistence, :loaded, :dirty])
@@ -112,17 +128,22 @@ defmodule Sagents.FileSystem.FileEntry do
   """
   def new_memory_file(path, content, opts \\ []) do
     title = Keyword.get(opts, :title)
+    id = Keyword.get(opts, :id)
+    file_type = Keyword.get(opts, :file_type)
 
     with {:ok, metadata} <- FileMetadata.new(content, opts) do
-      attrs = %{
-        path: path,
-        title: title,
-        entry_type: :file,
-        content: content,
-        persistence: :memory,
-        loaded: true,
-        dirty: false
-      }
+      attrs =
+        %{
+          path: path,
+          title: title,
+          id: id,
+          entry_type: :file,
+          content: content,
+          persistence: :memory,
+          loaded: true,
+          dirty: false
+        }
+        |> maybe_put(:file_type, file_type)
 
       %FileEntry{}
       |> changeset(attrs)
@@ -144,17 +165,22 @@ defmodule Sagents.FileSystem.FileEntry do
   """
   def new_persisted_file(path, content, opts \\ []) do
     title = Keyword.get(opts, :title)
+    id = Keyword.get(opts, :id)
+    file_type = Keyword.get(opts, :file_type)
 
     with {:ok, metadata} <- FileMetadata.new(content, opts) do
-      attrs = %{
-        path: path,
-        title: title,
-        entry_type: :file,
-        content: content,
-        persistence: :persisted,
-        loaded: true,
-        dirty: true
-      }
+      attrs =
+        %{
+          path: path,
+          title: title,
+          id: id,
+          entry_type: :file,
+          content: content,
+          persistence: :persisted,
+          loaded: true,
+          dirty: true
+        }
+        |> maybe_put(:file_type, file_type)
 
       %FileEntry{}
       |> changeset(attrs)
@@ -176,18 +202,23 @@ defmodule Sagents.FileSystem.FileEntry do
   """
   def new_indexed_file(path, opts \\ []) do
     title = Keyword.get(opts, :title)
+    id = Keyword.get(opts, :id)
+    file_type = Keyword.get(opts, :file_type)
     entry_type = Keyword.get(opts, :entry_type, :file)
     metadata = Keyword.get(opts, :metadata)
 
-    attrs = %{
-      path: path,
-      title: title,
-      entry_type: entry_type,
-      content: nil,
-      persistence: :persisted,
-      loaded: entry_type == :directory,
-      dirty: false
-    }
+    attrs =
+      %{
+        path: path,
+        title: title,
+        id: id,
+        entry_type: entry_type,
+        content: nil,
+        persistence: :persisted,
+        loaded: entry_type == :directory,
+        dirty: false
+      }
+      |> maybe_put(:file_type, file_type)
 
     result =
       %FileEntry{}
@@ -214,6 +245,7 @@ defmodule Sagents.FileSystem.FileEntry do
   """
   def new_directory(path, opts \\ []) do
     title = Keyword.get(opts, :title)
+    id = Keyword.get(opts, :id)
     custom = Keyword.get(opts, :custom, %{})
     persistence = Keyword.get(opts, :persistence, :persisted)
 
@@ -224,6 +256,8 @@ defmodule Sagents.FileSystem.FileEntry do
         attrs = %{
           path: path,
           title: title,
+          id: id,
+          file_type: nil,
           entry_type: :directory,
           content: nil,
           persistence: persistence,
@@ -324,6 +358,7 @@ defmodule Sagents.FileSystem.FileEntry do
     |> validate_required([:path])
     |> validate_format(:path, ~r{^/}, message: "must start with /")
     |> validate_no_double_dots()
+    |> validate_path_segments()
   end
 
   defp validate_no_double_dots(changeset) do
@@ -336,6 +371,36 @@ defmodule Sagents.FileSystem.FileEntry do
     end
   end
 
+  defp validate_path_segments(changeset) do
+    case Ecto.Changeset.get_field(changeset, :path) do
+      nil ->
+        changeset
+
+      path ->
+        # Drop the first empty segment from the leading "/"
+        [_ | segments] = String.split(path, "/")
+
+        case Enum.find(segments, fn seg -> not valid_name?(seg) end) do
+          nil ->
+            changeset
+
+          invalid_segment ->
+            Ecto.Changeset.add_error(
+              changeset,
+              :path,
+              "contains invalid segment %{segment}: must be non-empty with no /, null bytes, or leading/trailing whitespace",
+              segment: inspect(invalid_segment)
+            )
+        end
+    end
+  end
+
   defp maybe_put_embed_metadata(changeset, nil), do: changeset
-  defp maybe_put_embed_metadata(changeset, %FileMetadata{} = metadata), do: put_embed(changeset, :metadata, metadata)
+
+  defp maybe_put_embed_metadata(changeset, %FileMetadata{} = metadata),
+    do: put_embed(changeset, :metadata, metadata)
+
+  # Only include key in attrs map if value is non-nil (lets schema default apply)
+  defp maybe_put(attrs, _key, nil), do: attrs
+  defp maybe_put(attrs, key, value), do: Map.put(attrs, key, value)
 end

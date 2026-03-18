@@ -2,6 +2,7 @@ defmodule Sagents.Middleware.FileSystemTest do
   use ExUnit.Case, async: false
 
   alias Sagents.Middleware.FileSystem
+  alias Sagents.FileSystem.FileEntry
   alias Sagents.FileSystemServer
   alias Sagents.State
 
@@ -56,6 +57,81 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert_raise KeyError, fn ->
         FileSystem.init([])
       end
+    end
+
+    test "accepts custom entry_to_map function", %{agent_id: agent_id} do
+      custom_fn = fn entry -> %{custom_path: entry.path} end
+
+      assert {:ok, config} =
+               FileSystem.init(agent_id: agent_id, entry_to_map: custom_fn)
+
+      assert config.entry_to_map == custom_fn
+    end
+
+    test "defaults entry_to_map to default_entry_to_map", %{agent_id: agent_id} do
+      assert {:ok, config} = FileSystem.init(agent_id: agent_id)
+      assert is_function(config.entry_to_map, 1)
+    end
+  end
+
+  describe "default_entry_to_map/1" do
+    test "returns map with expected keys" do
+      {:ok, entry} =
+        FileEntry.new_persisted_file("/Characters/Hero", "some content", title: "Hero")
+
+      result = FileSystem.default_entry_to_map(entry)
+
+      assert result.path == "/Characters/Hero"
+      assert result.title == "Hero"
+      assert result.entry_type == :file
+      assert result.file_type == "markdown"
+      assert result.persistence == :persisted
+      assert is_integer(result.size)
+    end
+
+    test "excludes content" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "lots of content here")
+      result = FileSystem.default_entry_to_map(entry)
+      refute Map.has_key?(result, :content)
+    end
+
+    test "excludes id when nil" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data")
+      result = FileSystem.default_entry_to_map(entry)
+      refute Map.has_key?(result, :id)
+    end
+
+    test "includes id when present" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data", id: "doc-123")
+      result = FileSystem.default_entry_to_map(entry)
+      assert result.id == "doc-123"
+    end
+
+    test "handles directory entries" do
+      {:ok, entry} = FileEntry.new_directory("/Characters", title: "Characters")
+      result = FileSystem.default_entry_to_map(entry)
+
+      assert result.entry_type == :directory
+      assert result.file_type == nil
+      assert result.title == "Characters"
+    end
+
+    test "includes size from metadata" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "hello")
+      result = FileSystem.default_entry_to_map(entry)
+      assert result.size == byte_size("hello")
+    end
+  end
+
+  describe "maybe_add_field/3" do
+    test "adds field when value is non-nil" do
+      result = FileSystem.maybe_add_field(%{a: 1}, :b, "value")
+      assert result == %{a: 1, b: "value"}
+    end
+
+    test "skips field when value is nil" do
+      result = FileSystem.maybe_add_field(%{a: 1}, :b, nil)
+      assert result == %{a: 1}
     end
   end
 
@@ -117,7 +193,7 @@ defmodule Sagents.Middleware.FileSystemTest do
   end
 
   describe "ls tool" do
-    test "lists files in filesystem", %{agent_id: agent_id} do
+    test "lists files as JSON array of entry maps", %{agent_id: agent_id} do
       # Write some files
       FileSystemServer.write_file({:agent, agent_id}, "/file1.txt", "content1")
       FileSystemServer.write_file({:agent, agent_id}, "/file2.txt", "content2")
@@ -125,23 +201,34 @@ defmodule Sagents.Middleware.FileSystemTest do
       [ls_tool | _] =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file", "write_file", "edit_file"]
+          enabled_tools: ["ls", "read_file", "write_file", "edit_file"],
+          entry_to_map: &FileSystem.default_entry_to_map/1
         })
 
       assert {:ok, result} = ls_tool.function.(%{}, %{state: State.new!()})
-      assert result =~ "/file1.txt"
-      assert result =~ "/file2.txt"
+      entries = Jason.decode!(result)
+      assert is_list(entries)
+      paths = Enum.map(entries, & &1["path"])
+      assert "/file1.txt" in paths
+      assert "/file2.txt" in paths
+
+      # Each entry has expected keys
+      entry = Enum.find(entries, &(&1["path"] == "/file1.txt"))
+      assert entry["entry_type"] == "file"
+      assert entry["file_type"] == "markdown"
+      assert is_integer(entry["size"])
     end
 
     test "reports empty filesystem", %{agent_id: agent_id} do
       [ls_tool | _] =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file", "write_file", "edit_file"]
+          enabled_tools: ["ls", "read_file", "write_file", "edit_file"],
+          entry_to_map: &FileSystem.default_entry_to_map/1
         })
 
       assert {:ok, result} = ls_tool.function.(%{}, %{state: State.new!()})
-      assert result =~ "No files"
+      assert result == "No files in filesystem"
     end
 
     test "filters by pattern", %{agent_id: agent_id} do
@@ -152,13 +239,35 @@ defmodule Sagents.Middleware.FileSystemTest do
       [ls_tool | _] =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file", "write_file", "edit_file"]
+          enabled_tools: ["ls", "read_file", "write_file", "edit_file"],
+          entry_to_map: &FileSystem.default_entry_to_map/1
         })
 
       assert {:ok, result} = ls_tool.function.(%{"pattern" => "*test*"}, %{state: State.new!()})
-      assert result =~ "/test.txt"
-      assert result =~ "/test.md"
-      refute result =~ "/other.txt"
+      entries = Jason.decode!(result)
+      paths = Enum.map(entries, & &1["path"])
+      assert "/test.txt" in paths
+      assert "/test.md" in paths
+      refute "/other.txt" in paths
+    end
+
+    test "uses custom entry_to_map function", %{agent_id: agent_id} do
+      FileSystemServer.write_file({:agent, agent_id}, "/doc.txt", "hello")
+
+      custom_fn = fn entry -> %{custom_path: entry.path, custom_title: entry.title} end
+
+      [ls_tool | _] =
+        FileSystem.tools(%{
+          filesystem_scope: {:agent, agent_id},
+          enabled_tools: ["ls"],
+          entry_to_map: custom_fn
+        })
+
+      assert {:ok, result} = ls_tool.function.(%{}, %{state: State.new!()})
+      [entry] = Jason.decode!(result)
+      assert entry["custom_path"] == "/doc.txt"
+      assert Map.has_key?(entry, "custom_title")
+      refute Map.has_key?(entry, "entry_type")
     end
   end
 
@@ -240,17 +349,23 @@ defmodule Sagents.Middleware.FileSystemTest do
       [_, _, write_file_tool | _] =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file", "write_file", "edit_file"]
+          enabled_tools: ["ls", "read_file", "write_file", "edit_file"],
+          entry_to_map: &FileSystem.default_entry_to_map/1
         })
 
       %{tool: write_file_tool}
     end
 
-    test "creates new file", %{agent_id: agent_id, tool: tool} do
+    test "creates new file and returns JSON entry map", %{agent_id: agent_id, tool: tool} do
       args = %{"file_path" => "/new.txt", "content" => "Hello, World!"}
 
-      assert {:ok, message} = tool.function.(args, %{state: State.new!()})
-      assert message =~ "created successfully"
+      assert {:ok, result} = tool.function.(args, %{state: State.new!()})
+      entry_map = Jason.decode!(result)
+      assert entry_map["path"] == "/new.txt"
+      assert entry_map["entry_type"] == "file"
+      assert entry_map["file_type"] == "markdown"
+      assert is_integer(entry_map["size"])
+      assert entry_map["size"] > 0
 
       # Verify file was created in FileSystemServer
       {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/new.txt")

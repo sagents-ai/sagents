@@ -90,7 +90,8 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, "initial")
 
       # Update the file
-      assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, "updated content")
+      assert {:ok, _entry} =
+               FileSystemServer.write_file({:agent, agent_id}, path, "updated content")
 
       # File should be dirty after update
       entry = get_entry(agent_id, path)
@@ -489,10 +490,13 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       FileSystemServer.write_file({:agent, agent_id}, "/Memories/persist2.txt", "data2")
 
       # New files are persisted immediately, so dirty_files == 0
+      # 3 files + 2 auto-created ancestor dirs (/scratch, /Memories)
       {:ok, stats_after_create} = FileSystemServer.stats({:agent, agent_id})
-      assert stats_after_create.total_files == 3
-      assert stats_after_create.memory_files == 1
-      assert stats_after_create.persisted_files == 2
+      assert stats_after_create.total_files == 5
+      # 1 scratch file + /scratch directory
+      assert stats_after_create.memory_files == 2
+      # 2 Memories files + /Memories directory
+      assert stats_after_create.persisted_files == 3
       assert stats_after_create.dirty_files == 0
 
       # Update persisted files to make them dirty
@@ -501,7 +505,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
 
       # Check stats before debounce persist
       {:ok, stats_before} = FileSystemServer.stats({:agent, agent_id})
-      assert stats_before.total_files == 3
+      assert stats_before.total_files == 5
       assert stats_before.dirty_files == 2
 
       # Wait for persist
@@ -509,7 +513,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
 
       # Check stats after persist
       {:ok, stats_after} = FileSystemServer.stats({:agent, agent_id})
-      assert stats_after.total_files == 3
+      assert stats_after.total_files == 5
       assert stats_after.dirty_files == 0
     end
   end

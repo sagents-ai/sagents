@@ -156,6 +156,9 @@ defmodule Sagents.FileSystem.FileSystemState do
   @spec write_file(t(), String.t(), String.t(), keyword()) ::
           {:ok, FileEntry.t(), t()} | {:error, term(), t()}
   def write_file(%FileSystemState{} = state, path, content, opts \\ []) do
+    # Ensure all ancestor directories exist (like mkdir -p)
+    state = ensure_ancestor_directories(state, path)
+
     # Build metadata opts
     mime_type = Keyword.get(opts, :mime_type, "text/plain")
     custom = Keyword.get(opts, :custom, %{})
@@ -179,7 +182,9 @@ defmodule Sagents.FileSystem.FileSystemState do
           # Update existing entry, preserving metadata.
           # Only pass opts that were explicitly provided (not defaults)
           # to avoid overwriting existing metadata with empty values.
-          update_opts = Keyword.take(opts, [:mime_type, :custom]) |> Enum.reject(fn {_k, v} -> v == %{} end)
+          update_opts =
+            Keyword.take(opts, [:mime_type, :custom]) |> Enum.reject(fn {_k, v} -> v == %{} end)
+
           updated = if title, do: %{existing_entry | title: title}, else: existing_entry
           FileEntry.update_content(updated, content, update_opts)
         else
@@ -247,10 +252,17 @@ defmodule Sagents.FileSystem.FileSystemState do
 
   Returns entries with metadata but content NOT loaded — suitable for building
   sidebar trees, directory listings, or LLM `ls` tool responses.
+
+  As a safety net, synthesizes directory entries for any parent paths that
+  don't have explicit entries. This prevents orphaned files from becoming
+  invisible in tree-based UIs when their parent directory was never created.
   """
   @spec list_entries(t()) :: [FileEntry.t()]
   def list_entries(%FileSystemState{} = state) do
-    state.files
+    explicit_entries = state.files
+    synthesized = synthesize_missing_directories(explicit_entries)
+
+    Map.merge(synthesized, explicit_entries)
     |> Map.values()
     |> Enum.sort_by(& &1.path)
   end
@@ -646,6 +658,88 @@ defmodule Sagents.FileSystem.FileSystemState do
     }
   end
 
+  @doc """
+  Ensures all ancestor directories exist for a given path.
+
+  Works like `mkdir -p`: walks the path segments and creates any missing
+  directory entries. Each auto-created directory gets its title inferred
+  from the path segment name. Directories that already exist are left
+  untouched.
+
+  Auto-created directories use the same persistence strategy as the file
+  being written (determined by `find_config_for_path`), and are persisted
+  immediately so the persistence callback can return enriched entries
+  (e.g. with a database-assigned ID).
+
+  Returns the updated state.
+  """
+  @spec ensure_ancestor_directories(t(), String.t()) :: t()
+  def ensure_ancestor_directories(%FileSystemState{} = state, path) do
+    ancestor_paths = ancestor_paths(path)
+
+    Enum.reduce(ancestor_paths, state, fn dir_path, acc_state ->
+      if Map.has_key?(acc_state.files, dir_path) do
+        # Directory already exists, skip
+        acc_state
+      else
+        # Infer title from the last segment of the path
+        title = Path.basename(dir_path)
+        config = find_config_for_path(acc_state, dir_path)
+        persistence = if config, do: :persisted, else: :memory
+
+        case FileEntry.new_directory(dir_path, title: title, persistence: persistence) do
+          {:ok, entry} ->
+            new_files = Map.put(acc_state.files, dir_path, entry)
+            new_state = %{acc_state | files: new_files}
+
+            # Persist immediately so callback can return enriched entry (with ID, etc.)
+            if config do
+              persist_file_now(new_state, dir_path, config)
+            else
+              new_state
+            end
+
+          {:error, reason} ->
+            Logger.warning("Failed to auto-create directory #{dir_path}: #{inspect(reason)}")
+
+            acc_state
+        end
+      end
+    end)
+  end
+
+  @doc """
+  Computes the ancestor directory paths for a given file path.
+
+  Returns paths from shallowest to deepest, excluding the root `/`.
+
+  ## Examples
+
+      iex> FileSystemState.ancestor_paths("/Characters/Hero/Backstory")
+      ["/Characters", "/Characters/Hero"]
+
+      iex> FileSystemState.ancestor_paths("/notes.txt")
+      []
+  """
+  @spec ancestor_paths(String.t()) :: [String.t()]
+  def ancestor_paths(path) when is_binary(path) do
+    segments =
+      path
+      |> String.split("/", trim: true)
+      # Drop the last segment (the file/leaf itself)
+      |> Enum.drop(-1)
+
+    # Build cumulative paths: ["Characters"] -> ["/Characters"]
+    # ["Characters", "Hero"] -> ["/Characters", "/Characters/Hero"]
+    {paths, _} =
+      Enum.reduce(segments, {[], ""}, fn segment, {acc, prefix} ->
+        dir_path = prefix <> "/" <> segment
+        {[dir_path | acc], dir_path}
+      end)
+
+    Enum.reverse(paths)
+  end
+
   # Private helpers
 
   defp fetch_scope_key(opts) do
@@ -765,6 +859,27 @@ defmodule Sagents.FileSystem.FileSystemState do
         Process.cancel_timer(timer_ref)
         %{state | debounce_timers: Map.delete(state.debounce_timers, path)}
     end
+  end
+
+  # Synthesize directory entries for parent paths that don't have explicit entries.
+  # This is a read-only safety net: the synthesized entries exist only in the
+  # returned list, NOT in the state.files map. They prevent orphaned files from
+  # being invisible in tree-based UIs.
+  defp synthesize_missing_directories(files_map) do
+    all_paths = Map.keys(files_map)
+
+    all_paths
+    |> Enum.flat_map(&ancestor_paths/1)
+    |> Enum.uniq()
+    |> Enum.reject(&Map.has_key?(files_map, &1))
+    |> Enum.reduce(%{}, fn dir_path, acc ->
+      title = Path.basename(dir_path)
+
+      case FileEntry.new_directory(dir_path, title: title, persistence: :memory) do
+        {:ok, entry} -> Map.put(acc, dir_path, entry)
+        {:error, _} -> acc
+      end
+    end)
   end
 
   # Index files from all registered persistence backends

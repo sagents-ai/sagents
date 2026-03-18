@@ -249,7 +249,8 @@ defmodule Sagents.FileSystemServerTest do
 
       # Create file first (persists immediately)
       FileSystemServer.write_file({:agent, agent_id}, path, "v1")
-      # Consume the immediate persist message for new file creation
+      # Consume the immediate persist messages (auto-created /Memories dir + new file)
+      assert_received {:persisted, _time}
       assert_received {:persisted, _time}
 
       # Now update multiple times rapidly (these should debounce)
@@ -476,10 +477,13 @@ defmodule Sagents.FileSystemServerTest do
 
       {:ok, stats} = FileSystemServer.stats({:agent, agent_id})
 
-      assert stats.total_files == 4
-      assert stats.memory_files == 2
-      assert stats.persisted_files == 2
-      assert stats.loaded_files == 4
+      # 4 files + 2 auto-created ancestor directories (/scratch, /Memories)
+      assert stats.total_files == 6
+      # 2 scratch files + /scratch directory
+      assert stats.memory_files == 3
+      # 2 Memories files + /Memories directory
+      assert stats.persisted_files == 3
+      assert stats.loaded_files == 6
       assert stats.not_loaded_files == 0
       # New files are persisted immediately, so no dirty files
       assert stats.dirty_files == 0
@@ -619,9 +623,14 @@ defmodule Sagents.FileSystemServerTest do
       assert :ok = FileSystemServer.register_files({:agent, agent_id}, [entry1, entry2, entry3])
 
       # All should be readable
-      assert {:ok, %{content: "content1"}} = FileSystemServer.read_file({:agent, agent_id}, "/test/file1.txt")
-      assert {:ok, %{content: "content2"}} = FileSystemServer.read_file({:agent, agent_id}, "/test/file2.txt")
-      assert {:ok, %{content: "content3"}} = FileSystemServer.read_file({:agent, agent_id}, "/test/file3.txt")
+      assert {:ok, %{content: "content1"}} =
+               FileSystemServer.read_file({:agent, agent_id}, "/test/file1.txt")
+
+      assert {:ok, %{content: "content2"}} =
+               FileSystemServer.read_file({:agent, agent_id}, "/test/file2.txt")
+
+      assert {:ok, %{content: "content3"}} =
+               FileSystemServer.read_file({:agent, agent_id}, "/test/file3.txt")
     end
 
     test "registers indexed files for lazy loading", %{agent_id: agent_id} do
@@ -843,7 +852,8 @@ defmodule Sagents.FileSystemServerTest do
       {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
       # Write a memory file
-      {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, "/scratch/notes.txt", "My notes")
+      {:ok, _entry} =
+        FileSystemServer.write_file({:agent, agent_id}, "/scratch/notes.txt", "My notes")
 
       # Read should work immediately
       assert {:ok, %{content: "My notes"}} =
@@ -950,7 +960,8 @@ defmodule Sagents.FileSystemServerTest do
 
       # Write files
       for i <- 1..20 do
-        {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, "/file#{i}.txt", "content#{i}")
+        {:ok, _entry} =
+          FileSystemServer.write_file({:agent, agent_id}, "/file#{i}.txt", "content#{i}")
       end
 
       # Simulate concurrent reads
@@ -975,7 +986,8 @@ defmodule Sagents.FileSystemServerTest do
 
       # Write multiple files
       for i <- 1..5 do
-        {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, "/file#{i}.txt", "content#{i}")
+        {:ok, _entry} =
+          FileSystemServer.write_file({:agent, agent_id}, "/file#{i}.txt", "content#{i}")
       end
 
       # Concurrent reads should all succeed
@@ -1033,7 +1045,9 @@ defmodule Sagents.FileSystemServerTest do
       {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
       assert {:ok, _entry} = FileSystemServer.create_directory({:agent, agent_id}, "/Dir")
-      assert {:error, :already_exists} = FileSystemServer.create_directory({:agent, agent_id}, "/Dir")
+
+      assert {:error, :already_exists} =
+               FileSystemServer.create_directory({:agent, agent_id}, "/Dir")
     end
   end
 

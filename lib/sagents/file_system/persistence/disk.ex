@@ -75,6 +75,19 @@ defmodule Sagents.FileSystem.Persistence.Disk do
   alias Sagents.FileSystem.FileMetadata
 
   @impl true
+  def write_to_storage(%FileEntry{entry_type: :directory, path: path} = entry, opts) do
+    # Directories are persisted as actual directories on disk
+    full_path = build_file_path(path, opts)
+
+    case File.mkdir_p(full_path) do
+      :ok ->
+        {:ok, %{entry | dirty: false}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   def write_to_storage(%FileEntry{path: path, content: content} = entry, opts) do
     full_path = build_file_path(path, opts)
 
