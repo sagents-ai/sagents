@@ -120,10 +120,13 @@ defmodule <%= module %> do
   ## Options
 
   - `:filesystem_scope` - Required. Filesystem scope tuple (e.g., `{:<%= owner_type %>, <%= owner_field %>}`)
+  - `:user_scope` - Optional. The Phoenix scope (e.g., `current_scope`). Automatically
+    injected into `tool_context` as `:current_scope`, so tool functions receive `context.current_scope`.
   - `:inactivity_timeout` - Milliseconds before agent stops (default: 10 minutes)
-  - `:tool_context` - Map of caller-supplied data that will be available to all tool
-    functions as their second argument. Use this to pass user IDs, scopes, or other
-    request-specific data. Defaults to `%{}`.
+  - `:tool_context` - Map of additional caller-supplied data that will be available to
+    all tool functions as their second argument. Defaults to `%{}`.
+    Note: `:user_scope` is automatically injected as `:current_scope` in `tool_context`,
+    so tool functions always have access to `context.current_scope`.
   - `:factory_opts` - Additional options passed to your Factory module (e.g., `:timezone` for custom middleware)
 
   ## Returns
@@ -421,12 +424,18 @@ defmodule <%= module %> do
     factory_opts = Keyword.get(opts, :factory_opts, [])
 
     # 2. Create agent from factory (configuration from code)
-    # Pass the explicit filesystem scope to the Factory
+    # Auto-merge user_scope into tool_context so tool functions always receive
+    # the scope as context.current_scope.
+    user_scope = Keyword.get(opts, :user_scope)
+    tool_context = Keyword.get(opts, :tool_context, %{})
+    tool_context = Map.put(tool_context, :current_scope, user_scope)
+
     merged_factory_opts =
       factory_opts
       |> Keyword.put(:agent_id, agent_id)
       |> Keyword.put(:filesystem_scope, filesystem_scope)
-      |> Keyword.put(:tool_context, Keyword.get(opts, :tool_context, %{}))
+      |> Keyword.put(:user_scope, user_scope)
+      |> Keyword.put(:tool_context, tool_context)
 
     {:ok, agent} = <%= factory_module %>.create_agent(merged_factory_opts)
 
