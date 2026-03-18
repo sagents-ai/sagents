@@ -68,8 +68,14 @@ defmodule Sagents.FileSystem.FileMetadata do
 
   @doc """
   Updates metadata timestamps and checksum for modified content.
+
+  Preserves existing metadata fields (custom, created_at, mime_type, encoding)
+  and only updates content-related fields. Accepts optional opts to override
+  specific fields (e.g. `:custom`, `:mime_type`).
+
+  Returns `{:ok, metadata}` or `{:error, changeset}`.
   """
-  def update_for_modification(metadata, new_content) do
+  def update_for_modification(metadata, new_content, opts \\ []) do
     now = DateTime.utc_now()
     size = byte_size(new_content)
     checksum = compute_checksum(new_content)
@@ -80,7 +86,17 @@ defmodule Sagents.FileSystem.FileMetadata do
       checksum: checksum
     }
 
-    changeset(metadata, attrs)
+    # Allow opts to override specific fields
+    attrs =
+      if custom = Keyword.get(opts, :custom), do: Map.put(attrs, :custom, custom), else: attrs
+
+    attrs =
+      if mime = Keyword.get(opts, :mime_type), do: Map.put(attrs, :mime_type, mime), else: attrs
+
+    case changeset(metadata, attrs) do
+      %{valid?: true} = cs -> {:ok, Ecto.Changeset.apply_changes(cs)}
+      cs -> {:error, cs}
+    end
   end
 
   # Private helpers

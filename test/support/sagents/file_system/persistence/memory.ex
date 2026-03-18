@@ -34,5 +34,5 @@ defmodule Sagents.FileSystem.Persistence.Memory do
   def delete_from_storage(_entry, _opts), do: {:ok, nil}
 
   @impl true
-  def list_persisted_files(_agent_id, _opts), do: {:ok, []}
+  def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
 end

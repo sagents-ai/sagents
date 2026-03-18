@@ -144,16 +144,20 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
     end
   end
 
-  describe "list_persisted_files/2" do
+  describe "list_persisted_entries/2" do
     test "returns empty list when no files exist", %{agent_id: agent_id, opts: opts} do
-      assert {:ok, []} = Disk.list_persisted_files(agent_id, opts)
+      assert {:ok, []} = Disk.list_persisted_entries(agent_id, opts)
     end
 
-    test "lists single file", %{agent_id: agent_id, opts: opts} do
+    test "lists single file as FileEntry", %{agent_id: agent_id, opts: opts} do
       {:ok, entry} = FileEntry.new_persisted_file("/Memories/file1.txt", "content")
       {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
 
-      assert {:ok, ["/Memories/file1.txt"]} = Disk.list_persisted_files(agent_id, opts)
+      {:ok, [result]} = Disk.list_persisted_entries(agent_id, opts)
+      assert %FileEntry{} = result
+      assert result.path == "/Memories/file1.txt"
+      assert result.loaded == false
+      assert result.persistence == :persisted
     end
 
     test "lists multiple files", %{agent_id: agent_id, opts: opts} do
@@ -168,11 +172,12 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
         {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
       end
 
-      {:ok, listed_files} = Disk.list_persisted_files(agent_id, opts)
-      assert length(listed_files) == 3
-      assert "/Memories/file1.txt" in listed_files
-      assert "/Memories/file2.txt" in listed_files
-      assert "/Memories/file3.txt" in listed_files
+      {:ok, entries} = Disk.list_persisted_entries(agent_id, opts)
+      paths = Enum.map(entries, & &1.path)
+      assert length(entries) == 3
+      assert "/Memories/file1.txt" in paths
+      assert "/Memories/file2.txt" in paths
+      assert "/Memories/file3.txt" in paths
     end
 
     test "lists files in nested directories", %{agent_id: agent_id, opts: opts} do
@@ -188,8 +193,9 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
         {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
       end
 
-      {:ok, listed_files} = Disk.list_persisted_files(agent_id, opts)
-      assert length(listed_files) == 4
+      {:ok, entries} = Disk.list_persisted_entries(agent_id, opts)
+      paths = Enum.map(entries, & &1.path)
+      assert length(entries) == 4
 
       expected_paths = [
         "/Memories/root.txt",
@@ -199,20 +205,20 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
       ]
 
       for path <- expected_paths do
-        assert path in listed_files, "Expected #{path} to be in listed files"
+        assert path in paths, "Expected #{path} to be in listed entries"
       end
     end
 
-    test "returns files with correct path format", %{agent_id: agent_id, opts: opts} do
+    test "returns entries with correct path format", %{agent_id: agent_id, opts: opts} do
       {:ok, entry} = FileEntry.new_persisted_file("/Memories/test.txt", "content")
       {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
 
-      {:ok, [path]} = Disk.list_persisted_files(agent_id, opts)
+      {:ok, [result]} = Disk.list_persisted_entries(agent_id, opts)
 
       # Path should start with /
-      assert String.starts_with?(path, "/")
+      assert String.starts_with?(result.path, "/")
       # Path should match virtual filesystem format
-      assert path == "/Memories/test.txt"
+      assert result.path == "/Memories/test.txt"
     end
   end
 
@@ -244,8 +250,8 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
       assert File.exists?(expected_path)
       assert File.read!(expected_path) == "data"
 
-      {:ok, [path]} = Disk.list_persisted_files(agent_id, opts)
-      assert path == "/persistent/data.txt"
+      {:ok, [entry]} = Disk.list_persisted_entries(agent_id, opts)
+      assert entry.path == "/persistent/data.txt"
     end
   end
 
@@ -298,8 +304,8 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
       assert Enum.all?(results, &match?({:ok, _}, &1))
 
       # Verify all files exist
-      {:ok, files} = Disk.list_persisted_files(agent_id, opts)
-      assert length(files) == 10
+      {:ok, entries} = Disk.list_persisted_entries(agent_id, opts)
+      assert length(entries) == 10
     end
 
     test "handles concurrent writes to same file (last write wins)", %{opts: opts} do

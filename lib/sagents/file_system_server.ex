@@ -159,61 +159,123 @@ defmodule Sagents.FileSystemServer do
   @doc """
   Write content to a file path.
 
-  Triggers debounce timer for auto-persistence if file is in persistence directory.
+  For existing files, preserves existing metadata (custom, created_at, etc.)
+  and only updates content-related fields. For new files, creates a fresh entry.
+
+  Returns the updated FileEntry on success.
 
   ## Options
 
-  - `:metadata` - Custom metadata map
+  - `:custom` - Custom metadata map
   - `:mime_type` - MIME type string
+  - `:title` - Human-readable title
 
   ## Examples
 
-      # With tuple scope
-      iex> write_file({:user, 123}, "/tmp/notes.txt", "Hello")
-      :ok
-
-      # With UUID scope
-      iex> write_file("550e8400-e29b-41d4-a716-446655440000", "/Memories/chat_log.txt", data)
-      :ok  # Auto-persists after 5s (default) of no more writes
+      iex> {:ok, entry} = write_file({:user, 123}, "/tmp/notes.txt", "Hello")
+      iex> entry.content
+      "Hello"
   """
   @spec write_file(term(), String.t(), String.t(), keyword()) ::
-          :ok | {:error, term()}
+          {:ok, FileEntry.t()} | {:error, term()}
   def write_file(scope_key, path, content, opts \\ []) do
     GenServer.call(get_name(scope_key), {:write_file, path, content, opts})
   end
 
   @doc """
-  Read file content from filesystem with lazy loading.
+  Read a file entry from filesystem with lazy loading.
+
+  Returns the full FileEntry struct with content loaded. Application code
+  can use all fields; the LLM tool layer extracts `.content` for the model.
 
   ## Returns
 
-  - `{:ok, content}` - File content as string
+  - `{:ok, %FileEntry{}}` - Full file entry with content loaded
   - `{:error, :enoent}` - File doesn't exist
   - `{:error, reason}` - Other errors (permission, load failure, etc.)
 
   ## Examples
 
-      # With tuple scope
-      iex> read_file({:user, 123}, "/Memories/notes.txt")
-      {:ok, "My notes..."}
-
-      # With database ID scope
-      iex> read_file(789, "/nonexistent.txt")
-      {:error, :enoent}
+      iex> {:ok, entry} = read_file({:user, 123}, "/Memories/notes.txt")
+      iex> entry.content
+      "My notes..."
   """
-  @spec read_file(term(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  @spec read_file(term(), String.t()) :: {:ok, FileEntry.t()} | {:error, term()}
   def read_file(scope_key, path) do
     GenServer.call(get_name(scope_key), {:read_file, path})
   end
 
   @doc """
-  Delete file from filesystem.
+  Delete file or directory from filesystem.
 
   If file was persisted, it's also removed from storage immediately (no debounce).
   """
   @spec delete_file(term(), String.t()) :: :ok | {:error, term()}
   def delete_file(scope_key, path) do
     GenServer.call(get_name(scope_key), {:delete_file, path})
+  end
+
+  @doc """
+  List all file entries in the filesystem (content NOT loaded).
+
+  Returns entries with metadata suitable for building sidebar trees,
+  directory listings, or LLM `ls` tool responses.
+
+  ## Examples
+
+      iex> entries = list_entries({:user, 123})
+      iex> Enum.map(entries, & &1.path)
+      ["/Characters/Hero", "/Notes/Outline"]
+  """
+  @spec list_entries(nil | term()) :: [FileEntry.t()]
+  def list_entries(scope_key)
+  def list_entries(nil), do: []
+
+  def list_entries(scope_key) do
+    GenServer.call(get_name(scope_key), :list_entries)
+  end
+
+  @doc """
+  Update only the metadata.custom map for a file entry.
+
+  Does not touch content. Used for rename, reorder, tag updates, etc.
+
+  ## Options
+
+  - `:title` - Update the entry's title
+
+  ## Examples
+
+      iex> {:ok, entry} = update_metadata({:user, 123}, "/doc.md", %{tags: ["draft"]})
+      iex> entry.metadata.custom
+      %{tags: ["draft"]}
+  """
+  @spec update_metadata(term(), String.t(), map(), keyword()) ::
+          {:ok, FileEntry.t()} | {:error, term()}
+  def update_metadata(scope_key, path, custom, opts \\ []) do
+    GenServer.call(get_name(scope_key), {:update_metadata, path, custom, opts})
+  end
+
+  @doc """
+  Create a directory entry in the filesystem.
+
+  Directories have no content and are persisted immediately.
+
+  ## Options
+
+  - `:title` - Human-readable name
+  - `:custom` - Custom metadata map
+
+  ## Examples
+
+      iex> {:ok, entry} = create_directory({:user, 123}, "/Characters", title: "Characters")
+      iex> entry.entry_type
+      :directory
+  """
+  @spec create_directory(term(), String.t(), keyword()) ::
+          {:ok, FileEntry.t()} | {:error, term()}
+  def create_directory(scope_key, path, opts \\ []) do
+    GenServer.call(get_name(scope_key), {:create_directory, path, opts})
   end
 
   @doc """
@@ -476,9 +538,9 @@ defmodule Sagents.FileSystemServer do
   @impl true
   def handle_call({:write_file, path, content, opts}, _from, state) do
     case FileSystemState.write_file(state, path, content, opts) do
-      {:ok, new_state} ->
+      {:ok, entry, new_state} ->
         broadcast_file_change(new_state, {:file_updated, path})
-        {:reply, :ok, new_state}
+        {:reply, {:ok, entry}, new_state}
 
       {:error, reason, state} ->
         {:reply, {:error, reason}, state}
@@ -488,18 +550,18 @@ defmodule Sagents.FileSystemServer do
   @impl true
   def handle_call({:read_file, path}, _from, state) do
     case FileSystemState.read_file(state, path) do
-      {:ok, %FileEntry{loaded: true, content: content}} ->
-        # File is loaded, return content
-        {:reply, {:ok, content}, state}
+      {:ok, %FileEntry{loaded: true} = entry} ->
+        # File is loaded, return full entry
+        {:reply, {:ok, entry}, state}
 
       {:ok, %FileEntry{loaded: false}} ->
         # File exists but not loaded - load it first
         case FileSystemState.load_file(state, path) do
           {:ok, new_state} ->
-            # Now get the content
+            # Now get the full entry
             case FileSystemState.read_file(new_state, path) do
-              {:ok, %FileEntry{content: content}} ->
-                {:reply, {:ok, content}, new_state}
+              {:ok, entry} ->
+                {:reply, {:ok, entry}, new_state}
 
               {:error, :enoent} ->
                 {:reply, {:error, :enoent}, new_state}
@@ -530,6 +592,36 @@ defmodule Sagents.FileSystemServer do
   def handle_call(:list_files, _from, state) do
     files = FileSystemState.list_files(state)
     {:reply, files, state}
+  end
+
+  @impl true
+  def handle_call(:list_entries, _from, state) do
+    entries = FileSystemState.list_entries(state)
+    {:reply, entries, state}
+  end
+
+  @impl true
+  def handle_call({:update_metadata, path, custom, opts}, _from, state) do
+    case FileSystemState.update_metadata(state, path, custom, opts) do
+      {:ok, entry, new_state} ->
+        broadcast_file_change(new_state, {:file_updated, path})
+        {:reply, {:ok, entry}, new_state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:create_directory, path, opts}, _from, state) do
+    case FileSystemState.create_directory(state, path, opts) do
+      {:ok, entry, new_state} ->
+        broadcast_file_change(new_state, {:file_updated, path})
+        {:reply, {:ok, entry}, new_state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   @impl true

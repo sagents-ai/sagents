@@ -70,7 +70,7 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
       assert Map.has_key?(configs, "account_files")
 
       # Write to user_files (should persist)
-      assert :ok =
+      assert {:ok, _entry} =
                FileSystemServer.write_file(
                  {:agent, agent_id},
                  "/user_files/data.txt",
@@ -79,13 +79,8 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
 
       entry = get_entry(agent_id, "/user_files/data.txt")
       assert entry.persistence == :persisted
-      assert entry.dirty == true
-
-      # Wait for debounce
-      Process.sleep(150)
-
-      clean_entry = get_entry(agent_id, "/user_files/data.txt")
-      assert clean_entry.dirty == false
+      # New files are persisted immediately
+      assert entry.dirty == false
 
       # Verify file exists on disk (base_directory is stripped)
       user_path = Path.join([tmp_dir, "users", "data.txt"])
@@ -103,7 +98,7 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
       assert reason =~ "read-only"
 
       # Write to memory-only location
-      assert :ok =
+      assert {:ok, _entry} =
                FileSystemServer.write_file({:agent, agent_id}, "/scratch/temp.txt", "temp data")
 
       temp_entry = get_entry(agent_id, "/scratch/temp.txt")
@@ -160,8 +155,8 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
         def delete_from_storage(entry, opts),
           do: Persistence.Disk.delete_from_storage(entry, opts)
 
-        def list_persisted_files(agent_id, opts),
-          do: Persistence.Disk.list_persisted_files(agent_id, opts)
+        def list_persisted_entries(agent_id, opts),
+          do: Persistence.Disk.list_persisted_entries(agent_id, opts)
       end
 
       {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
@@ -188,19 +183,27 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
 
       assert :ok = FileSystemServer.register_persistence({:agent, agent_id}, slow_config)
 
-      # Write to both directories at the same time
-      start_time = System.monotonic_time()
+      # Create files first (persist immediately)
       FileSystemServer.write_file({:agent, agent_id}, "/fast/file.txt", "fast data")
       FileSystemServer.write_file({:agent, agent_id}, "/slow/file.txt", "slow data")
 
-      # Wait for fast persistence
+      # Consume immediate persist messages for new files
+      assert_receive {:persisted, "/fast/file.txt", _}, 200
+      assert_receive {:persisted, "/slow/file.txt", _}, 200
+
+      # Update both files at the same time (triggers debounce)
+      start_time = System.monotonic_time()
+      FileSystemServer.write_file({:agent, agent_id}, "/fast/file.txt", "fast data v2")
+      FileSystemServer.write_file({:agent, agent_id}, "/slow/file.txt", "slow data v2")
+
+      # Wait for fast persistence (debounced at 100ms)
       assert_receive {:persisted, "/fast/file.txt", fast_time}, 200
       fast_elapsed = System.convert_time_unit(fast_time - start_time, :native, :millisecond)
 
       # Fast should persist around 100ms
       assert fast_elapsed >= 90 and fast_elapsed < 200
 
-      # Wait for slow persistence
+      # Wait for slow persistence (debounced at 500ms)
       assert_receive {:persisted, "/slow/file.txt", slow_time}, 600
       slow_elapsed = System.convert_time_unit(slow_time - start_time, :native, :millisecond)
 
@@ -261,11 +264,18 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
 
         def delete_from_storage(_entry, _opts), do: :ok
 
-        def list_persisted_files(_agent_id, opts) do
-          # Return all file paths from ETS storage
+        def list_persisted_entries(_agent_id, opts) do
+          # Return all entries from ETS storage
           storage_table = Keyword.get(opts, :storage_table)
-          paths = :ets.tab2list(storage_table) |> Enum.map(fn {path, _} -> path end)
-          {:ok, paths}
+
+          entries =
+            :ets.tab2list(storage_table)
+            |> Enum.map(fn {path, _} ->
+              {:ok, entry} = Sagents.FileSystem.FileEntry.new_indexed_file(path)
+              entry
+            end)
+
+          {:ok, entries}
         end
       end
 
@@ -277,7 +287,7 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
           storage_opts: [test_pid: test_pid, storage_table: storage_table]
         })
 
-      # Start the server - this should call list_persisted_files and index the file
+      # Start the server - this should call list_persisted_entries and index the file
       {:ok, _pid} =
         FileSystemServer.start_link(
           scope_key: {:agent, agent_id},
@@ -294,8 +304,8 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
       refute_received {:loaded, _}
 
       # Now read the file - this should trigger lazy loading
-      assert {:ok, content} = FileSystemServer.read_file({:agent, agent_id}, "/data/existing.txt")
-      assert content == "lazy loaded content"
+      assert {:ok, entry} = FileSystemServer.read_file({:agent, agent_id}, "/data/existing.txt")
+      assert entry.content == "lazy loaded content"
 
       # Should have received load message
       assert_receive {:loaded, "/data/existing.txt"}, 100
@@ -306,8 +316,8 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
       assert loaded_entry.content == "lazy loaded content"
 
       # Reading again should NOT trigger another load (it's cached in ETS)
-      assert {:ok, content} = FileSystemServer.read_file({:agent, agent_id}, "/data/existing.txt")
-      assert content == "lazy loaded content"
+      assert {:ok, entry} = FileSystemServer.read_file({:agent, agent_id}, "/data/existing.txt")
+      assert entry.content == "lazy loaded content"
 
       # Should not receive another load message
       refute_received {:loaded, _}

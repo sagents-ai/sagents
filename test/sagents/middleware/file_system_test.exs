@@ -253,7 +253,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert message =~ "created successfully"
 
       # Verify file was created in FileSystemServer
-      {:ok, content} = FileSystemServer.read_file({:agent, agent_id}, "/new.txt")
+      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/new.txt")
       assert content == "Hello, World!"
     end
 
@@ -306,7 +306,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert message =~ "edited successfully"
 
       # Verify content changed
-      {:ok, content} = FileSystemServer.read_file({:agent, agent_id}, "/edit.txt")
+      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/edit.txt")
       assert content == "Hello Elixir"
     end
 
@@ -349,7 +349,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert message =~ "edited successfully"
       assert message =~ "3 replacements"
 
-      {:ok, content} = FileSystemServer.read_file({:agent, agent_id}, "/multi.txt")
+      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/multi.txt")
       assert content == "foo foo foo"
     end
 
@@ -841,7 +841,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert result =~ "Replaced 1 lines (3-3)"
 
       # Verify file content
-      {:ok, content} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
+      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
       assert content =~ "Line 1"
       assert content =~ "Line 2"
       assert content =~ "REPLACED LINE 3"
@@ -875,7 +875,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert result =~ "Replaced 3 lines (2-4)"
 
       # Verify file content
-      {:ok, content} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
+      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
       lines = String.split(content, "\n", trim: true)
       assert lines == ["Line 1", "NEW LINE A", "NEW LINE B", "Line 5"]
     end
@@ -907,7 +907,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       {:ok, result} = edit_lines_tool.function.(args, %{})
       assert result =~ "Replaced 2 lines"
 
-      {:ok, content} = FileSystemServer.read_file({:agent, agent_id}, "/story.txt")
+      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/story.txt")
       assert content =~ "Chapter 1"
       assert content =~ "New paragraph 1"
       assert content =~ "New paragraph 2"
@@ -938,7 +938,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       {:ok, result} = edit_lines_tool.function.(args, %{})
       assert result =~ "Replaced 1 lines (1-1)"
 
-      {:ok, content} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
+      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
       lines = String.split(content, "\n", trim: true)
       assert lines == ["REPLACED FIRST LINE", "Line 2", "Line 3"]
     end
@@ -963,7 +963,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       {:ok, result} = edit_lines_tool.function.(args, %{})
       assert result =~ "Replaced 1 lines (4-4)"
 
-      {:ok, content} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
+      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
       lines = String.split(content, "\n", trim: true)
       assert lines == ["Line 1", "Line 2", "Line 3", "REPLACED LAST LINE"]
     end
@@ -988,7 +988,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       {:ok, result} = edit_lines_tool.function.(args, %{})
       assert result =~ "Replaced 4 lines (1-4)"
 
-      {:ok, content} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
+      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
       assert String.trim(content) == "Completely new content"
     end
 
@@ -1012,7 +1012,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       {:ok, result} = edit_lines_tool.function.(args, %{})
       assert result =~ "Replaced 1 lines"
 
-      {:ok, content} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
+      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
       lines = String.split(content, "\n", trim: true)
       # Empty string creates an empty line
       assert length(lines) == 2

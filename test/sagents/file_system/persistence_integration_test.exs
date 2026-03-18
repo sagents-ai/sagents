@@ -47,7 +47,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
   end
 
   describe "full persistence workflow" do
-    test "writes persist to disk after debounce", %{agent_id: agent_id, tmp_dir: tmp_dir} do
+    test "new file persists to disk immediately", %{agent_id: agent_id, tmp_dir: tmp_dir} do
       config = make_config(Disk, "Memories", tmp_dir)
 
       {:ok, _pid} =
@@ -56,15 +56,44 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
           configs: [config]
         )
 
-      # Write a file to persisted directory
+      # Write a new file to persisted directory
       path = "/Memories/test.txt"
       content = "test content"
-      assert :ok = FileSystemServer.write_file({:agent, agent_id}, path, content)
+      assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, content)
 
-      # File should be in ETS immediately
+      # New file should be persisted immediately (dirty == false)
       entry = get_entry(agent_id, path)
       assert entry.content == content
       assert entry.persistence == :persisted
+      assert entry.dirty == false
+
+      # Verify file exists on disk immediately (no debounce needed)
+      disk_path = Path.join(tmp_dir, "test.txt")
+      assert File.exists?(disk_path)
+      assert File.read!(disk_path) == content
+    end
+
+    test "updates to existing file persist after debounce", %{
+      agent_id: agent_id,
+      tmp_dir: tmp_dir
+    } do
+      config = make_config(Disk, "Memories", tmp_dir)
+
+      {:ok, _pid} =
+        FileSystemServer.start_link(
+          scope_key: {:agent, agent_id},
+          configs: [config]
+        )
+
+      path = "/Memories/test.txt"
+      # Create file first (persists immediately)
+      assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, "initial")
+
+      # Update the file
+      assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, "updated content")
+
+      # File should be dirty after update
+      entry = get_entry(agent_id, path)
       assert entry.dirty == true
 
       # Wait for debounce
@@ -74,10 +103,9 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       clean_entry = get_entry(agent_id, path)
       assert clean_entry.dirty == false
 
-      # Verify file exists on disk
+      # Verify updated content on disk
       disk_path = Path.join(tmp_dir, "test.txt")
-      assert File.exists?(disk_path)
-      assert File.read!(disk_path) == content
+      assert File.read!(disk_path) == "updated content"
     end
 
     test "rapid writes batch into single persist", %{agent_id: agent_id, tmp_dir: tmp_dir} do
@@ -100,8 +128,8 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
           Sagents.FileSystem.Persistence.Disk.delete_from_storage(entry, opts)
         end
 
-        def list_persisted_files(agent_id, opts) do
-          Sagents.FileSystem.Persistence.Disk.list_persisted_files(agent_id, opts)
+        def list_persisted_entries(agent_id, opts) do
+          Sagents.FileSystem.Persistence.Disk.list_persisted_entries(agent_id, opts)
         end
       end
 
@@ -117,8 +145,13 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
 
       path = "/Memories/rapid.txt"
 
-      # Write 10 times rapidly
-      for i <- 1..10 do
+      # First write creates the file (persists immediately)
+      FileSystemServer.write_file({:agent, agent_id}, path, "version 1")
+      # Consume the immediate persist message
+      assert_received {:persisted, ^path, _time}
+
+      # Subsequent writes are updates (debounced)
+      for i <- 2..10 do
         FileSystemServer.write_file({:agent, agent_id}, path, "version #{i}")
         Process.sleep(10)
       end
@@ -126,7 +159,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       # Wait for debounce
       Process.sleep(150)
 
-      # Should only have persisted once
+      # Should only have persisted once for all debounced updates
       assert_received {:persisted, ^path, _time}
       refute_received {:persisted, ^path, _time}
     end
@@ -143,7 +176,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       # Write to non-persisted directory
       path = "/scratch/temp.txt"
       content = "temporary content"
-      assert :ok = FileSystemServer.write_file({:agent, agent_id}, path, content)
+      assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, content)
 
       # File should be in ETS
       entry = get_entry(agent_id, path)
@@ -167,10 +200,19 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
           configs: [config]
         )
 
-      # Write files
+      # Create files (persisted immediately)
       FileSystemServer.write_file({:agent, agent_id}, "/Memories/file1.txt", "content1")
       FileSystemServer.write_file({:agent, agent_id}, "/Memories/file2.txt", "content2")
       FileSystemServer.write_file({:agent, agent_id}, "/Memories/file3.txt", "content3")
+
+      # New files are already persisted, dirty == 0
+      {:ok, stats_clean} = FileSystemServer.stats({:agent, agent_id})
+      assert stats_clean.dirty_files == 0
+
+      # Update files to make them dirty
+      FileSystemServer.write_file({:agent, agent_id}, "/Memories/file1.txt", "content1_v2")
+      FileSystemServer.write_file({:agent, agent_id}, "/Memories/file2.txt", "content2_v2")
+      FileSystemServer.write_file({:agent, agent_id}, "/Memories/file3.txt", "content3_v2")
 
       # Verify they're dirty
       {:ok, stats_before} = FileSystemServer.stats({:agent, agent_id})
@@ -186,11 +228,11 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       {:ok, stats_after} = FileSystemServer.stats({:agent, agent_id})
       assert stats_after.dirty_files == 0
 
-      # All files should exist on disk
+      # All files should exist on disk with updated content
       for i <- 1..3 do
         disk_path = Path.join(tmp_dir, "file#{i}.txt")
         assert File.exists?(disk_path)
-        assert File.read!(disk_path) == "content#{i}"
+        assert File.read!(disk_path) == "content#{i}_v2"
       end
     end
 
@@ -203,21 +245,25 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
           configs: [config]
         )
 
-      # Write files with long debounce
+      # Create files (persisted immediately)
       FileSystemServer.write_file({:agent, agent_id}, "/Memories/file1.txt", "data1")
       FileSystemServer.write_file({:agent, agent_id}, "/Memories/file2.txt", "data2")
 
-      # Stop the server immediately (should flush on terminate)
+      # Update files to make them dirty (debounce pending with long timer)
+      FileSystemServer.write_file({:agent, agent_id}, "/Memories/file1.txt", "data1_v2")
+      FileSystemServer.write_file({:agent, agent_id}, "/Memories/file2.txt", "data2_v2")
+
+      # Stop the server immediately (should flush pending writes on terminate)
       GenServer.stop(pid, :normal)
 
-      # Files should be on disk
+      # Updated content should be on disk
       disk_path1 = Path.join(tmp_dir, "file1.txt")
       disk_path2 = Path.join(tmp_dir, "file2.txt")
 
       assert File.exists?(disk_path1)
       assert File.exists?(disk_path2)
-      assert File.read!(disk_path1) == "data1"
-      assert File.read!(disk_path2) == "data2"
+      assert File.read!(disk_path1) == "data1_v2"
+      assert File.read!(disk_path2) == "data2_v2"
     end
 
     test "delete removes file from disk immediately", %{agent_id: agent_id, tmp_dir: tmp_dir} do
@@ -272,13 +318,14 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
 
       # Second: start new server (should index files)
       # Note: Lazy loading indexing would need to be implemented in FileSystemState.new/1
-      # For now, this tests the disk backend's list_persisted_files capability
-      {:ok, files} =
-        Disk.list_persisted_files(agent_id, path: tmp_dir, base_directory: "Memories")
+      # For now, this tests the disk backend's list_persisted_entries capability
+      {:ok, entries} =
+        Disk.list_persisted_entries(agent_id, path: tmp_dir, base_directory: "Memories")
 
-      assert length(files) == 2
-      assert "/Memories/file1.txt" in files
-      assert "/Memories/file2.txt" in files
+      paths = Enum.map(entries, & &1.path)
+      assert length(entries) == 2
+      assert "/Memories/file1.txt" in paths
+      assert "/Memories/file2.txt" in paths
     end
   end
 
@@ -364,13 +411,14 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
 
       Process.sleep(150)
 
-      {:ok, listed_files} =
-        Disk.list_persisted_files(agent_id, path: tmp_dir, base_directory: "Memories")
+      {:ok, listed_entries} =
+        Disk.list_persisted_entries(agent_id, path: tmp_dir, base_directory: "Memories")
 
-      assert length(listed_files) == 4
+      listed_paths = Enum.map(listed_entries, & &1.path)
+      assert length(listed_entries) == 4
 
       for path <- files do
-        assert path in listed_files
+        assert path in listed_paths
       end
     end
   end
@@ -401,16 +449,16 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
         end
 
       results = Task.await_many(tasks)
-      assert Enum.all?(results, &(&1 == :ok))
+      assert Enum.all?(results, &match?({:ok, _}, &1))
 
       # Wait for all debounces
       Process.sleep(200)
 
       # All files should be on disk
-      {:ok, files} =
-        Disk.list_persisted_files(agent_id, path: tmp_dir, base_directory: "Memories")
+      {:ok, entries} =
+        Disk.list_persisted_entries(agent_id, path: tmp_dir, base_directory: "Memories")
 
-      assert length(files) == 10
+      assert length(entries) == 10
 
       for i <- 1..10 do
         disk_path = Path.join(tmp_dir, "subagent_#{i}.txt")
@@ -435,16 +483,25 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       assert stats.total_files == 0
       assert stats.dirty_files == 0
 
-      # Write files
+      # Create files (new persisted files persist immediately)
       FileSystemServer.write_file({:agent, agent_id}, "/scratch/temp.txt", "temp")
       FileSystemServer.write_file({:agent, agent_id}, "/Memories/persist1.txt", "data1")
       FileSystemServer.write_file({:agent, agent_id}, "/Memories/persist2.txt", "data2")
 
-      # Check stats before persist
+      # New files are persisted immediately, so dirty_files == 0
+      {:ok, stats_after_create} = FileSystemServer.stats({:agent, agent_id})
+      assert stats_after_create.total_files == 3
+      assert stats_after_create.memory_files == 1
+      assert stats_after_create.persisted_files == 2
+      assert stats_after_create.dirty_files == 0
+
+      # Update persisted files to make them dirty
+      FileSystemServer.write_file({:agent, agent_id}, "/Memories/persist1.txt", "data1_v2")
+      FileSystemServer.write_file({:agent, agent_id}, "/Memories/persist2.txt", "data2_v2")
+
+      # Check stats before debounce persist
       {:ok, stats_before} = FileSystemServer.stats({:agent, agent_id})
       assert stats_before.total_files == 3
-      assert stats_before.memory_files == 1
-      assert stats_before.persisted_files == 2
       assert stats_before.dirty_files == 2
 
       # Wait for persist
@@ -468,7 +525,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
 
         def load_from_storage(_entry, _opts), do: {:error, :enoent}
         def delete_from_storage(_entry, _opts), do: :ok
-        def list_persisted_files(_agent_id, _opts), do: {:ok, []}
+        def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
       end
 
       config = make_config(FailingPersistence, "Memories", tmp_dir)
@@ -480,7 +537,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
         )
 
       # Write should succeed (ETS write)
-      assert :ok =
+      assert {:ok, _entry} =
                FileSystemServer.write_file({:agent, agent_id}, "/Memories/file.txt", "content")
 
       # File should be in ETS

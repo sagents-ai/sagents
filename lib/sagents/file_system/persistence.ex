@@ -2,7 +2,7 @@ defmodule Sagents.FileSystem.Persistence do
   @moduledoc """
   Behaviour for persisting files to storage.
 
-  Custom persistence implementations must implement all four callbacks.
+  Custom persistence implementations must implement all required callbacks.
   The default implementation writes to the local filesystem.
 
   ## Usage
@@ -54,10 +54,11 @@ defmodule Sagents.FileSystem.Persistence do
   Delete a file from persistent storage. Called immediately when a persisted file
   is deleted (no debounce).
 
-  ### list_persisted_files/2
+  ### list_persisted_entries/2
 
-  List all persisted file paths for an agent. Called during agent initialization
-  to index existing files without loading content.
+  List all persisted file entries for an agent. Called during initialization
+  to index existing files with their metadata (title, type, tags, etc.)
+  without loading content.
   """
 
   alias Sagents.FileSystem.FileEntry
@@ -118,9 +119,13 @@ defmodule Sagents.FileSystem.Persistence do
               :ok | {:error, term()}
 
   @doc """
-  List all persisted file paths for an agent.
+  List all persisted file entries for an agent.
 
-  Used during agent initialization to index existing files without loading content.
+  Used during initialization to index existing files with their metadata
+  (title, entry_type, custom metadata, etc.) without loading content.
+
+  Returns FileEntry structs with `content: nil, loaded: false` (for files)
+  or `loaded: true` (for directories, which have no content to load).
 
   ## Parameters
 
@@ -129,13 +134,31 @@ defmodule Sagents.FileSystem.Persistence do
 
   ## Returns
 
-  - `{:ok, paths}` where paths is a list of file path strings
+  - `{:ok, entries}` where entries is a list of FileEntry structs
   - `{:error, reason}` on failure
-
-  ## Example
-
-      {:ok, ["/Memories/chat_log.txt", "/Memories/notes.md"]}
   """
-  @callback list_persisted_files(agent_id :: String.t(), opts :: keyword()) ::
-              {:ok, [String.t()]} | {:error, term()}
+  @callback list_persisted_entries(agent_id :: String.t(), opts :: keyword()) ::
+              {:ok, [FileEntry.t()]} | {:error, term()}
+
+  @doc """
+  Update only metadata for a persisted file entry (no content write).
+
+  This is an optional callback used when metadata changes without content changes
+  (e.g., rename, reorder, tag updates). Falls back to `write_to_storage/2` if
+  not implemented.
+
+  ## Parameters
+
+  - `file_entry` - The FileEntry with updated metadata
+  - `opts` - Storage configuration options
+
+  ## Returns
+
+  - `{:ok, file_entry}` with updated metadata
+  - `{:error, reason}` on failure
+  """
+  @callback update_metadata_in_storage(file_entry :: FileEntry.t(), opts :: keyword()) ::
+              {:ok, FileEntry.t()} | {:error, term()}
+
+  @optional_callbacks update_metadata_in_storage: 2
 end

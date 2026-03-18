@@ -576,8 +576,8 @@ defmodule Sagents.Middleware.FileSystem do
     with {:ok, normalized_path} <- validate_path(file_path) do
       # Read file using FileSystemServer (handles lazy loading automatically)
       case FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
-        {:ok, content} ->
-          format_file_content(content, normalized_path, offset, limit)
+        {:ok, entry} ->
+          format_file_content(entry.content || "", normalized_path, offset, limit)
 
         {:error, :enoent} ->
           {:error, "File not found: #{normalized_path}"}
@@ -656,7 +656,7 @@ defmodule Sagents.Middleware.FileSystem do
                    normalized_path,
                    content
                  ) do
-              :ok ->
+              {:ok, _entry} ->
                 {:ok, "File created successfully: #{normalized_path}"}
 
               {:error, reason} ->
@@ -687,11 +687,11 @@ defmodule Sagents.Middleware.FileSystem do
         with {:ok, normalized_path} <- validate_path(file_path) do
           # Read current content using FileSystemServer
           case FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
-            {:ok, content} ->
+            {:ok, entry} ->
               perform_edit(
                 config.filesystem_scope,
                 normalized_path,
-                content,
+                entry.content || "",
                 old_string,
                 new_string,
                 replace_all
@@ -803,12 +803,12 @@ defmodule Sagents.Middleware.FileSystem do
 
       true ->
         with {:ok, normalized_path} <- validate_path(file_path),
-             {:ok, content} <-
+             {:ok, entry} <-
                FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
           perform_line_edit(
             config.filesystem_scope,
             normalized_path,
-            content,
+            entry.content || "",
             start_line,
             end_line,
             new_content
@@ -828,8 +828,8 @@ defmodule Sagents.Middleware.FileSystem do
 
   defp search_single_file(filesystem_scope, file_path, regex, context_lines, max_results) do
     with {:ok, normalized_path} <- validate_path(file_path),
-         {:ok, content} <- FileSystemServer.read_file(filesystem_scope, normalized_path) do
-      {matches, truncated} = find_matches_in_content(content, regex, context_lines, max_results)
+         {:ok, entry} <- FileSystemServer.read_file(filesystem_scope, normalized_path) do
+      {matches, truncated} = find_matches_in_content(entry.content || "", regex, context_lines, max_results)
       format_search_results([{normalized_path, matches}], max_results, truncated)
     else
       {:error, :enoent} ->
@@ -855,9 +855,9 @@ defmodule Sagents.Middleware.FileSystem do
           {acc, match_count, truncated}
         else
           case FileSystemServer.read_file(filesystem_scope, file_path) do
-            {:ok, content} ->
+            {:ok, entry} ->
               {matches, file_truncated} =
-                find_matches_in_content(content, regex, context_lines, remaining)
+                find_matches_in_content(entry.content || "", regex, context_lines, remaining)
 
               if Enum.empty?(matches) do
                 {acc, match_count, truncated}
@@ -1036,7 +1036,7 @@ defmodule Sagents.Middleware.FileSystem do
 
   defp write_edit(filesystem_scope, file_path, updated_content, success_message) do
     case FileSystemServer.write_file(filesystem_scope, file_path, updated_content) do
-      :ok ->
+      {:ok, _entry} ->
         {:ok, success_message}
 
       {:error, reason} ->
@@ -1076,7 +1076,7 @@ defmodule Sagents.Middleware.FileSystem do
 
         # Write the updated content
         case FileSystemServer.write_file(filesystem_scope, file_path, updated_content) do
-          :ok ->
+          {:ok, _entry} ->
             {:ok,
              "File edited successfully: #{file_path}\nReplaced #{lines_replaced_count} lines (#{start_line}-#{end_line})"}
 

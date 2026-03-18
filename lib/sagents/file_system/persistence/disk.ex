@@ -134,14 +134,21 @@ defmodule Sagents.FileSystem.Persistence.Disk do
   end
 
   @impl true
-  def list_persisted_files(_agent_id, opts) do
+  def list_persisted_entries(_agent_id, opts) do
     storage_path = Keyword.fetch!(opts, :path)
     base_directory = Keyword.get(opts, :base_directory, "")
 
     case File.exists?(storage_path) do
       true ->
-        files = scan_directory(storage_path, storage_path, base_directory)
-        {:ok, files}
+        paths = scan_directory(storage_path, storage_path, base_directory)
+
+        entries =
+          Enum.map(paths, fn path ->
+            {:ok, entry} = FileEntry.new_indexed_file(path)
+            entry
+          end)
+
+        {:ok, entries}
 
       false ->
         {:ok, []}

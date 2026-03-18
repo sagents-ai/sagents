@@ -142,7 +142,7 @@ defmodule Sagents.IntegrationTest do
       assert FileSystemServer.whereis({:agent, agent_id}) == fs_pid
 
       # Test that write_file works directly (paths must start with /)
-      assert :ok ==
+      assert {:ok, _entry} =
                FileSystemServer.write_file({:agent, agent_id}, "/direct_test.txt", "test content")
 
       assert FileSystemServer.file_exists?({:agent, agent_id}, "/direct_test.txt")
@@ -171,8 +171,8 @@ defmodule Sagents.IntegrationTest do
       assert "/test.txt" in files
 
       # Get the file content from FileSystemServer
-      {:ok, file_content} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
-      assert file_content == "Hello, World!"
+      {:ok, file_entry} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
+      assert file_entry.content == "Hello, World!"
     end
 
     test "handles multiple tool calls in sequence", %{model: model} do
@@ -279,8 +279,8 @@ defmodule Sagents.IntegrationTest do
       files = FileSystemServer.list_files({:agent, agent.agent_id})
       assert "/data.txt" in files
 
-      {:ok, file_content} = FileSystemServer.read_file({:agent, agent.agent_id}, "/data.txt")
-      assert file_content == "Some data"
+      {:ok, file_entry} = FileSystemServer.read_file({:agent, agent.agent_id}, "/data.txt")
+      assert file_entry.content == "Some data"
     end
 
     test "handles tool errors gracefully", %{model: model} do
@@ -344,8 +344,8 @@ defmodule Sagents.IntegrationTest do
       files = FileSystemServer.list_files({:agent, agent.agent_id})
       assert "/existing.txt" in files
 
-      {:ok, file_content} = FileSystemServer.read_file({:agent, agent.agent_id}, "/existing.txt")
-      assert file_content == "content"
+      {:ok, file_entry} = FileSystemServer.read_file({:agent, agent.agent_id}, "/existing.txt")
+      assert file_entry.content == "content"
     end
 
     test "todos are preserved when merging with a subset", %{model: model} do
