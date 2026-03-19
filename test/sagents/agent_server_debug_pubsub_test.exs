@@ -146,7 +146,7 @@ defmodule Sagents.AgentServerDebugPubSubTest do
       :ok = AgentServer.subscribe_debug(agent_id)
 
       # Send a middleware message (use module name as ID)
-      :ok = AgentServer.send_middleware_message(agent_id, TestMiddleware, :test_message)
+      :ok = AgentServer.notify_middleware(agent_id, TestMiddleware, :test_message)
 
       # Should receive debug event wrapped in {:agent, {:debug, event}} tuple
       assert_receive {:agent, {:debug, {:agent_state_update, TestMiddleware, %State{}}}}, 100
@@ -177,7 +177,7 @@ defmodule Sagents.AgentServerDebugPubSubTest do
       :ok = AgentServer.subscribe(agent_id)
 
       # Send a middleware message
-      :ok = AgentServer.send_middleware_message(agent_id, TestMiddleware, :test_message)
+      :ok = AgentServer.notify_middleware(agent_id, TestMiddleware, :test_message)
 
       # Should NOT receive agent_state_update on regular pubsub (neither wrapped nor unwrapped)
       refute_receive {:agent, {:debug, {:agent_state_update, _, _}}}, 100
@@ -331,13 +331,13 @@ defmodule Sagents.AgentServerDebugPubSubTest do
       :ok = AgentServer.subscribe_debug(agent1.agent_id)
 
       # Send message to agent2
-      :ok = AgentServer.send_middleware_message(agent2.agent_id, TestMiddleware, :test_message)
+      :ok = AgentServer.notify_middleware(agent2.agent_id, TestMiddleware, :test_message)
 
       # Should NOT receive debug events from agent2
       refute_receive {:agent, {:debug, {:agent_state_update, _, _}}}, 100
 
       # Send message to agent1
-      :ok = AgentServer.send_middleware_message(agent1.agent_id, TestMiddleware, :test_message)
+      :ok = AgentServer.notify_middleware(agent1.agent_id, TestMiddleware, :test_message)
 
       # Should receive debug events from agent1 wrapped in {:agent, {:debug, event}} tuple
       assert_receive {:agent, {:debug, {:agent_state_update, TestMiddleware, %State{}}}}, 100

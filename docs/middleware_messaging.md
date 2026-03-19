@@ -1,10 +1,11 @@
 # Middleware Messaging Guide
 
-This guide explains the middleware messaging pattern in Sagents, which enables middleware components to spawn asynchronous processes, communicate with the AgentServer, and receive results back for state updates.
+This guide explains the middleware messaging pattern in Sagents, which enables targeted communication with middleware running inside an AgentServer — both from external processes (LiveViews, controllers) and from async tasks spawned by the middleware itself.
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [External Notifications](#external-notifications)
 - [Architecture](#architecture)
 - [Core Concepts](#core-concepts)
 - [Implementation Guide](#implementation-guide)
@@ -15,48 +16,125 @@ This guide explains the middleware messaging pattern in Sagents, which enables m
 
 ## Overview
 
-The middleware messaging pattern allows middleware to:
+The middleware messaging pattern allows:
 
-1. **Spawn async tasks** during any lifecycle hook (`before_model`, `after_model`)
-2. **Send messages back** to the AgentServer when tasks complete
-3. **Receive and handle messages** via the `handle_message/3` callback
-4. **Update state** in response to async results
-5. **Broadcast updates** to subscribers (LiveViews, external clients)
+1. **External processes** (LiveViews, controllers) to send targeted updates to a specific middleware in a running AgentServer
+2. **Middleware** to spawn async tasks and receive results back via the same mechanism
+3. **State updates** in response to messages, which are then available to `before_model/2` on the next LLM call
+4. **Broadcast updates** to subscribers (LiveViews, external clients)
 
-This pattern is essential for operations that:
-- Take significant time (LLM calls, external APIs, file processing)
-- Should not block the main agent execution flow
-- Need to update state after completion
-- Require error handling and retry logic
+All messages are routed through `AgentServer.notify_middleware/3`, which delivers them to the target middleware's `handle_message/3` callback.
+
+### Two primary use cases
+
+**External notifications** — A LiveView or controller sends context to a middleware that the middleware couldn't know on its own. For example, telling a "user context" middleware which document the user is currently viewing, so the middleware can inject that context into the next LLM message.
+
+**Async task results** — A middleware spawns a background task (e.g., title generation, embedding computation) and the task sends results back to the middleware for state updates.
+
+Both use cases share the same API and routing mechanism — the distinction is just who calls `notify_middleware/3`.
+
+## External Notifications
+
+This is the most common pattern for application code interacting with middleware at runtime. It allows your LiveViews, controllers, or other processes to send targeted messages to a specific middleware in a running AgentServer.
+
+### Why not try to update metadata directly?
+
+A generic "update metadata" API is untargeted — it dumps data into a shared bucket without the middleware knowing about it. `notify_middleware/3` routes directly to a specific middleware by ID, letting the middleware:
+
+- Validate the message
+- Decide how to store it (metadata, config, side effects)
+- Maintain its own invariants
+- Pattern match on specific message types
+
+### Pattern: LiveView → Middleware context updates
+
+```elixir
+# In your LiveView — user navigated to a different document
+def handle_event("select_document", %{"id" => id}, socket) do
+  doc = Writing.get_document!(socket.assigns.current_scope, id)
+
+  if socket.assigns.agent_id do
+    AgentServer.notify_middleware(
+      socket.assigns.agent_id,
+      MyApp.Middleware.UserContext,
+      {:current_document_changed, %{path: doc.path, title: doc.title}}
+    )
+  end
+
+  {:noreply, assign(socket, :active_document, doc)}
+end
+```
+
+```elixir
+# In the middleware — handle the notification
+@impl true
+def handle_message({:current_document_changed, doc_info}, state, _config) do
+  {:ok, State.put_metadata(state, "current_document", doc_info)}
+end
+
+# In before_model — use the stored context
+@impl true
+def before_model(state, _config) do
+  case State.get_metadata(state, "current_document") do
+    nil -> {:ok, state}
+    %{path: path, title: title} ->
+      context = "Currently viewing: #{title} (#{path})"
+      {:ok, prepend_to_last_user_message(state, context)}
+  end
+end
+```
+
+### Pattern: Preference or setting changes
+
+```elixir
+# Toggle verbose mode from a settings panel
+AgentServer.notify_middleware(agent_id, MyApp.Middleware.Preferences, {:set, :verbose, true})
+```
+
+```elixir
+# In the middleware
+@impl true
+def handle_message({:set, key, value}, state, _config) do
+  prefs = State.get_metadata(state, "preferences") || %{}
+  {:ok, State.put_metadata(state, "preferences", Map.put(prefs, key, value))}
+end
+```
+
+### Key characteristics
+
+- **Fire-and-forget**: `notify_middleware/3` returns `:ok` immediately. The caller doesn't wait for a response.
+- **Safe when agent is down**: If the AgentServer isn't running, the message is silently dropped.
+- **Targeted**: The message is routed to a specific middleware by ID — not broadcast to all middleware.
+- **Middleware owns interpretation**: The middleware's `handle_message/3` decides what to do with the message. It can update metadata, trigger side effects, or ignore it.
 
 ## Architecture
 
 ### High-Level Message Flow
 
+There are two flows — external notifications and async task results — that converge on the same `handle_message/3` callback:
+
 ```mermaid
 sequenceDiagram
-    participant U as User/LiveView
+    participant LV as LiveView/Controller
     participant AS as AgentServer
     participant M as Middleware
     participant T as Async Task
     participant PS as PubSub
 
-    U->>AS: Send Message
-    AS->>M: after_model(state, config)
-    M->>M: Capture agent_id from state
-    M->>T: Task.start(fn -> ...)
-    M-->>AS: {:ok, state}
-    AS-->>U: Response (execution continues)
-
-    Note over T: Async work happens here
-
-    T->>T: Complete work
-    T->>PS: AgentServer.publish_event_from(agent_id, event)
-    T->>AS: AgentServer.send_middleware_message(agent_id, id, message)
+    Note over LV,M: Flow 1: External notification
+    LV->>AS: notify_middleware(agent_id, middleware_id, message)
     AS->>M: handle_message(message, state, config)
     M-->>AS: {:ok, updated_state}
+
+    Note over LV,M: Flow 2: Async task result
+    AS->>M: after_model(state, config)
+    M->>T: Task.start(fn -> ...)
+    M-->>AS: {:ok, state}
+    T->>T: Complete work
+    T->>AS: notify_middleware(agent_id, middleware_id, result)
+    AS->>M: handle_message(result, state, config)
+    M-->>AS: {:ok, updated_state}
     AS->>PS: Broadcast debug event (state update)
-    PS->>U: Notify of changes
 ```
 
 ### Middleware Lifecycle with Messaging
@@ -129,9 +207,27 @@ middleware = [
 ]
 ```
 
-### 2. Capturing the Server PID
+### 2. Sending Messages with `notify_middleware/3`
 
-Middleware callbacks execute **in the AgentServer process context**, so `self()` returns the AgentServer PID:
+All middleware messages — whether from external processes or async tasks — use the same public API:
+
+```elixir
+AgentServer.notify_middleware(agent_id, middleware_id, message)
+```
+
+Where:
+- `agent_id`: The agent identifier string
+- `middleware_id`: Atom (module name) or string (custom ID)
+- `message`: Any term (typically a tagged tuple like `{:result, data}`)
+
+**From external processes** (LiveViews, controllers):
+
+```elixir
+# User navigated to a new document — tell the middleware
+AgentServer.notify_middleware(agent_id, MyApp.UserContext, {:document_changed, doc_info})
+```
+
+**From async tasks** spawned by middleware:
 
 ```elixir
 def after_model(state, config) do
@@ -140,29 +236,15 @@ def after_model(state, config) do
   middleware_id = Map.get(config, :id, __MODULE__)
 
   Task.start(fn ->
-    # This runs in a different process
     result = do_work()
-    # Send back to the AgentServer using public API
-    AgentServer.send_middleware_message(agent_id, middleware_id, {:result, result})
+    AgentServer.notify_middleware(agent_id, middleware_id, {:result, result})
   end)
 
   {:ok, state}
 end
 ```
 
-### 3. Message Format
-
-Messages sent to the AgentServer follow this pattern:
-
-```elixir
-{:middleware_message, middleware_id, message}
-```
-
-Where:
-- `middleware_id`: Atom (module name) or string (custom ID)
-- `message`: Any term (typically a tagged tuple like `{:result, data}`)
-
-### 4. State Updates and Broadcasting
+### 3. State Updates and Broadcasting
 
 The `handle_message/3` callback updates state and can trigger broadcasts manually:
 
@@ -181,7 +263,7 @@ Middleware can broadcast custom events using `AgentServer.publish_event_from/2`:
 ```elixir
 # In async task after work completes
 AgentServer.publish_event_from(agent_id, {:custom_event, data})
-AgentServer.send_middleware_message(agent_id, middleware_id, {:result, data})
+AgentServer.notify_middleware(agent_id, middleware_id, {:result, data})
 ```
 
 When state is updated via `handle_message/3`, a debug event is automatically broadcast:
@@ -267,7 +349,7 @@ defp spawn_async_task(state, config) do
       AgentServer.publish_event_from(agent_id, {:custom_event, result})
 
       # Send success message back to AgentServer
-      AgentServer.send_middleware_message(agent_id, middleware_id, {:success, result})
+      AgentServer.notify_middleware(agent_id, middleware_id, {:success, result})
     rescue
       error ->
         Logger.error("Processing failed: #{inspect(error)}")
@@ -280,7 +362,7 @@ defp spawn_async_task(state, config) do
         )
 
         # Send failure message back
-        AgentServer.send_middleware_message(agent_id, middleware_id, {:error, error})
+        AgentServer.notify_middleware(agent_id, middleware_id, {:error, error})
     end
   end)
 end
@@ -398,20 +480,22 @@ def on_server_start(state, _config) do
 end
 ```
 
-### Message Sending
+### `AgentServer.notify_middleware/3`
 
-Send messages to the AgentServer from async tasks using the public API:
+Send a targeted message to a specific middleware in a running AgentServer. Works from any process — LiveViews, controllers, async tasks, or other GenServers.
 
 ```elixir
-AgentServer.send_middleware_message(agent_id, middleware_id, message)
+AgentServer.notify_middleware(agent_id, middleware_id, message)
 ```
 
 **Parameters:**
-- `agent_id` - The agent ID (captured from `state.agent_id`)
-- `middleware_id` - Module name or custom ID from config
-- `message` - Any term to be handled by `handle_message/3`
+- `agent_id` - The agent identifier string
+- `middleware_id` - Module name (atom) or custom ID (string) of the target middleware
+- `message` - Any term to be delivered to the middleware's `handle_message/3` callback
 
-**Note:** The public API `AgentServer.send_middleware_message/3` is strongly preferred over raw `send/2` because it:
+**Returns:** `:ok` (always — fire-and-forget, silent no-op if agent is not running)
+
+**Note:** `notify_middleware/3` is strongly preferred over raw `send/2` because it:
 - Provides a clearer, more maintainable interface
 - Handles the case where the AgentServer may not be running
 - Is consistent with other AgentServer operations
@@ -529,7 +613,7 @@ defmodule Sagents.Middleware.ConversationTitle do
         AgentServer.publish_event_from(agent_id, {:conversation_title_generated, title, agent_id})
 
         # Send message to AgentServer for state update
-        AgentServer.send_middleware_message(agent_id, middleware_id, {:title_generated, title})
+        AgentServer.notify_middleware(agent_id, middleware_id, {:title_generated, title})
       rescue
         error ->
           Logger.error("Title generation failed: #{inspect(error)}")
@@ -540,7 +624,7 @@ defmodule Sagents.Middleware.ConversationTitle do
             %{middleware: middleware_id, task_type: :title_generation, error: inspect(error)}
           )
 
-          AgentServer.send_middleware_message(agent_id, middleware_id, {:title_generation_failed, error})
+          AgentServer.notify_middleware(agent_id, middleware_id, {:title_generation_failed, error})
       end
     end)
   end
@@ -628,10 +712,10 @@ defmodule MyApp.Middleware.Analytics do
     Task.start(fn ->
       try do
         event_id = send_analytics(agent_id, message_count, config)
-        AgentServer.send_middleware_message(agent_id, middleware_id, {:analytics_sent, event_id})
+        AgentServer.notify_middleware(agent_id, middleware_id, {:analytics_sent, event_id})
       rescue
         error ->
-          AgentServer.send_middleware_message(agent_id, middleware_id, {:analytics_failed, error})
+          AgentServer.notify_middleware(agent_id, middleware_id, {:analytics_failed, error})
       end
     end)
   end
@@ -701,10 +785,10 @@ defmodule MyApp.Middleware.Embeddings do
     Task.start(fn ->
       try do
         embeddings = generate_embeddings(texts, config)
-        AgentServer.send_middleware_message(agent_id, middleware_id, {:embeddings_generated, embeddings})
+        AgentServer.notify_middleware(agent_id, middleware_id, {:embeddings_generated, embeddings})
       rescue
         error ->
-          AgentServer.send_middleware_message(agent_id, middleware_id, {:embeddings_failed, error})
+          AgentServer.notify_middleware(agent_id, middleware_id, {:embeddings_failed, error})
       end
     end)
   end
@@ -734,7 +818,7 @@ def after_model(state, config) do
 
   Task.start(fn ->
     # Use agent_id with public API
-    AgentServer.send_middleware_message(agent_id, middleware_id, {:result, data})
+    AgentServer.notify_middleware(agent_id, middleware_id, {:result, data})
   end)
 
   {:ok, state}
@@ -744,7 +828,7 @@ end
 def after_model(state, config) do
   Task.start(fn ->
     agent_id = state.agent_id  # state is not in task closure!
-    AgentServer.send_middleware_message(agent_id, ...)
+    AgentServer.notify_middleware(agent_id, ...)
   end)
 
   {:ok, state}
@@ -755,12 +839,12 @@ end
 
 ```elixir
 # ✅ GOOD - Clear message intent
-AgentServer.send_middleware_message(agent_id, id, {:title_generated, title})
-AgentServer.send_middleware_message(agent_id, id, {:title_generation_failed, error})
+AgentServer.notify_middleware(agent_id, id, {:title_generated, title})
+AgentServer.notify_middleware(agent_id, id, {:title_generation_failed, error})
 
 # ❌ BAD - Ambiguous messages
-AgentServer.send_middleware_message(agent_id, id, title)
-AgentServer.send_middleware_message(agent_id, id, {:error, error})
+AgentServer.notify_middleware(agent_id, id, title)
+AgentServer.notify_middleware(agent_id, id, {:error, error})
 ```
 
 ### 3. Include Error Handling
@@ -770,18 +854,18 @@ AgentServer.send_middleware_message(agent_id, id, {:error, error})
 Task.start(fn ->
   try do
     result = do_work()
-    AgentServer.send_middleware_message(agent_id, id, {:success, result})
+    AgentServer.notify_middleware(agent_id, id, {:success, result})
   rescue
     error ->
       Logger.error("Task failed: #{inspect(error)}")
-      AgentServer.send_middleware_message(agent_id, id, {:error, error})
+      AgentServer.notify_middleware(agent_id, id, {:error, error})
   end
 end)
 
 # ❌ BAD - No error handling
 Task.start(fn ->
   result = do_work()  # Crash if this fails!
-  AgentServer.send_middleware_message(agent_id, id, {:success, result})
+  AgentServer.notify_middleware(agent_id, id, {:success, result})
 end)
 ```
 
@@ -809,7 +893,7 @@ Task.start(fn ->
   end
 
   # Always send message to update state
-  AgentServer.send_middleware_message(agent_id, middleware_id, {:result, result})
+  AgentServer.notify_middleware(agent_id, middleware_id, {:result, result})
 end)
 
 # State updates via handle_message/3 automatically trigger debug events
@@ -826,10 +910,10 @@ defp spawn_with_timeout(agent_id, middleware_id, work_fn) do
     try do
       # Work with timeout
       result = work_fn.()
-      AgentServer.send_middleware_message(agent_id, middleware_id, {:success, result})
+      AgentServer.notify_middleware(agent_id, middleware_id, {:success, result})
     catch
       :exit, {:timeout, _} ->
-        AgentServer.send_middleware_message(agent_id, middleware_id, {:timeout, "Task exceeded timeout"})
+        AgentServer.notify_middleware(agent_id, middleware_id, {:timeout, "Task exceeded timeout"})
     end
   end)
 end
@@ -862,7 +946,7 @@ defp spawn_task(state, config) do
 
   Task.start(fn ->
     result = do_work()
-    AgentServer.send_middleware_message(agent_id, middleware_id, {:result, result})
+    AgentServer.notify_middleware(agent_id, middleware_id, {:result, result})
   end)
 end
 ```
@@ -876,7 +960,7 @@ end
 **Solutions:**
 1. Verify you captured `agent_id = state.agent_id` **before** spawning the task
 2. Check the middleware ID matches between spawn and message send
-3. Ensure you're using `AgentServer.send_middleware_message(agent_id, middleware_id, message)`
+3. Ensure you're using `AgentServer.notify_middleware(agent_id, middleware_id, message)`
 4. Verify the AgentServer is still running (check with `AgentServer.get_status/1`)
 5. Check logs for any crashes in the AgentServer or task
 
