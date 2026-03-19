@@ -100,6 +100,8 @@ defmodule <%= module %> do
     Pass `nil` for agent-scoped (isolated per conversation).
   - `:interrupt_on` - Optional. Map of tool names requiring approval.
     Pass `nil` to disable HITL entirely.
+  - `:tool_context` - Optional. Map of caller-supplied data passed to tool functions
+    via `LLMChain.custom_context`. Defaults to `%{}`. Example: `%{user_id: 42}`.
 
   ## Examples
 
@@ -137,6 +139,7 @@ defmodule <%= module %> do
     agent_id = Keyword.fetch!(opts, :agent_id)
     filesystem_scope = Keyword.fetch!(opts, :filesystem_scope)
     interrupt_on = Keyword.get(opts, :interrupt_on, default_interrupt_on())
+    tool_context = Keyword.get(opts, :tool_context, %{})
 
     Agent.new(
       %{
@@ -147,7 +150,8 @@ defmodule <%= module %> do
         fallback_models: get_fallback_models(),
         before_fallback: get_before_fallback(),
         # Add any custom tools here (tools not provided by middleware)
-        tools: []
+        tools: [],
+        tool_context: tool_context
       },
       # Since we specify the full middleware stack, don't add defaults
       replace_default_middleware: true

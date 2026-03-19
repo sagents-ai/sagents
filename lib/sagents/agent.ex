@@ -62,6 +62,8 @@ defmodule Sagents.Agent do
     field :middleware, {:array, :any}, default: [], virtual: true
     field :name, :string
     field :filesystem_scope, :any, virtual: true
+    # Caller-supplied context merged into LLMChain.custom_context for tool functions.
+    field :tool_context, :map, default: %{}, virtual: true
     # Timeout for async tool execution. Integer (ms) or :infinity.
     # Overrides application config when set. See LLMChain docs for details.
     field :async_tool_timeout, :any, virtual: true
@@ -87,6 +89,7 @@ defmodule Sagents.Agent do
     :middleware,
     :name,
     :filesystem_scope,
+    :tool_context,
     :async_tool_timeout,
     :fallback_models,
     :before_fallback,
@@ -106,6 +109,10 @@ defmodule Sagents.Agent do
   - `:middleware` - List of middleware modules/configs (default: [])
   - `:name` - Agent name for identification (default: nil)
   - `:filesystem_scope` - Optional scope key for referencing an independently-running filesystem (e.g., `{:user, 123}`, `{:project, 456}`)
+  - `:tool_context` - Map of caller-supplied data merged into `LLMChain.custom_context`
+    so every tool function receives it as part of its second argument. Internal keys
+    (`:state`, `:parent_middleware`, `:parent_tools`) always take precedence on collision.
+    (default: `%{}`)
   - `:async_tool_timeout` - Timeout for parallel tool execution. Integer (milliseconds) or
     `:infinity`. Overrides application-level config. See LLMChain module docs for details.
     (default: uses application config or `:infinity`)
@@ -193,6 +200,20 @@ defmodule Sagents.Agent do
         },
         filesystem_opts: [long_term_memory: true]
       )
+
+      # With caller-supplied context for tool functions
+      {:ok, agent} = Agent.new(%{
+        agent_id: "context-agent",
+        model: model,
+        tool_context: %{user_id: 42, tenant: "acme"}
+      })
+
+      # Tool functions receive the context as their second argument:
+      # fn args, context ->
+      #   context.user_id  #=> 42
+      #   context.tenant   #=> "acme"
+      #   context.state    #=> %State{} (always present)
+      # end
   """
   def new(attrs \\ %{}, opts \\ []) do
     %Agent{}
@@ -908,12 +929,16 @@ defmodule Sagents.Agent do
       llm: agent.model,
       verbose: false,
       # verbose: true,
-      custom_context: %{
-        state: state,
-        # Make parent agent's middleware and tools available to tools (e.g., SubAgent middleware)
-        parent_middleware: agent.middleware,
-        parent_tools: agent.tools
-      }
+      custom_context:
+        Map.merge(
+          agent.tool_context || %{},
+          %{
+            state: state,
+            # Make parent agent's middleware and tools available to tools (e.g., SubAgent middleware)
+            parent_middleware: agent.middleware,
+            parent_tools: agent.tools
+          }
+        )
     }
 
     # Add async_tool_timeout if explicitly set on agent
