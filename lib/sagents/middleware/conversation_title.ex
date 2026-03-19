@@ -262,7 +262,7 @@ defmodule Sagents.Middleware.ConversationTitle do
         )
 
         # Send success message back to AgentServer
-        AgentServer.send_middleware_message(agent_id, middleware_id, {:title_generated, title})
+        AgentServer.notify_middleware(agent_id, middleware_id, {:title_generated, title})
 
         # Publish the event
         AgentServer.publish_event_from(agent_id, {:conversation_title_generated, title, agent_id})

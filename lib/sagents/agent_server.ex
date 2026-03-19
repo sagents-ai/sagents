@@ -416,12 +416,63 @@ defmodule Sagents.AgentServer do
   end
 
   @doc """
-  Send the AgentServer a message intended to be processed by a middleware
-  handler. This is a mechanism for a middleware to send itself a message, as any
-  message processed by a middleware must be designed to be handled.
+  Send a targeted message to a specific middleware in a running AgentServer.
+
+  The message is routed through the middleware registry and delivered to the
+  middleware's `handle_message/3` callback. The middleware is identified by its
+  ID (module name by default, or a custom string if configured via `:id` option).
+
+  This is a fire-and-forget operation — the caller does not wait for a response.
+  If the AgentServer is not running, the message is silently dropped.
+
+  ## Use Cases
+
+  There are two primary use cases for this function:
+
+  ### 1. External notifications (LiveViews, controllers, other processes)
+
+  Send context updates or configuration changes to a middleware from outside the
+  agent system. The middleware decides how to handle the message — typically by
+  updating state metadata that `before_model/2` reads on the next LLM call.
+
+      # LiveView: user switched to editing a different blog post
+      AgentServer.notify_middleware(agent_id, MyApp.UserContext, {:post_changed, %{
+        slug: "/blog/getting-started-with-elixir",
+        title: "Getting Started with Elixir"
+      }})
+
+      # Controller: user changed a preference
+      AgentServer.notify_middleware(agent_id, MyApp.Preferences, {:preference_changed, :verbose, true})
+
+  ### 2. Async task results (middleware sending messages to itself)
+
+  Middleware that spawns background tasks (e.g., title generation, embedding
+  computation) uses this to send results back to the AgentServer for state updates.
+
+      # Inside an async task spawned by the middleware
+      AgentServer.notify_middleware(agent_id, middleware_id, {:title_generated, title})
+
+  ## Parameters
+
+  - `agent_id` - The agent identifier (used to locate the AgentServer process)
+  - `middleware_id` - The middleware ID to route the message to (module name or custom string)
+  - `message` - Any term to be delivered to the middleware's `handle_message/3` callback
+
+  ## Returns
+
+  - `:ok` — always returns `:ok`, even if the AgentServer is not running
+
+  ## Examples
+
+      # Notify by module name (default middleware ID)
+      AgentServer.notify_middleware("conv-123", MyApp.Middleware.UserContext, {:post_changed, post})
+
+      # Notify by custom ID (when middleware was configured with `id: "english_title"`)
+      AgentServer.notify_middleware("conv-123", "english_title", {:regenerate, %{}})
+
   """
-  @spec send_middleware_message(String.t(), term(), term()) :: :ok
-  def send_middleware_message(agent_id, middleware_id, message) do
+  @spec notify_middleware(String.t(), term(), term()) :: :ok
+  def notify_middleware(agent_id, middleware_id, message) do
     agent_id
     |> get_pid()
     |> case do
@@ -432,6 +483,17 @@ defmodule Sagents.AgentServer do
       _other ->
         :ok
     end
+  end
+
+  @doc """
+  Deprecated: Use `notify_middleware/3` instead.
+
+  This is an alias for `notify_middleware/3` retained for backwards compatibility.
+  """
+  @deprecated "Use `Sagents.AgentServer.notify_middleware/3` instead."
+  @spec send_middleware_message(String.t(), term(), term()) :: :ok
+  def send_middleware_message(agent_id, middleware_id, message) do
+    notify_middleware(agent_id, middleware_id, message)
   end
 
   @doc """

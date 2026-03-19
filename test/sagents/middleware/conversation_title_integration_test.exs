@@ -178,7 +178,7 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
       # Pre-populate the conversation with an existing title by sending a middleware message
       existing_title = "Existing Conversation Title"
 
-      AgentServer.send_middleware_message(
+      AgentServer.notify_middleware(
         agent_id,
         ConversationTitle,
         {:title_generated, existing_title}
