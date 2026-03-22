@@ -468,6 +468,7 @@ defmodule <%= module %> do
       conversation_id: conversation_id,
       agent_persistence: <%= agent_persistence_module %>,
       display_message_persistence: <%= display_message_persistence_module %>
+      # message_preprocessor: MyApp.MyMessagePreprocessor
     ]
 
     case AgentsDynamicSupervisor.start_agent_sync(supervisor_config) do

@@ -251,6 +251,8 @@ defmodule Sagents.AgentServer do
       :agent_persistence,
       # Module implementing Sagents.DisplayMessagePersistence, or nil
       :display_message_persistence,
+      # Module implementing Sagents.MessagePreprocessor, or nil
+      :message_preprocessor,
       # Presence module for agent discovery (e.g., MyApp.Presence)
       # When set, agent tracks presence on "agent_server:presence" topic
       :presence_module,
@@ -286,6 +288,7 @@ defmodule Sagents.AgentServer do
             conversation_id: String.t() | nil,
             agent_persistence: module() | nil,
             display_message_persistence: module() | nil,
+            message_preprocessor: module() | nil,
             presence_module: module() | nil,
             restored: boolean()
           }
@@ -1347,6 +1350,9 @@ defmodule Sagents.AgentServer do
     agent_persistence = Keyword.get(opts, :agent_persistence)
     display_message_persistence = Keyword.get(opts, :display_message_persistence)
 
+    # Extract message preprocessor module
+    message_preprocessor = Keyword.get(opts, :message_preprocessor)
+
     # Extract presence module for agent discovery
     # When set, agent will track presence on "agent_server:presence" topic
     presence_module = Keyword.get(opts, :presence_module)
@@ -1370,6 +1376,7 @@ defmodule Sagents.AgentServer do
       conversation_id: conversation_id,
       agent_persistence: agent_persistence,
       display_message_persistence: display_message_persistence,
+      message_preprocessor: message_preprocessor,
       presence_module: presence_module,
       restored: Keyword.get(opts, :restored, false)
     }
@@ -1567,38 +1574,45 @@ defmodule Sagents.AgentServer do
 
   @impl true
   def handle_call({:add_message, message}, _from, server_state) do
-    # Add message to the state
-    new_state = State.add_message(server_state.state, message)
+    # Run message preprocessor if configured (splits into display + LLM versions)
+    case run_message_preprocessor(server_state, message) do
+      {:ok, display_message, llm_message} ->
+        # Add LLM message to the state
+        new_state = State.add_message(server_state.state, llm_message)
 
-    # Transition to idle if we were completed/error/cancelled to allow new execution
-    new_status =
-      case server_state.status do
-        :completed -> :idle
-        :error -> :idle
-        :cancelled -> :idle
-        status -> status
-      end
+        # Transition to idle if we were completed/error/cancelled to allow new execution
+        new_status =
+          case server_state.status do
+            :completed -> :idle
+            :error -> :idle
+            :cancelled -> :idle
+            status -> status
+          end
 
-    updated_server_state = %{
-      server_state
-      | state: new_state,
-        status: new_status,
-        error: nil
-    }
+        updated_server_state = %{
+          server_state
+          | state: new_state,
+            status: new_status,
+            error: nil
+        }
 
-    # Reset inactivity timer on user message
-    updated_server_state = reset_inactivity_timer(updated_server_state)
+        # Reset inactivity timer on user message
+        updated_server_state = reset_inactivity_timer(updated_server_state)
 
-    # Save and broadcast messages immediately
-    # Note: During LLM execution, assistant messages are also saved via on_message_processed callback
-    # But if manually adding assistant messages, we should also save them here
-    maybe_save_and_broadcast_message(updated_server_state, message)
+        # Save and broadcast the display message
+        # Note: During LLM execution, assistant messages are also saved via on_message_processed callback
+        # But if manually adding assistant messages, we should also save them here
+        maybe_save_and_broadcast_message(updated_server_state, display_message)
 
-    # Note: Debug event for user messages is NOT broadcast here.
-    # The authoritative state (with potential middleware modifications)
-    # will be broadcast via on_after_middleware callback when Agent.execute runs.
+        # Note: Debug event for user messages is NOT broadcast here.
+        # The authoritative state (with potential middleware modifications)
+        # will be broadcast via on_after_middleware callback when Agent.execute runs.
 
-    {:reply, :ok, updated_server_state}
+        {:reply, :ok, updated_server_state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, server_state}
+    end
   end
 
   @impl true
@@ -2395,6 +2409,32 @@ defmodule Sagents.AgentServer do
         {:error, _} ->
           :ok
       end
+    end
+  end
+
+  # Run message preprocessor if configured, splitting message into display and LLM versions.
+  # Returns {:ok, display_message, llm_message} or {:error, reason}.
+  defp run_message_preprocessor(%ServerState{message_preprocessor: nil}, message) do
+    {:ok, message, message}
+  end
+
+  defp run_message_preprocessor(%ServerState{} = server_state, message) do
+    context = %{
+      agent_id: server_state.agent.agent_id,
+      conversation_id: server_state.conversation_id,
+      tool_context: server_state.agent.tool_context,
+      state: server_state.state
+    }
+
+    try do
+      server_state.message_preprocessor.preprocess(message, context)
+    rescue
+      exception ->
+        Logger.error(
+          "Message preprocessor raised exception: #{inspect(exception)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
+        )
+
+        {:error, {:preprocessor_error, exception}}
     end
   end
 

@@ -310,6 +310,7 @@ defmodule Sagents.AgentSupervisor do
     conversation_id = Keyword.get(config, :conversation_id)
     agent_persistence = Keyword.get(config, :agent_persistence)
     display_message_persistence = Keyword.get(config, :display_message_persistence)
+    message_preprocessor = Keyword.get(config, :message_preprocessor)
     presence_module = Keyword.get(config, :presence_module)
 
     # Build AgentServer options
@@ -360,6 +361,12 @@ defmodule Sagents.AgentSupervisor do
             :display_message_persistence,
             display_message_persistence
           ),
+        else: agent_server_opts
+
+    # Add message_preprocessor if provided
+    agent_server_opts =
+      if message_preprocessor,
+        do: Keyword.put(agent_server_opts, :message_preprocessor, message_preprocessor),
         else: agent_server_opts
 
     # Add presence_module if provided
