@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.2
+
+### Added
+- `dirty_metadata` flag on `FileEntry` — tracks metadata-only changes separately from content changes
+- `update_metadata_in_storage/2` optional callback on `Persistence` behaviour — persistence backends can implement this for efficient metadata-only updates without rewriting file content
+- `persist_file/2` routes to `update_metadata_in_storage` when only metadata changed and the backend supports it, falling back to `write_to_storage` otherwise
+
+### Fixed
+- `FileEntry.update_content/3` now resets `dirty_metadata` to `false`, preventing a data loss scenario where a metadata update followed by a content write (before debounce fires) would incorrectly route to `update_metadata_in_storage` and lose the content change
+
 ## v0.3.1
 
 ### Fixed

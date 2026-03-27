@@ -67,6 +67,8 @@ defmodule Sagents.FileSystem.FileEntry do
     field :loaded, :boolean, default: true
     # Has content been modified since last storage write? (only relevant for :persisted files)
     field :dirty, :boolean, default: false
+    # Enables metadata-only persistence optimization; only valid when dirty is true
+    field :dirty_metadata, :boolean, default: false
     embeds_one :metadata, FileMetadata
   end
 
@@ -80,6 +82,7 @@ defmodule Sagents.FileSystem.FileEntry do
           persistence: :memory | :persisted,
           loaded: boolean(),
           dirty: boolean(),
+          dirty_metadata: boolean(),
           metadata: FileMetadata.t() | nil
         }
 
@@ -308,7 +311,7 @@ defmodule Sagents.FileSystem.FileEntry do
   Marks a persisted file as clean (synced with storage).
   """
   def mark_clean(entry) do
-    %{entry | dirty: false}
+    %{entry | dirty: false, dirty_metadata: false}
   end
 
   @doc """
@@ -337,7 +340,7 @@ defmodule Sagents.FileSystem.FileEntry do
 
     case metadata_result do
       {:ok, new_metadata} ->
-        {:ok, %{entry | content: new_content, loaded: true, dirty: dirty, metadata: new_metadata}}
+        {:ok, %{entry | content: new_content, loaded: true, dirty: dirty, dirty_metadata: false, metadata: new_metadata}}
 
       {:error, _} = error ->
         error

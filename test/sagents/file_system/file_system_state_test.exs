@@ -21,6 +21,29 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
     new_state
   end
 
+  # Test persistence modules for persist_file routing tests
+  defmodule TestPersistMetaRouting do
+    @behaviour Sagents.FileSystem.Persistence
+    alias Sagents.FileSystem.FileEntry
+
+    def write_to_storage(entry, _opts), do: {:ok, FileEntry.mark_clean(entry)}
+    def update_metadata_in_storage(entry, _opts), do: {:ok, FileEntry.mark_clean(entry)}
+    def load_from_storage(_entry, _opts), do: {:error, :enoent}
+    def delete_from_storage(_entry, _opts), do: :ok
+    def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
+  end
+
+  defmodule TestPersistNoMetaCallback do
+    @behaviour Sagents.FileSystem.Persistence
+    alias Sagents.FileSystem.FileEntry
+
+    def write_to_storage(entry, _opts), do: {:ok, FileEntry.mark_clean(entry)}
+    # No update_metadata_in_storage defined
+    def load_from_storage(_entry, _opts), do: {:error, :enoent}
+    def delete_from_storage(_entry, _opts), do: :ok
+    def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
+  end
+
   describe "new/1" do
     test "creates state with empty files map" do
       agent_id = "test_agent_#{System.unique_integer([:positive])}"
@@ -731,6 +754,140 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       assert updated.dirty == true
       # Debounce timer should be scheduled
       assert Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
+    end
+
+    test "sets dirty_metadata on persisted file", %{state: state} do
+      state = add_persistence_config(state, TestPersistNoMetaCallback)
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
+
+      # File is clean after immediate persist
+      assert state.files["/Memories/doc.txt"].dirty_metadata == false
+
+      # Update metadata sets dirty_metadata
+      {:ok, updated, _state} =
+        FileSystemState.update_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]})
+
+      assert updated.dirty == true
+      assert updated.dirty_metadata == true
+    end
+
+    test "write_file does not set dirty_metadata", %{state: state} do
+      state = add_persistence_config(state, TestPersistNoMetaCallback)
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "initial", [])
+
+      # Clean after immediate persist
+      entry = state.files["/Memories/doc.txt"]
+      assert entry.dirty_metadata == false
+
+      # Content write sets dirty but not dirty_metadata
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "updated", [])
+
+      entry = state.files["/Memories/doc.txt"]
+      assert entry.dirty == true
+      assert entry.dirty_metadata == false
+    end
+  end
+
+  describe "persist_file/2" do
+    setup do
+      agent_id = "test_agent_#{System.unique_integer([:positive])}"
+      {:ok, state} = FileSystemState.new(scope_key: {:agent, agent_id})
+      %{state: state}
+    end
+
+    test "calls update_metadata_in_storage when dirty_metadata is true", %{state: state} do
+      state = add_persistence_config(state, TestPersistMetaRouting)
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
+
+      # Update metadata only
+      {:ok, _updated, state} =
+        FileSystemState.update_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]})
+
+      # Verify entry has dirty_metadata before persist
+      assert state.files["/Memories/doc.txt"].dirty_metadata == true
+
+      # Manually persist (simulating debounce fire)
+      state = FileSystemState.persist_file(state, "/Memories/doc.txt")
+
+      # After persist, entry should be clean
+      entry = state.files["/Memories/doc.txt"]
+      assert entry.dirty == false
+      assert entry.dirty_metadata == false
+    end
+
+    test "calls write_to_storage when dirty_metadata is false", %{state: state} do
+      state = add_persistence_config(state, TestPersistMetaRouting)
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "initial", [])
+
+      # Content write (not metadata-only)
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "updated", [])
+
+      # dirty but NOT dirty_metadata
+      assert state.files["/Memories/doc.txt"].dirty == true
+      assert state.files["/Memories/doc.txt"].dirty_metadata == false
+
+      state = FileSystemState.persist_file(state, "/Memories/doc.txt")
+
+      entry = state.files["/Memories/doc.txt"]
+      assert entry.dirty == false
+    end
+
+    test "content write after metadata update resets dirty_metadata and uses write_to_storage",
+         %{state: state} do
+      state = add_persistence_config(state, TestPersistMetaRouting)
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "initial", [])
+
+      # Metadata-only update sets dirty_metadata
+      {:ok, _updated, state} =
+        FileSystemState.update_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]})
+
+      assert state.files["/Memories/doc.txt"].dirty_metadata == true
+
+      # Content write should reset dirty_metadata
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "new content", [])
+
+      assert state.files["/Memories/doc.txt"].dirty == true
+      assert state.files["/Memories/doc.txt"].dirty_metadata == false
+
+      # Persist should use write_to_storage (full write), not update_metadata_in_storage
+      state = FileSystemState.persist_file(state, "/Memories/doc.txt")
+
+      entry = state.files["/Memories/doc.txt"]
+      assert entry.dirty == false
+      assert entry.content == "new content"
+    end
+
+    test "falls back to write_to_storage when module lacks update_metadata_in_storage",
+         %{state: state} do
+      state = add_persistence_config(state, TestPersistNoMetaCallback)
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
+
+      # Metadata update — but module doesn't implement the callback
+      {:ok, _updated, state} =
+        FileSystemState.update_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]})
+
+      assert state.files["/Memories/doc.txt"].dirty_metadata == true
+
+      # Should still succeed — falls back to write_to_storage
+      state = FileSystemState.persist_file(state, "/Memories/doc.txt")
+
+      entry = state.files["/Memories/doc.txt"]
+      assert entry.dirty == false
     end
   end
 
