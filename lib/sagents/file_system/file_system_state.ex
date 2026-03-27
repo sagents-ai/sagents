@@ -308,10 +308,10 @@ defmodule Sagents.FileSystem.FileSystemState do
           updated_entry = %{entry | metadata: updated_metadata}
           updated_entry = if title, do: %{updated_entry | title: title}, else: updated_entry
 
-          # Mark dirty if persisted
+          # Mark dirty if persisted (metadata-only change)
           updated_entry =
             if entry.persistence == :persisted do
-              %{updated_entry | dirty: true}
+              %{updated_entry | dirty: true, dirty_metadata: true}
             else
               updated_entry
             end
@@ -451,7 +451,13 @@ defmodule Sagents.FileSystem.FileSystemState do
         if config do
           opts = FileSystemConfig.build_storage_opts(config, state.scope_key)
 
-          result = config.persistence_module.write_to_storage(entry, opts)
+          result =
+            if entry.dirty_metadata and
+                 function_exported?(config.persistence_module, :update_metadata_in_storage, 2) do
+              config.persistence_module.update_metadata_in_storage(entry, opts)
+            else
+              config.persistence_module.write_to_storage(entry, opts)
+            end
 
           case result do
             {:ok, updated_entry} ->
@@ -825,7 +831,7 @@ defmodule Sagents.FileSystem.FileSystemState do
             %{state | files: new_files}
 
           :ok ->
-            new_files = Map.put(state.files, path, %{entry | dirty: false})
+            new_files = Map.put(state.files, path, FileEntry.mark_clean(entry))
             Logger.debug("Persisted new file immediately: #{path}")
             %{state | files: new_files}
 

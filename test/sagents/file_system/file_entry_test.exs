@@ -143,6 +143,38 @@ defmodule Sagents.FileSystem.FileEntryTest do
       assert clean_entry.content == content
       assert clean_entry.persistence == :persisted
     end
+
+    test "clears dirty_metadata flag" do
+      assert {:ok, entry} = FileEntry.new_persisted_file("/Memories/file.txt", "data")
+      entry = %{entry | dirty_metadata: true}
+
+      clean_entry = FileEntry.mark_clean(entry)
+
+      assert clean_entry.dirty == false
+      assert clean_entry.dirty_metadata == false
+    end
+  end
+
+  describe "dirty_metadata flag" do
+    test "defaults to false on new persisted file" do
+      assert {:ok, entry} = FileEntry.new_persisted_file("/Memories/file.txt", "data")
+      assert entry.dirty_metadata == false
+    end
+
+    test "defaults to false on new memory file" do
+      assert {:ok, entry} = FileEntry.new_memory_file("/scratch/file.txt", "data")
+      assert entry.dirty_metadata == false
+    end
+
+    test "update_content does not set dirty_metadata" do
+      assert {:ok, entry} = FileEntry.new_persisted_file("/Memories/file.txt", "original")
+      entry = FileEntry.mark_clean(entry)
+
+      assert {:ok, updated} = FileEntry.update_content(entry, "changed")
+
+      assert updated.dirty == true
+      assert updated.dirty_metadata == false
+    end
   end
 
   describe "update_content/3" do

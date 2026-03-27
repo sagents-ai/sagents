@@ -81,7 +81,7 @@ defmodule Sagents.FileSystem.Persistence.Disk do
 
     case File.mkdir_p(full_path) do
       :ok ->
-        {:ok, %{entry | dirty: false}}
+        {:ok, FileEntry.mark_clean(entry)}
 
       {:error, reason} ->
         {:error, reason}
@@ -105,7 +105,7 @@ defmodule Sagents.FileSystem.Persistence.Disk do
       metadata = %{metadata | created_at: stat.ctime, modified_at: stat.mtime}
 
       # Return FileEntry with updated metadata and marked as clean
-      updated_entry = %{entry | metadata: metadata, dirty: false, loaded: true}
+      updated_entry = FileEntry.mark_clean(%{entry | metadata: metadata, loaded: true})
       {:ok, updated_entry}
     end
   end
@@ -130,7 +130,9 @@ defmodule Sagents.FileSystem.Persistence.Disk do
       metadata = %{metadata | created_at: stat.ctime, modified_at: stat.mtime}
 
       # Return FileEntry with content and metadata
-      loaded_entry = %{entry | content: content, metadata: metadata, loaded: true, dirty: false}
+      loaded_entry =
+        FileEntry.mark_clean(%{entry | content: content, metadata: metadata, loaded: true})
+
       {:ok, loaded_entry}
     end
   end
