@@ -340,7 +340,15 @@ defmodule Sagents.FileSystem.FileEntry do
 
     case metadata_result do
       {:ok, new_metadata} ->
-        {:ok, %{entry | content: new_content, loaded: true, dirty: dirty, dirty_metadata: false, metadata: new_metadata}}
+        {:ok,
+         %{
+           entry
+           | content: new_content,
+             loaded: true,
+             dirty: dirty,
+             dirty_metadata: false,
+             metadata: new_metadata
+         }}
 
       {:error, _} = error ->
         error

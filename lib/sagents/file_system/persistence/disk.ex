@@ -130,7 +130,9 @@ defmodule Sagents.FileSystem.Persistence.Disk do
       metadata = %{metadata | created_at: stat.ctime, modified_at: stat.mtime}
 
       # Return FileEntry with content and metadata
-      loaded_entry = FileEntry.mark_clean(%{entry | content: content, metadata: metadata, loaded: true})
+      loaded_entry =
+        FileEntry.mark_clean(%{entry | content: content, metadata: metadata, loaded: true})
+
       {:ok, loaded_entry}
     end
   end
