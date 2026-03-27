@@ -80,7 +80,7 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
       entry = get_entry(agent_id, "/user_files/data.txt")
       assert entry.persistence == :persisted
       # New files are persisted immediately
-      assert entry.dirty == false
+      assert entry.dirty_content == false
 
       # Verify file exists on disk (base_directory is stripped)
       user_path = Path.join([tmp_dir, "users", "data.txt"])
@@ -243,7 +243,7 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
         alias Sagents.FileSystem.FileEntry
         @behaviour Persistence
 
-        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty: false}}
+        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty_content: false}}
 
         def load_from_storage(%FileEntry{path: path} = entry, opts) do
           # Get the test PID and storage table from opts
@@ -255,7 +255,7 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
           # Return content from ETS storage
           case :ets.lookup(storage_table, path) do
             [{^path, content}] ->
-              {:ok, %{entry | content: content, loaded: true, dirty: false}}
+              {:ok, %{entry | content: content, loaded: true, dirty_content: false}}
 
             [] ->
               {:error, :enoent}

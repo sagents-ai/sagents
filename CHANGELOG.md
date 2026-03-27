@@ -2,13 +2,25 @@
 
 ## v0.3.2
 
+Adds file move/rename, metadata-only persistence optimization, and a clearer FileSystem API with separate functions for entry-level fields vs custom metadata. [#38](https://github.com/sagents-ai/sagents/pull/38)
+
 ### Added
-- `dirty_metadata` flag on `FileEntry` — tracks metadata-only changes separately from content changes
+- `move_file/3` on `FileSystemState` and `FileSystemServer` — atomically moves a file or directory (and its children) to a new path, re-keying entries and transferring debounce timers
+- `move_in_storage/3` optional callback on `Persistence` behaviour — persistence backends can implement this to handle path changes efficiently (e.g. database update instead of delete+create). Falls back to marking entries dirty for the next persist cycle.
+- `update_entry/4` on `FileSystemState` and `FileSystemServer` — updates entry-level fields (`title`, `id`, `file_type`) via `FileEntry.update_entry_changeset/2`
+- `update_custom_metadata/4` on `FileSystemState` and `FileSystemServer` — replaces `update_metadata/4` with a clearer name that reflects it only updates `metadata.custom`
+- `FileEntry.update_entry_changeset/2` — changeset that only casts updatable entry-level fields
+- `dirty_non_content` flag on `FileEntry` — tracks non-content changes separately from content changes, enabling metadata-only persistence optimization
 - `update_metadata_in_storage/2` optional callback on `Persistence` behaviour — persistence backends can implement this for efficient metadata-only updates without rewriting file content
-- `persist_file/2` routes to `update_metadata_in_storage` when only metadata changed and the backend supports it, falling back to `write_to_storage` otherwise
+- `persist_file/2` routes to `update_metadata_in_storage` when only non-content fields changed and the backend supports it, falling back to `write_to_storage` otherwise
+
+### Changed
+- **BREAKING:** `update_metadata/4` renamed to `update_custom_metadata/4` on both `FileSystemState` and `FileSystemServer`
+- **BREAKING:** `FileEntry.dirty` field renamed to `dirty_content` — clarifies it tracks content modifications
+- Non-content updates (`update_custom_metadata`, `update_entry`) persist immediately by default. Pass `persist: :debounce` to opt into debounced persistence.
 
 ### Fixed
-- `FileEntry.update_content/3` now resets `dirty_metadata` to `false`, preventing a data loss scenario where a metadata update followed by a content write (before debounce fires) would incorrectly route to `update_metadata_in_storage` and lose the content change
+- `FileEntry.update_content/3` now resets `dirty_non_content` to `false`, preventing a data loss scenario where a metadata update followed by a content write (before debounce fires) would incorrectly route to `update_metadata_in_storage` and lose the content change
 
 ## v0.3.1
 

@@ -15,7 +15,7 @@ defmodule Sagents.FileSystem.FileEntryTest do
       assert entry.content == content
       assert entry.persistence == :memory
       assert entry.loaded == true
-      assert entry.dirty == false
+      assert entry.dirty_content == false
       assert %FileMetadata{} = entry.metadata
       assert entry.metadata.size == byte_size(content)
     end
@@ -75,7 +75,7 @@ defmodule Sagents.FileSystem.FileEntryTest do
       assert entry.content == content
       assert entry.persistence == :persisted
       assert entry.loaded == true
-      assert entry.dirty == true
+      assert entry.dirty_content == true
       assert %FileMetadata{} = entry.metadata
     end
 
@@ -105,7 +105,7 @@ defmodule Sagents.FileSystem.FileEntryTest do
       assert entry.content == nil
       assert entry.persistence == :persisted
       assert entry.loaded == false
-      assert entry.dirty == false
+      assert entry.dirty_content == false
       assert entry.metadata == nil
     end
   end
@@ -135,45 +135,45 @@ defmodule Sagents.FileSystem.FileEntryTest do
       content = "data"
 
       assert {:ok, entry} = FileEntry.new_persisted_file(path, content)
-      assert entry.dirty == true
+      assert entry.dirty_content == true
 
       clean_entry = FileEntry.mark_clean(entry)
 
-      assert clean_entry.dirty == false
+      assert clean_entry.dirty_content == false
       assert clean_entry.content == content
       assert clean_entry.persistence == :persisted
     end
 
-    test "clears dirty_metadata flag" do
+    test "clears dirty_non_content flag" do
       assert {:ok, entry} = FileEntry.new_persisted_file("/Memories/file.txt", "data")
-      entry = %{entry | dirty_metadata: true}
+      entry = %{entry | dirty_non_content: true}
 
       clean_entry = FileEntry.mark_clean(entry)
 
-      assert clean_entry.dirty == false
-      assert clean_entry.dirty_metadata == false
+      assert clean_entry.dirty_content == false
+      assert clean_entry.dirty_non_content == false
     end
   end
 
-  describe "dirty_metadata flag" do
+  describe "dirty_non_content flag" do
     test "defaults to false on new persisted file" do
       assert {:ok, entry} = FileEntry.new_persisted_file("/Memories/file.txt", "data")
-      assert entry.dirty_metadata == false
+      assert entry.dirty_non_content == false
     end
 
     test "defaults to false on new memory file" do
       assert {:ok, entry} = FileEntry.new_memory_file("/scratch/file.txt", "data")
-      assert entry.dirty_metadata == false
+      assert entry.dirty_non_content == false
     end
 
-    test "update_content does not set dirty_metadata" do
+    test "update_content does not set dirty_non_content" do
       assert {:ok, entry} = FileEntry.new_persisted_file("/Memories/file.txt", "original")
       entry = FileEntry.mark_clean(entry)
 
       assert {:ok, updated} = FileEntry.update_content(entry, "changed")
 
-      assert updated.dirty == true
-      assert updated.dirty_metadata == false
+      assert updated.dirty_content == true
+      assert updated.dirty_non_content == false
     end
   end
 
@@ -184,12 +184,12 @@ defmodule Sagents.FileSystem.FileEntryTest do
       new_content = "updated"
 
       assert {:ok, entry} = FileEntry.new_memory_file(path, original_content)
-      assert entry.dirty == false
+      assert entry.dirty_content == false
 
       assert {:ok, updated_entry} = FileEntry.update_content(entry, new_content)
 
       assert updated_entry.content == new_content
-      assert updated_entry.dirty == false
+      assert updated_entry.dirty_content == false
       assert updated_entry.loaded == true
       assert updated_entry.metadata.size == byte_size(new_content)
     end
@@ -202,13 +202,13 @@ defmodule Sagents.FileSystem.FileEntryTest do
       # Create and mark clean first
       assert {:ok, entry} = FileEntry.new_persisted_file(path, original_content)
       clean_entry = FileEntry.mark_clean(entry)
-      assert clean_entry.dirty == false
+      assert clean_entry.dirty_content == false
 
       # Update content
       assert {:ok, updated_entry} = FileEntry.update_content(clean_entry, new_content)
 
       assert updated_entry.content == new_content
-      assert updated_entry.dirty == true
+      assert updated_entry.dirty_content == true
       assert updated_entry.loaded == true
       assert updated_entry.metadata.size == byte_size(new_content)
     end
@@ -229,7 +229,7 @@ defmodule Sagents.FileSystem.FileEntryTest do
       changeset = FileEntry.changeset(%FileEntry{}, %{})
       refute changeset.valid?
       assert changeset.errors[:path]
-      # persistence, loaded, and dirty have defaults, so they won't error
+      # persistence, loaded, and dirty_content have defaults, so they won't error
     end
 
     test "accepts valid attributes" do
@@ -238,11 +238,61 @@ defmodule Sagents.FileSystem.FileEntryTest do
         content: "data",
         persistence: :memory,
         loaded: true,
-        dirty: false
+        dirty_content: false
       }
 
       changeset = FileEntry.changeset(%FileEntry{}, attrs)
       assert changeset.valid?
+    end
+  end
+
+  describe "update_entry_changeset/2" do
+    test "casts title" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data")
+      changeset = FileEntry.update_entry_changeset(entry, %{title: "New Title"})
+      assert changeset.valid?
+      assert changeset.changes == %{title: "New Title"}
+    end
+
+    test "casts id" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data")
+      changeset = FileEntry.update_entry_changeset(entry, %{id: "abc-123"})
+      assert changeset.valid?
+      assert changeset.changes == %{id: "abc-123"}
+    end
+
+    test "casts file_type" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data")
+      changeset = FileEntry.update_entry_changeset(entry, %{file_type: "json"})
+      assert changeset.valid?
+      assert changeset.changes == %{file_type: "json"}
+    end
+
+    test "casts multiple attrs at once" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data")
+
+      changeset =
+        FileEntry.update_entry_changeset(entry, %{title: "Doc", id: "x", file_type: "pdf"})
+
+      assert changeset.valid?
+      assert changeset.changes == %{title: "Doc", id: "x", file_type: "pdf"}
+    end
+
+    test "ignores unknown keys" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data")
+
+      changeset =
+        FileEntry.update_entry_changeset(entry, %{title: "New", content: "hack", path: "/bad"})
+
+      assert changeset.valid?
+      assert changeset.changes == %{title: "New"}
+    end
+
+    test "returns empty changes when attrs match current values" do
+      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data", title: "Same")
+      changeset = FileEntry.update_entry_changeset(entry, %{title: "Same"})
+      assert changeset.valid?
+      assert changeset.changes == %{}
     end
   end
 
@@ -252,14 +302,19 @@ defmodule Sagents.FileSystem.FileEntryTest do
 
       # Create
       assert {:ok, entry} = FileEntry.new_memory_file(path, "initial")
-      assert [entry.persistence, entry.loaded, entry.dirty] == [:memory, true, false]
+      assert [entry.persistence, entry.loaded, entry.dirty_content] == [:memory, true, false]
 
       # Update
       assert {:ok, updated} = FileEntry.update_content(entry, "modified")
-      assert [updated.persistence, updated.loaded, updated.dirty] == [:memory, true, false]
+
+      assert [updated.persistence, updated.loaded, updated.dirty_content] == [
+               :memory,
+               true,
+               false
+             ]
 
       # Memory files never become dirty
-      assert updated.dirty == false
+      assert updated.dirty_content == false
     end
 
     test "persisted file lifecycle" do
@@ -267,20 +322,25 @@ defmodule Sagents.FileSystem.FileEntryTest do
 
       # Create (dirty)
       assert {:ok, entry} = FileEntry.new_persisted_file(path, "initial")
-      assert [entry.persistence, entry.loaded, entry.dirty] == [:persisted, true, true]
+      assert [entry.persistence, entry.loaded, entry.dirty_content] == [:persisted, true, true]
 
       # Mark clean (after persist)
       clean = FileEntry.mark_clean(entry)
-      assert [clean.persistence, clean.loaded, clean.dirty] == [:persisted, true, false]
+      assert [clean.persistence, clean.loaded, clean.dirty_content] == [:persisted, true, false]
 
       # Modify (becomes dirty)
       assert {:ok, modified} = FileEntry.update_content(clean, "modified")
-      assert [modified.persistence, modified.loaded, modified.dirty] == [:persisted, true, true]
+
+      assert [modified.persistence, modified.loaded, modified.dirty_content] == [
+               :persisted,
+               true,
+               true
+             ]
 
       # Mark clean again
       clean_again = FileEntry.mark_clean(modified)
 
-      assert [clean_again.persistence, clean_again.loaded, clean_again.dirty] ==
+      assert [clean_again.persistence, clean_again.loaded, clean_again.dirty_content] ==
                [:persisted, true, false]
     end
 
@@ -289,12 +349,18 @@ defmodule Sagents.FileSystem.FileEntryTest do
 
       # Index (not loaded)
       assert {:ok, entry} = FileEntry.new_indexed_file(path)
-      assert [entry.persistence, entry.loaded, entry.dirty] == [:persisted, false, false]
+      assert [entry.persistence, entry.loaded, entry.dirty_content] == [:persisted, false, false]
       assert entry.content == nil
 
       # Load
       assert {:ok, loaded} = FileEntry.mark_loaded(entry, "loaded content")
-      assert [loaded.persistence, loaded.loaded, loaded.dirty] == [:persisted, true, false]
+
+      assert [loaded.persistence, loaded.loaded, loaded.dirty_content] == [
+               :persisted,
+               true,
+               false
+             ]
+
       assert loaded.content == "loaded content"
     end
   end
@@ -340,7 +406,7 @@ defmodule Sagents.FileSystem.FileEntryTest do
       assert entry.content == nil
       assert entry.loaded == true
       assert entry.persistence == :persisted
-      assert entry.dirty == true
+      assert entry.dirty_content == true
     end
 
     test "creates directory with title and custom metadata" do
@@ -358,7 +424,7 @@ defmodule Sagents.FileSystem.FileEntryTest do
       assert {:ok, entry} = FileEntry.new_directory("/temp", persistence: :memory)
 
       assert entry.persistence == :memory
-      assert entry.dirty == false
+      assert entry.dirty_content == false
     end
   end
 
@@ -393,7 +459,7 @@ defmodule Sagents.FileSystem.FileEntryTest do
       assert {:ok, updated} = FileEntry.update_content(clean, "modified")
 
       assert updated.content == "modified"
-      assert updated.dirty == true
+      assert updated.dirty_content == true
       # Custom metadata preserved
       assert updated.metadata.custom == %{"tags" => ["draft"], "author" => "Alice"}
       # created_at preserved

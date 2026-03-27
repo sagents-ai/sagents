@@ -236,24 +236,79 @@ defmodule Sagents.FileSystemServer do
   end
 
   @doc """
-  Update only the metadata.custom map for a file entry.
+  Update only the `metadata.custom` map for a file entry.
 
-  Does not touch content. Used for rename, reorder, tag updates, etc.
+  Merges the given `custom` map into the entry's existing `metadata.custom`.
+  Does not touch content or entry-level fields.
+
+  Persists immediately by default. Pass `persist: :debounce` to opt into
+  debounced persistence instead.
 
   ## Options
 
-  - `:title` - Update the entry's title
+  - `:persist` - `:debounce` to schedule a debounced persist instead of
+    persisting immediately. Default is immediate.
 
   ## Examples
 
-      iex> {:ok, entry} = update_metadata({:user, 123}, "/doc.md", %{tags: ["draft"]})
+      iex> {:ok, entry} = update_custom_metadata({:user, 123}, "/doc.md", %{tags: ["draft"]})
       iex> entry.metadata.custom
       %{tags: ["draft"]}
   """
-  @spec update_metadata(term(), String.t(), map(), keyword()) ::
+  @spec update_custom_metadata(term(), String.t(), map(), keyword()) ::
           {:ok, FileEntry.t()} | {:error, term()}
-  def update_metadata(scope_key, path, custom, opts \\ []) do
-    GenServer.call(get_name(scope_key), {:update_metadata, path, custom, opts})
+  def update_custom_metadata(scope_key, path, custom, opts \\ []) do
+    GenServer.call(get_name(scope_key), {:update_custom_metadata, path, custom, opts})
+  end
+
+  @doc """
+  Update entry-level fields on a file entry.
+
+  Accepts a map of attrs with keys `:title`, `:id`, and/or `:file_type`.
+  Uses `FileEntry.update_entry_changeset/2` for validation.
+
+  Persists immediately by default. Pass `persist: :debounce` to opt into
+  debounced persistence instead.
+
+  ## Options
+
+  - `:persist` - `:debounce` to schedule a debounced persist instead of
+    persisting immediately. Default is immediate.
+
+  ## Examples
+
+      iex> {:ok, entry} = update_entry({:user, 123}, "/doc.md", %{title: "My Doc"})
+      iex> entry.title
+      "My Doc"
+  """
+  @spec update_entry(term(), String.t(), map(), keyword()) ::
+          {:ok, FileEntry.t()} | {:error, term()}
+  def update_entry(scope_key, path, attrs, opts \\ []) do
+    GenServer.call(get_name(scope_key), {:update_entry, path, attrs, opts})
+  end
+
+  @doc """
+  Moves a file or directory (and its children) from one path to another.
+
+  This is an atomic re-key operation — it does **not** trigger `delete_from_storage`
+  or create new entries. If the persistence module implements `move_in_storage/3`,
+  that callback is invoked for each moved entry. Otherwise, entries are marked dirty
+  and persisted via the normal cycle.
+
+  Returns `{:ok, moved_entries}` or `{:error, reason}`.
+
+  ## Examples
+
+      iex> :ok = write_file({:user, 1}, "/old-name", "content")
+      iex> {:ok, _entries} = move_file({:user, 1}, "/old-name", "/new-name")
+      iex> {:ok, entry} = read_file({:user, 1}, "/new-name")
+      iex> entry.content
+      "content"
+  """
+  @spec move_file(term(), String.t(), String.t()) ::
+          {:ok, [FileEntry.t()]} | {:error, term()}
+  def move_file(scope_key, old_path, new_path) do
+    GenServer.call(get_name(scope_key), {:move_file, old_path, new_path})
   end
 
   @doc """
@@ -601,8 +656,20 @@ defmodule Sagents.FileSystemServer do
   end
 
   @impl true
-  def handle_call({:update_metadata, path, custom, opts}, _from, state) do
-    case FileSystemState.update_metadata(state, path, custom, opts) do
+  def handle_call({:update_custom_metadata, path, custom, opts}, _from, state) do
+    case FileSystemState.update_custom_metadata(state, path, custom, opts) do
+      {:ok, entry, new_state} ->
+        broadcast_file_change(new_state, {:file_updated, path})
+        {:reply, {:ok, entry}, new_state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:update_entry, path, attrs, opts}, _from, state) do
+    case FileSystemState.update_entry(state, path, attrs, opts) do
       {:ok, entry, new_state} ->
         broadcast_file_change(new_state, {:file_updated, path})
         {:reply, {:ok, entry}, new_state}
@@ -644,6 +711,18 @@ defmodule Sagents.FileSystemServer do
 
       {pubsub, pubsub_name} ->
         {:reply, {pubsub, pubsub_name, state.topic}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:move_file, old_path, new_path}, _from, state) do
+    case FileSystemState.move_file(state, old_path, new_path) do
+      {:ok, moved_entries, new_state} ->
+        broadcast_file_change(new_state, {:file_moved, old_path, new_path})
+        {:reply, {:ok, moved_entries}, new_state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
