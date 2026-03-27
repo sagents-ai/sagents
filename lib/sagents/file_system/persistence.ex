@@ -143,9 +143,9 @@ defmodule Sagents.FileSystem.Persistence do
   @doc """
   Update only metadata for a persisted file entry (no content write).
 
-  This is an optional callback used when metadata changes without content changes
-  (e.g., rename, reorder, tag updates). Falls back to `write_to_storage/2` if
-  not implemented.
+  This is an optional callback used when only non-content fields change
+  (`dirty_non_content: true`) — e.g., custom metadata, title, or file_type
+  updates. Falls back to `write_to_storage/2` if not implemented.
 
   ## Parameters
 
@@ -160,5 +160,30 @@ defmodule Sagents.FileSystem.Persistence do
   @callback update_metadata_in_storage(file_entry :: FileEntry.t(), opts :: keyword()) ::
               {:ok, FileEntry.t()} | {:error, term()}
 
-  @optional_callbacks update_metadata_in_storage: 2
+  @doc """
+  Move a file entry to a new path in persistent storage.
+
+  This is an optional callback invoked by `move_file/3` for each entry being moved.
+  If not implemented, moved entries are marked dirty and persisted via the normal
+  `write_to_storage/2` or `update_metadata_in_storage/2` cycle.
+
+  ## Parameters
+
+  - `file_entry` - The FileEntry at its **old** path (before the move)
+  - `new_path` - The target path
+  - `opts` - Storage configuration options
+
+  ## Returns
+
+  - `{:ok, file_entry}` with the entry updated to reflect the new path
+  - `{:error, reason}` on failure (entry will be marked dirty as fallback)
+  """
+  @callback move_in_storage(
+              file_entry :: FileEntry.t(),
+              new_path :: String.t(),
+              opts :: keyword()
+            ) ::
+              {:ok, FileEntry.t()} | {:error, term()}
+
+  @optional_callbacks update_metadata_in_storage: 2, move_in_storage: 3
 end

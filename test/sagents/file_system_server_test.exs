@@ -9,7 +9,7 @@ defmodule Sagents.FileSystemServerTest do
   defmodule MockPersistence do
     @behaviour Sagents.FileSystem.Persistence
 
-    def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty: false}}
+    def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty_content: false}}
     def load_from_storage(_entry, _opts), do: {:error, :enoent}
     def delete_from_storage(_entry, _opts), do: :ok
     def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
@@ -18,7 +18,7 @@ defmodule Sagents.FileSystemServerTest do
   defmodule TestModule do
     @behaviour Sagents.FileSystem.Persistence
 
-    def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty: false}}
+    def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty_content: false}}
     def load_from_storage(_entry, _opts), do: {:error, :enoent}
     def delete_from_storage(_entry, _opts), do: :ok
     def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
@@ -125,7 +125,7 @@ defmodule Sagents.FileSystemServerTest do
       assert entry.content == content
       assert entry.persistence == :memory
       assert entry.loaded == true
-      assert entry.dirty == false
+      assert entry.dirty_content == false
     end
 
     test "writes to unconfigured directory as memory-only", %{
@@ -149,7 +149,7 @@ defmodule Sagents.FileSystemServerTest do
       defmodule TestPersistence do
         @behaviour Sagents.FileSystem.Persistence
 
-        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty: false}}
+        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty_content: false}}
         def load_from_storage(_entry, _opts), do: {:error, :enoent}
         def delete_from_storage(_entry, _opts), do: :ok
         def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
@@ -172,7 +172,7 @@ defmodule Sagents.FileSystemServerTest do
       state = :sys.get_state(pid)
       entry = Map.get(state.files, path)
       assert entry.persistence == :persisted
-      assert entry.dirty == false
+      assert entry.dirty_content == false
       assert entry.loaded == true
     end
 
@@ -180,7 +180,7 @@ defmodule Sagents.FileSystemServerTest do
       defmodule TestPersistenceUpdate do
         @behaviour Sagents.FileSystem.Persistence
 
-        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty: false}}
+        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty_content: false}}
         def load_from_storage(_entry, _opts), do: {:error, :enoent}
         def delete_from_storage(_entry, _opts), do: :ok
         def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
@@ -199,13 +199,13 @@ defmodule Sagents.FileSystemServerTest do
       # Create file first (persists immediately)
       assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, "initial")
       state = :sys.get_state(pid)
-      assert Map.get(state.files, path).dirty == false
+      assert Map.get(state.files, path).dirty_content == false
 
       # Update existing file (should debounce)
       assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, "updated")
       state = :sys.get_state(pid)
       entry = Map.get(state.files, path)
-      assert entry.dirty == true
+      assert entry.dirty_content == true
 
       # Wait for debounce timer to fire
       Process.sleep(150)
@@ -213,7 +213,7 @@ defmodule Sagents.FileSystemServerTest do
       # File should now be clean
       state = :sys.get_state(pid)
       clean_entry = Map.get(state.files, path)
-      assert clean_entry.dirty == false
+      assert clean_entry.dirty_content == false
     end
 
     test "updates existing file and resets debounce timer", %{agent_id: agent_id} do
@@ -229,7 +229,7 @@ defmodule Sagents.FileSystemServerTest do
             test_pid -> send(test_pid, {:persisted, System.monotonic_time()})
           end
 
-          {:ok, %{entry | dirty: false}}
+          {:ok, %{entry | dirty_content: false}}
         end
 
         def load_from_storage(_entry, _opts), do: {:error, :enoent}
@@ -304,7 +304,7 @@ defmodule Sagents.FileSystemServerTest do
       defmodule TestPersistence3 do
         @behaviour Sagents.FileSystem.Persistence
 
-        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty: false}}
+        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty_content: false}}
 
         def load_from_storage(_entry, _opts), do: {:error, :enoent}
 
@@ -378,7 +378,7 @@ defmodule Sagents.FileSystemServerTest do
             test_pid -> send(test_pid, {:flushed, entry.path})
           end
 
-          {:ok, %{entry | dirty: false}}
+          {:ok, %{entry | dirty_content: false}}
         end
 
         def load_from_storage(_entry, _opts), do: {:error, :enoent}
@@ -453,7 +453,7 @@ defmodule Sagents.FileSystemServerTest do
       defmodule TestPersistence5 do
         @behaviour Sagents.FileSystem.Persistence
 
-        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty: false}}
+        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty_content: false}}
         def load_from_storage(_entry, _opts), do: {:error, :enoent}
         def delete_from_storage(_entry, _opts), do: :ok
         def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
@@ -526,7 +526,7 @@ defmodule Sagents.FileSystemServerTest do
 
         def write_to_storage(entry, _opts) do
           send(:test_process, {:flushed_on_terminate, entry.path})
-          {:ok, %{entry | dirty: false}}
+          {:ok, %{entry | dirty_content: false}}
         end
 
         def load_from_storage(_entry, _opts), do: {:error, :enoent}
@@ -570,7 +570,7 @@ defmodule Sagents.FileSystemServerTest do
       defmodule TestPersistence7 do
         @behaviour Sagents.FileSystem.Persistence
 
-        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty: false}}
+        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty_content: false}}
         def load_from_storage(_entry, _opts), do: {:error, :enoent}
         def delete_from_storage(_entry, _opts), do: :ok
         def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
@@ -882,7 +882,7 @@ defmodule Sagents.FileSystemServerTest do
           # Store in ETS to simulate persistence
           storage_table = Keyword.get(opts, :storage_table)
           :ets.insert(storage_table, {entry.path, entry.content})
-          {:ok, %{entry | dirty: false}}
+          {:ok, %{entry | dirty_content: false}}
         end
 
         def load_from_storage(%{path: path} = entry, opts) do
@@ -895,7 +895,7 @@ defmodule Sagents.FileSystemServerTest do
           # Load from ETS
           case :ets.lookup(storage_table, path) do
             [{^path, content}] ->
-              {:ok, %{entry | content: content, loaded: true, dirty: false}}
+              {:ok, %{entry | content: content, loaded: true, dirty_content: false}}
 
             [] ->
               {:error, :enoent}
@@ -1051,41 +1051,60 @@ defmodule Sagents.FileSystemServerTest do
     end
   end
 
-  describe "update_metadata/4" do
+  describe "update_custom_metadata/4" do
     test "updates custom metadata on a file", %{agent_id: agent_id} do
       {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
       FileSystemServer.write_file({:agent, agent_id}, "/doc.txt", "content")
 
       assert {:ok, entry} =
-               FileSystemServer.update_metadata({:agent, agent_id}, "/doc.txt", %{
+               FileSystemServer.update_custom_metadata({:agent, agent_id}, "/doc.txt", %{
                  "tags" => ["important"]
                })
 
       assert entry.metadata.custom == %{"tags" => ["important"]}
     end
 
-    test "updates title via opts", %{agent_id: agent_id} do
+    test "returns error for nonexistent file", %{agent_id: agent_id} do
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+
+      assert {:error, :enoent} =
+               FileSystemServer.update_custom_metadata({:agent, agent_id}, "/nope.txt", %{})
+    end
+  end
+
+  describe "update_entry/4" do
+    test "updates title on a file", %{agent_id: agent_id} do
       {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
       FileSystemServer.write_file({:agent, agent_id}, "/doc.txt", "content")
 
       assert {:ok, entry} =
-               FileSystemServer.update_metadata(
-                 {:agent, agent_id},
-                 "/doc.txt",
-                 %{},
-                 title: "New Title"
-               )
+               FileSystemServer.update_entry({:agent, agent_id}, "/doc.txt", %{title: "New Title"})
 
       assert entry.title == "New Title"
+    end
+
+    test "updates multiple attrs", %{agent_id: agent_id} do
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+
+      FileSystemServer.write_file({:agent, agent_id}, "/doc.txt", "content")
+
+      assert {:ok, entry} =
+               FileSystemServer.update_entry({:agent, agent_id}, "/doc.txt", %{
+                 title: "Doc",
+                 file_type: "json"
+               })
+
+      assert entry.title == "Doc"
+      assert entry.file_type == "json"
     end
 
     test "returns error for nonexistent file", %{agent_id: agent_id} do
       {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
       assert {:error, :enoent} =
-               FileSystemServer.update_metadata({:agent, agent_id}, "/nope.txt", %{})
+               FileSystemServer.update_entry({:agent, agent_id}, "/nope.txt", %{title: "X"})
     end
   end
 

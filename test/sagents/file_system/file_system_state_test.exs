@@ -76,7 +76,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       assert entry.content == content
       assert entry.persistence == :memory
       assert entry.loaded == true
-      assert entry.dirty == false
+      assert entry.dirty_content == false
     end
 
     test "writes a new persisted file and persists immediately", %{state: state} do
@@ -101,7 +101,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       entry = Map.get(new_state.files, path)
       assert entry.persistence == :persisted
       # New files are persisted immediately, so dirty is false
-      assert entry.dirty == false
+      assert entry.dirty_content == false
       assert entry.loaded == true
 
       # No debounce timer for new files (persisted immediately)
@@ -124,7 +124,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
 
       # Create the file first (persists immediately)
       assert {:ok, _entry, state} = FileSystemState.write_file(state, path, "initial content", [])
-      assert state.files[path].dirty == false
+      assert state.files[path].dirty_content == false
 
       # Update the existing file (should debounce)
       assert {:ok, _entry, new_state} =
@@ -132,7 +132,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
 
       entry = Map.get(new_state.files, path)
       assert entry.persistence == :persisted
-      assert entry.dirty == true
+      assert entry.dirty_content == true
       assert entry.loaded == true
 
       # Verify debounce timer was created for the update
@@ -164,6 +164,71 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
 
       assert {:error, reason, _state} = FileSystemState.write_file(state, path, content, [])
       assert reason =~ "read-only"
+    end
+  end
+
+  describe "move_file/3" do
+    setup do
+      agent_id = "test_agent_#{System.unique_integer([:positive])}"
+      {:ok, state} = FileSystemState.new(scope_key: {:agent, agent_id})
+      %{state: state}
+    end
+
+    test "moves a file to a new path", %{state: state} do
+      {:ok, _entry, state} = FileSystemState.write_file(state, "/old", "content")
+      {:ok, [moved], state} = FileSystemState.move_file(state, "/old", "/new")
+
+      assert moved.path == "/new"
+      assert moved.content == "content"
+      refute Map.has_key?(state.files, "/old")
+      assert Map.has_key?(state.files, "/new")
+    end
+
+    test "moves a directory and its children", %{state: state} do
+      {:ok, _dir, state} = FileSystemState.create_directory(state, "/parent")
+      {:ok, _file, state} = FileSystemState.write_file(state, "/parent/child", "child content")
+
+      {:ok, moved, state} = FileSystemState.move_file(state, "/parent", "/renamed")
+
+      paths = Enum.map(moved, & &1.path)
+      assert "/renamed" in paths
+      assert "/renamed/child" in paths
+      refute Map.has_key?(state.files, "/parent")
+      refute Map.has_key?(state.files, "/parent/child")
+      assert Map.has_key?(state.files, "/renamed")
+      assert Map.has_key?(state.files, "/renamed/child")
+    end
+
+    test "returns error for non-existent path", %{state: state} do
+      assert {:error, :enoent, _state} = FileSystemState.move_file(state, "/nope", "/new")
+    end
+
+    test "returns error when target already exists", %{state: state} do
+      {:ok, _entry, state} = FileSystemState.write_file(state, "/a", "a")
+      {:ok, _entry, state} = FileSystemState.write_file(state, "/b", "b")
+
+      assert {:error, :already_exists, _state} = FileSystemState.move_file(state, "/a", "/b")
+    end
+
+    test "no-op when old and new path are the same", %{state: state} do
+      {:ok, _entry, state} = FileSystemState.write_file(state, "/same", "content")
+      {:ok, [entry], state2} = FileSystemState.move_file(state, "/same", "/same")
+
+      assert entry.path == "/same"
+      assert state.files == state2.files
+    end
+
+    test "transfers debounce timers to new paths", %{state: state} do
+      {:ok, _entry, state} = FileSystemState.write_file(state, "/timed", "content")
+
+      # Simulate a pending debounce timer
+      timer_ref = make_ref()
+      state = %{state | debounce_timers: Map.put(state.debounce_timers, "/timed", timer_ref)}
+
+      {:ok, _moved, state} = FileSystemState.move_file(state, "/timed", "/moved")
+
+      refute Map.has_key?(state.debounce_timers, "/timed")
+      assert Map.get(state.debounce_timers, "/moved") == timer_ref
     end
   end
 
@@ -562,7 +627,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       # Files should be marked as unloaded
       entry1 = reset_state.files["/Memories/existing1.txt"]
       assert entry1.loaded == false
-      assert entry1.dirty == false
+      assert entry1.dirty_content == false
     end
 
     test "works with empty filesystem", %{state: state} do
@@ -605,7 +670,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
 
       # Verify it's dirty and loaded
       entry = state.files["/Memories/file.txt"]
-      assert entry.dirty == true
+      assert entry.dirty_content == true
       assert entry.loaded == true
       assert entry.content == "modified"
 
@@ -616,7 +681,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       assert Map.has_key?(reset_state.files, "/Memories/file.txt")
       reset_entry = reset_state.files["/Memories/file.txt"]
       assert reset_entry.loaded == false
-      assert reset_entry.dirty == false
+      assert reset_entry.dirty_content == false
       # Content would be nil since it's unloaded
     end
   end
@@ -632,7 +697,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       defmodule TestPersistenceMetadata do
         @behaviour Sagents.FileSystem.Persistence
 
-        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty: false}}
+        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty_content: false}}
         def load_from_storage(_entry, _opts), do: {:error, :enoent}
         def delete_from_storage(_entry, _opts), do: :ok
         def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
@@ -689,7 +754,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
     end
   end
 
-  describe "update_metadata/4" do
+  describe "update_custom_metadata/4" do
     setup do
       agent_id = "test_agent_#{System.unique_integer([:positive])}"
       {:ok, state} = FileSystemState.new(scope_key: {:agent, agent_id})
@@ -700,7 +765,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
 
       {:ok, updated, _state} =
-        FileSystemState.update_metadata(state, "/test.txt", %{"tags" => ["important"]})
+        FileSystemState.update_custom_metadata(state, "/test.txt", %{"tags" => ["important"]})
 
       assert updated.metadata.custom == %{"tags" => ["important"]}
     end
@@ -710,70 +775,56 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
         FileSystemState.write_file(state, "/test.txt", "data", custom: %{"author" => "Alice"})
 
       {:ok, updated, _state} =
-        FileSystemState.update_metadata(state, "/test.txt", %{"tags" => ["draft"]})
+        FileSystemState.update_custom_metadata(state, "/test.txt", %{"tags" => ["draft"]})
 
       assert updated.metadata.custom == %{"author" => "Alice", "tags" => ["draft"]}
     end
 
-    test "updates title via opts", %{state: state} do
-      {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
-
-      {:ok, updated, _state} =
-        FileSystemState.update_metadata(state, "/test.txt", %{}, title: "New Title")
-
-      assert updated.title == "New Title"
-    end
-
     test "returns error for nonexistent file", %{state: state} do
       assert {:error, :enoent, _state} =
-               FileSystemState.update_metadata(state, "/nope.txt", %{})
+               FileSystemState.update_custom_metadata(state, "/nope.txt", %{})
     end
 
-    test "marks persisted file dirty", %{state: state} do
-      defmodule TestPersistenceUpdateMeta do
-        @behaviour Sagents.FileSystem.Persistence
-
-        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty: false}}
-        def load_from_storage(_entry, _opts), do: {:error, :enoent}
-        def delete_from_storage(_entry, _opts), do: :ok
-        def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
-      end
-
-      state = add_persistence_config(state, TestPersistenceUpdateMeta)
+    test "persists immediately by default", %{state: state} do
+      state = add_persistence_config(state, TestPersistMetaRouting)
 
       {:ok, _entry, state} =
         FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
 
       # File is clean after immediate persist
-      assert state.files["/Memories/doc.txt"].dirty == false
+      assert state.files["/Memories/doc.txt"].dirty_content == false
 
-      # Update metadata
+      # Update metadata — persists immediately by default
       {:ok, updated, state} =
-        FileSystemState.update_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]})
+        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]})
 
-      assert updated.dirty == true
-      # Debounce timer should be scheduled
-      assert Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
+      # Entry should be clean (persisted immediately), no debounce timer
+      assert updated.dirty_content == false
+      assert updated.dirty_non_content == false
+      refute Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
     end
 
-    test "sets dirty_metadata on persisted file", %{state: state} do
+    test "sets dirty_non_content before persist on persisted file", %{state: state} do
       state = add_persistence_config(state, TestPersistNoMetaCallback)
 
       {:ok, _entry, state} =
         FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
 
       # File is clean after immediate persist
-      assert state.files["/Memories/doc.txt"].dirty_metadata == false
+      assert state.files["/Memories/doc.txt"].dirty_non_content == false
 
-      # Update metadata sets dirty_metadata
-      {:ok, updated, _state} =
-        FileSystemState.update_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]})
+      # With debounce, we can observe the dirty flags before persist fires
+      {:ok, _updated, state} =
+        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]},
+          persist: :debounce
+        )
 
-      assert updated.dirty == true
-      assert updated.dirty_metadata == true
+      entry = state.files["/Memories/doc.txt"]
+      assert entry.dirty_content == true
+      assert entry.dirty_non_content == true
     end
 
-    test "write_file does not set dirty_metadata", %{state: state} do
+    test "write_file does not set dirty_non_content", %{state: state} do
       state = add_persistence_config(state, TestPersistNoMetaCallback)
 
       {:ok, _entry, state} =
@@ -781,15 +832,221 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
 
       # Clean after immediate persist
       entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty_metadata == false
+      assert entry.dirty_non_content == false
 
-      # Content write sets dirty but not dirty_metadata
+      # Content write sets dirty but not dirty_non_content
       {:ok, _entry, state} =
         FileSystemState.write_file(state, "/Memories/doc.txt", "updated", [])
 
       entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty == true
-      assert entry.dirty_metadata == false
+      assert entry.dirty_content == true
+      assert entry.dirty_non_content == false
+    end
+
+    test "persist: :debounce schedules timer instead of persisting immediately", %{state: state} do
+      state = add_persistence_config(state, TestPersistMetaRouting)
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
+
+      # Update metadata with debounce
+      {:ok, _updated, state} =
+        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]},
+          persist: :debounce
+        )
+
+      # Entry should still be dirty — debounce timer pending
+      entry = state.files["/Memories/doc.txt"]
+      assert entry.dirty_content == true
+      assert entry.dirty_non_content == true
+      assert Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
+    end
+
+    test "memory-only file is unaffected by persist option", %{state: state} do
+      # No persistence config — file lives in memory only
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/scratch/tmp.txt", "data", [])
+
+      {:ok, updated, state} =
+        FileSystemState.update_custom_metadata(state, "/scratch/tmp.txt", %{"key" => "val"})
+
+      # Metadata was applied but entry stays in memory (no persist, no timers)
+      assert updated.metadata.custom == %{"key" => "val"}
+      assert state.debounce_timers == %{}
+    end
+
+    test "immediate persist clears pending debounce timer",
+         %{state: state} do
+      state = add_persistence_config(state, TestPersistMetaRouting)
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
+
+      # First update with debounce — schedules timer
+      {:ok, _updated, state} =
+        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"a" => 1},
+          persist: :debounce
+        )
+
+      assert Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
+
+      # Second update with default (immediate) — should persist and clear timer
+      {:ok, _updated, state} =
+        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"b" => 2})
+
+      entry = state.files["/Memories/doc.txt"]
+      assert entry.dirty_content == false
+      refute Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
+    end
+  end
+
+  describe "update_entry/4" do
+    setup do
+      agent_id = "test_agent_#{System.unique_integer([:positive])}"
+      {:ok, state} = FileSystemState.new(scope_key: {:agent, agent_id})
+      %{state: state}
+    end
+
+    test "updates title", %{state: state} do
+      {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
+
+      {:ok, updated, _state} =
+        FileSystemState.update_entry(state, "/test.txt", %{title: "New Title"})
+
+      assert updated.title == "New Title"
+    end
+
+    test "updates id", %{state: state} do
+      {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
+
+      {:ok, updated, _state} =
+        FileSystemState.update_entry(state, "/test.txt", %{id: "abc-123"})
+
+      assert updated.id == "abc-123"
+    end
+
+    test "updates file_type", %{state: state} do
+      {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
+
+      {:ok, updated, _state} =
+        FileSystemState.update_entry(state, "/test.txt", %{file_type: "json"})
+
+      assert updated.file_type == "json"
+    end
+
+    test "updates multiple attrs at once", %{state: state} do
+      {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
+
+      {:ok, updated, _state} =
+        FileSystemState.update_entry(state, "/test.txt", %{
+          title: "Doc",
+          id: "x",
+          file_type: "pdf"
+        })
+
+      assert updated.title == "Doc"
+      assert updated.id == "x"
+      assert updated.file_type == "pdf"
+    end
+
+    test "no-op when attrs match current values", %{state: state} do
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/test.txt", "data", title: "Same")
+
+      {:ok, updated, new_state} =
+        FileSystemState.update_entry(state, "/test.txt", %{title: "Same"})
+
+      assert updated.title == "Same"
+      # No dirty marking since nothing changed
+      assert updated.dirty_content == false
+      assert new_state.debounce_timers == %{}
+    end
+
+    test "returns error for nonexistent file", %{state: state} do
+      assert {:error, :enoent, _state} =
+               FileSystemState.update_entry(state, "/nope.txt", %{title: "X"})
+    end
+
+    test "returns error for readonly directory", %{state: state} do
+      {:ok, config} =
+        FileSystemConfig.new(%{
+          base_directory: "readonly",
+          persistence_module: TestPersistMetaRouting,
+          readonly: true
+        })
+
+      {:ok, state} = FileSystemState.register_persistence(state, config)
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/scratch/test.txt", "data", [])
+
+      # Write a file outside readonly, then try to update one inside
+      # Need to have a file in readonly first — but can't write to readonly.
+      # So test the error path directly:
+      assert {:error, msg, _state} =
+               FileSystemState.update_entry(state, "/readonly/file.txt", %{title: "X"})
+
+      # File doesn't exist in readonly, so we get enoent
+      assert msg == :enoent
+    end
+
+    test "persists immediately by default", %{state: state} do
+      state = add_persistence_config(state, TestPersistMetaRouting)
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
+
+      {:ok, updated, state} =
+        FileSystemState.update_entry(state, "/Memories/doc.txt", %{title: "Renamed"})
+
+      assert updated.title == "Renamed"
+      assert updated.dirty_content == false
+      assert updated.dirty_non_content == false
+      refute Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
+    end
+
+    test "persist: :debounce schedules timer", %{state: state} do
+      state = add_persistence_config(state, TestPersistMetaRouting)
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
+
+      {:ok, _updated, state} =
+        FileSystemState.update_entry(state, "/Memories/doc.txt", %{title: "Renamed"},
+          persist: :debounce
+        )
+
+      entry = state.files["/Memories/doc.txt"]
+      assert entry.dirty_content == true
+      assert entry.dirty_non_content == true
+      assert Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
+    end
+
+    test "memory-only file: no persist, no timers", %{state: state} do
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/scratch/tmp.txt", "data", [])
+
+      {:ok, updated, state} =
+        FileSystemState.update_entry(state, "/scratch/tmp.txt", %{title: "Temp"})
+
+      assert updated.title == "Temp"
+      assert state.debounce_timers == %{}
+    end
+
+    test "ignores unknown keys in attrs", %{state: state} do
+      {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
+
+      {:ok, updated, _state} =
+        FileSystemState.update_entry(state, "/test.txt", %{
+          title: "New",
+          content: "hack",
+          path: "/bad"
+        })
+
+      assert updated.title == "New"
+      # content and path should be unchanged
+      assert updated.content == "data"
+      assert updated.path == "/test.txt"
     end
   end
 
@@ -800,29 +1057,31 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       %{state: state}
     end
 
-    test "calls update_metadata_in_storage when dirty_metadata is true", %{state: state} do
+    test "calls update_metadata_in_storage when dirty_non_content is true", %{state: state} do
       state = add_persistence_config(state, TestPersistMetaRouting)
 
       {:ok, _entry, state} =
         FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
 
-      # Update metadata only
+      # Update metadata only (debounce so we can manually persist)
       {:ok, _updated, state} =
-        FileSystemState.update_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]})
+        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]},
+          persist: :debounce
+        )
 
-      # Verify entry has dirty_metadata before persist
-      assert state.files["/Memories/doc.txt"].dirty_metadata == true
+      # Verify entry has dirty_non_content before persist
+      assert state.files["/Memories/doc.txt"].dirty_non_content == true
 
       # Manually persist (simulating debounce fire)
       state = FileSystemState.persist_file(state, "/Memories/doc.txt")
 
       # After persist, entry should be clean
       entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty == false
-      assert entry.dirty_metadata == false
+      assert entry.dirty_content == false
+      assert entry.dirty_non_content == false
     end
 
-    test "calls write_to_storage when dirty_metadata is false", %{state: state} do
+    test "calls write_to_storage when dirty_non_content is false", %{state: state} do
       state = add_persistence_config(state, TestPersistMetaRouting)
 
       {:ok, _entry, state} =
@@ -832,41 +1091,43 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       {:ok, _entry, state} =
         FileSystemState.write_file(state, "/Memories/doc.txt", "updated", [])
 
-      # dirty but NOT dirty_metadata
-      assert state.files["/Memories/doc.txt"].dirty == true
-      assert state.files["/Memories/doc.txt"].dirty_metadata == false
+      # dirty but NOT dirty_non_content
+      assert state.files["/Memories/doc.txt"].dirty_content == true
+      assert state.files["/Memories/doc.txt"].dirty_non_content == false
 
       state = FileSystemState.persist_file(state, "/Memories/doc.txt")
 
       entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty == false
+      assert entry.dirty_content == false
     end
 
-    test "content write after metadata update resets dirty_metadata and uses write_to_storage",
+    test "content write after metadata update resets dirty_non_content and uses write_to_storage",
          %{state: state} do
       state = add_persistence_config(state, TestPersistMetaRouting)
 
       {:ok, _entry, state} =
         FileSystemState.write_file(state, "/Memories/doc.txt", "initial", [])
 
-      # Metadata-only update sets dirty_metadata
+      # Metadata-only update sets dirty_non_content (debounce so it stays dirty)
       {:ok, _updated, state} =
-        FileSystemState.update_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]})
+        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]},
+          persist: :debounce
+        )
 
-      assert state.files["/Memories/doc.txt"].dirty_metadata == true
+      assert state.files["/Memories/doc.txt"].dirty_non_content == true
 
-      # Content write should reset dirty_metadata
+      # Content write should reset dirty_non_content
       {:ok, _entry, state} =
         FileSystemState.write_file(state, "/Memories/doc.txt", "new content", [])
 
-      assert state.files["/Memories/doc.txt"].dirty == true
-      assert state.files["/Memories/doc.txt"].dirty_metadata == false
+      assert state.files["/Memories/doc.txt"].dirty_content == true
+      assert state.files["/Memories/doc.txt"].dirty_non_content == false
 
       # Persist should use write_to_storage (full write), not update_metadata_in_storage
       state = FileSystemState.persist_file(state, "/Memories/doc.txt")
 
       entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty == false
+      assert entry.dirty_content == false
       assert entry.content == "new content"
     end
 
@@ -877,17 +1138,19 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       {:ok, _entry, state} =
         FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
 
-      # Metadata update — but module doesn't implement the callback
+      # Metadata update — but module doesn't implement the callback (debounce so it stays dirty)
       {:ok, _updated, state} =
-        FileSystemState.update_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]})
+        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]},
+          persist: :debounce
+        )
 
-      assert state.files["/Memories/doc.txt"].dirty_metadata == true
+      assert state.files["/Memories/doc.txt"].dirty_non_content == true
 
       # Should still succeed — falls back to write_to_storage
       state = FileSystemState.persist_file(state, "/Memories/doc.txt")
 
       entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty == false
+      assert entry.dirty_content == false
     end
   end
 
@@ -924,7 +1187,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       defmodule TestPersistenceDir do
         @behaviour Sagents.FileSystem.Persistence
 
-        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty: false}}
+        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty_content: false}}
         def load_from_storage(_entry, _opts), do: {:error, :enoent}
         def delete_from_storage(_entry, _opts), do: :ok
         def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
@@ -936,7 +1199,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
         FileSystemState.create_directory(state, "/Memories/Chapters", title: "Chapters")
 
       assert entry.persistence == :persisted
-      assert entry.dirty == false
+      assert entry.dirty_content == false
     end
   end
 
@@ -951,7 +1214,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       defmodule TestPersistenceRichIndex do
         @behaviour Sagents.FileSystem.Persistence
 
-        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty: false}}
+        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty_content: false}}
         def load_from_storage(_entry, _opts), do: {:error, :enoent}
         def delete_from_storage(_entry, _opts), do: :ok
 

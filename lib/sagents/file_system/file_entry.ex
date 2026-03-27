@@ -20,26 +20,30 @@ defmodule Sagents.FileSystem.FileEntry do
     - `true` - Content is in ETS, ready to use
     - `false` - Content exists in storage but not loaded (lazy load on read)
 
-  - `:dirty` - Sync status (only meaningful when persistence: :persisted)
+  - `:dirty_content` - Content sync status (only meaningful when persistence: :persisted)
     - `false` - In-memory content matches storage
     - `true` - In-memory content differs from storage (needs persist)
+
+  - `:dirty_non_content` - Non-content change tracking
+    - `false` - Entry-level fields and metadata match storage
+    - `true` - Only non-content fields changed (enables metadata-only persist optimization)
 
   ## State Examples
 
   Memory file (always loaded, never dirty):
-    %FileEntry{entry_type: :file, persistence: :memory, loaded: true, dirty: false, content: "data"}
+    %FileEntry{entry_type: :file, persistence: :memory, loaded: true, dirty_content: false, content: "data"}
 
   Persisted file, clean, loaded:
-    %FileEntry{entry_type: :file, persistence: :persisted, loaded: true, dirty: false, content: "data"}
+    %FileEntry{entry_type: :file, persistence: :persisted, loaded: true, dirty_content: false, content: "data"}
 
   Persisted file, not yet loaded (lazy):
-    %FileEntry{entry_type: :file, persistence: :persisted, loaded: false, dirty: false, content: nil}
+    %FileEntry{entry_type: :file, persistence: :persisted, loaded: false, dirty_content: false, content: nil}
 
   Persisted file, modified since last save:
-    %FileEntry{entry_type: :file, persistence: :persisted, loaded: true, dirty: true, content: "new data"}
+    %FileEntry{entry_type: :file, persistence: :persisted, loaded: true, dirty_content: true, content: "new data"}
 
   Directory entry:
-    %FileEntry{entry_type: :directory, persistence: :persisted, loaded: true, dirty: false, content: nil}
+    %FileEntry{entry_type: :directory, persistence: :persisted, loaded: true, dirty_content: false, content: nil}
   """
   use Ecto.Schema
   import Ecto.Changeset
@@ -66,9 +70,9 @@ defmodule Sagents.FileSystem.FileEntry do
     # Is content currently loaded in ETS? (false = lazy load needed)
     field :loaded, :boolean, default: true
     # Has content been modified since last storage write? (only relevant for :persisted files)
-    field :dirty, :boolean, default: false
-    # Enables metadata-only persistence optimization; only valid when dirty is true
-    field :dirty_metadata, :boolean, default: false
+    field :dirty_content, :boolean, default: false
+    # Only non-content fields changed; enables metadata-only persist optimization
+    field :dirty_non_content, :boolean, default: false
     embeds_one :metadata, FileMetadata
   end
 
@@ -81,8 +85,8 @@ defmodule Sagents.FileSystem.FileEntry do
           content: String.t() | nil,
           persistence: :memory | :persisted,
           loaded: boolean(),
-          dirty: boolean(),
-          dirty_metadata: boolean(),
+          dirty_content: boolean(),
+          dirty_non_content: boolean(),
           metadata: FileMetadata.t() | nil
         }
 
@@ -100,11 +104,21 @@ defmodule Sagents.FileSystem.FileEntry do
       :content,
       :persistence,
       :loaded,
-      :dirty
+      :dirty_content
     ])
     |> cast_embed(:metadata, with: &FileMetadata.changeset/2)
     |> validate_path()
-    |> validate_required([:persistence, :loaded, :dirty])
+    |> validate_required([:persistence, :loaded, :dirty_content])
+  end
+
+  @doc """
+  Changeset for updating entry-level fields (not content or internal state).
+
+  Only allows `:title`, `:id`, and `:file_type` to be changed.
+  """
+  def update_entry_changeset(%FileEntry{} = entry, attrs) do
+    entry
+    |> cast(attrs, [:title, :id, :file_type])
   end
 
   @doc """
@@ -144,7 +158,7 @@ defmodule Sagents.FileSystem.FileEntry do
           content: content,
           persistence: :memory,
           loaded: true,
-          dirty: false
+          dirty_content: false
         }
         |> maybe_put(:file_type, file_type)
 
@@ -181,7 +195,7 @@ defmodule Sagents.FileSystem.FileEntry do
           content: content,
           persistence: :persisted,
           loaded: true,
-          dirty: true
+          dirty_content: true
         }
         |> maybe_put(:file_type, file_type)
 
@@ -219,7 +233,7 @@ defmodule Sagents.FileSystem.FileEntry do
         content: nil,
         persistence: :persisted,
         loaded: entry_type == :directory,
-        dirty: false
+        dirty_content: false
       }
       |> maybe_put(:file_type, file_type)
 
@@ -265,7 +279,7 @@ defmodule Sagents.FileSystem.FileEntry do
           content: nil,
           persistence: persistence,
           loaded: true,
-          dirty: persistence == :persisted
+          dirty_content: persistence == :persisted
         }
 
         %FileEntry{}
@@ -311,7 +325,7 @@ defmodule Sagents.FileSystem.FileEntry do
   Marks a persisted file as clean (synced with storage).
   """
   def mark_clean(entry) do
-    %{entry | dirty: false, dirty_metadata: false}
+    %{entry | dirty_content: false, dirty_non_content: false}
   end
 
   @doc """
@@ -329,7 +343,7 @@ defmodule Sagents.FileSystem.FileEntry do
   end
 
   def update_content(%FileEntry{} = entry, new_content, opts) do
-    dirty = entry.persistence == :persisted
+    dirty_content = entry.persistence == :persisted
 
     metadata_result =
       if entry.metadata do
@@ -345,8 +359,8 @@ defmodule Sagents.FileSystem.FileEntry do
            entry
            | content: new_content,
              loaded: true,
-             dirty: dirty,
-             dirty_metadata: false,
+             dirty_content: dirty_content,
+             dirty_non_content: false,
              metadata: new_metadata
          }}
 

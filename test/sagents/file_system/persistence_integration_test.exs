@@ -65,7 +65,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       entry = get_entry(agent_id, path)
       assert entry.content == content
       assert entry.persistence == :persisted
-      assert entry.dirty == false
+      assert entry.dirty_content == false
 
       # Verify file exists on disk immediately (no debounce needed)
       disk_path = Path.join(tmp_dir, "test.txt")
@@ -95,14 +95,14 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
 
       # File should be dirty after update
       entry = get_entry(agent_id, path)
-      assert entry.dirty == true
+      assert entry.dirty_content == true
 
       # Wait for debounce
       Process.sleep(150)
 
       # File should now be clean
       clean_entry = get_entry(agent_id, path)
-      assert clean_entry.dirty == false
+      assert clean_entry.dirty_content == false
 
       # Verify updated content on disk
       disk_path = Path.join(tmp_dir, "test.txt")
@@ -182,7 +182,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       # File should be in ETS
       entry = get_entry(agent_id, path)
       assert entry.persistence == :memory
-      assert entry.dirty == false
+      assert entry.dirty_content == false
 
       # Wait longer than debounce
       Process.sleep(150)
@@ -556,7 +556,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
 
       # File should still be dirty (persist failed)
       entry_after = get_entry(agent_id, "/Memories/file.txt")
-      assert entry_after.dirty == true
+      assert entry_after.dirty_content == true
     end
   end
 end
