@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.3.2
+## (Next)
 
 Adds file move/rename, metadata-only persistence optimization, and a clearer FileSystem API with separate functions for entry-level fields vs custom metadata. [#38](https://github.com/sagents-ai/sagents/pull/38)
 
