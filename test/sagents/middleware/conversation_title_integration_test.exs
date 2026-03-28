@@ -89,10 +89,10 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
       :ok = AgentServer.add_message(agent_id, Message.new_user!("What's the weather today?"))
 
       # Should receive broadcast debug event wrapped in {:agent, {:debug, event}} tuple
-      assert_receive {:agent, {:debug, {:agent_state_update, _received_state}}}, 100
+      assert_receive {:agent, {:debug, {:agent_state_update, _received_state}}}, 500
 
-      # Should receive PubSub event of title generation
-      assert_receive {:agent, {:conversation_title_generated, title, _agent_id}}, 100
+      # Should receive PubSub event of title generation (async Task, needs longer timeout)
+      assert_receive {:agent, {:conversation_title_generated, title, _agent_id}}, 500
       assert title == "Asking about the weather"
 
       # Verify title was generated and stored
@@ -184,8 +184,8 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
         {:title_generated, existing_title}
       )
 
-      # Wait for the initial title to be set
-      Process.sleep(50)
+      # Synchronize: ensure the middleware message has been processed
+      _ = AgentServer.get_state(agent_id)
 
       # Mock only ONE ChatAnthropic call - for the agent's response
       # No second call should happen for title generation (verifies middleware skips title gen)

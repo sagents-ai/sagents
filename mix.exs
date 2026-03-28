@@ -2,7 +2,7 @@ defmodule Sagents.MixProject do
   use Mix.Project
 
   @source_url "https://github.com/sagents-ai/sagents"
-  @version "0.3.1"
+  @version "0.4.0"
 
   def project do
     [
@@ -43,7 +43,7 @@ defmodule Sagents.MixProject do
   defp deps do
     [
       # Core dependency - the LangChain library
-      {:langchain, "~> 0.6.1"},
+      {:langchain, "~> 0.6.3"},
       # {:langchain, path: "../my_langchain"},
 
       # Required dependencies

@@ -211,7 +211,7 @@ custom classes must fully style the input
       ref = Process.monitor(pid)
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
 
-   - Instead of sleeping to synchronize before the next call, **always** use `_ = :sys.get_state/1` to ensure the process has handled prior messages
+   - Instead of sleeping to synchronize before the next call, **always** use a synchronous call to ensure the process has handled prior messages. For AgentServer tests, prefer `_ = AgentServer.get_state(agent_id)` over `:sys.get_state/1` since it accepts the agent_id directly and provides the same synchronization guarantee via `GenServer.call`
 
 <!-- usage-rules-start -->
 <!-- usage-rules-header -->
