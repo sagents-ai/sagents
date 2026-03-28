@@ -31,7 +31,8 @@ defmodule Sagents.Middleware.FileSystemTest do
                "edit_file",
                "search_text",
                "edit_lines",
-               "delete_file"
+               "delete_file",
+               "move_file"
              ]
 
       assert config.custom_tool_descriptions == %{}
@@ -150,7 +151,7 @@ defmodule Sagents.Middleware.FileSystemTest do
   end
 
   describe "tools/1" do
-    test "returns all seven filesystem tools by default", %{agent_id: agent_id} do
+    test "returns all eight filesystem tools by default", %{agent_id: agent_id} do
       tools =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
@@ -161,11 +162,12 @@ defmodule Sagents.Middleware.FileSystemTest do
             "edit_file",
             "search_text",
             "edit_lines",
-            "delete_file"
+            "delete_file",
+            "move_file"
           ]
         })
 
-      assert length(tools) == 7
+      assert length(tools) == 8
       tool_names = Enum.map(tools, & &1.name)
       assert "ls" in tool_names
       assert "read_file" in tool_names
@@ -174,6 +176,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert "search_text" in tool_names
       assert "edit_lines" in tool_names
       assert "delete_file" in tool_names
+      assert "move_file" in tool_names
     end
 
     test "returns only enabled tools", %{agent_id: agent_id} do
@@ -477,6 +480,107 @@ defmodule Sagents.Middleware.FileSystemTest do
 
       assert {:error, message} = tool.function.(args, %{state: State.new!()})
       assert message =~ "not found"
+    end
+  end
+
+  describe "move_file tool" do
+    setup %{agent_id: agent_id} do
+      FileSystemServer.write_file({:agent, agent_id}, "/source.txt", "file content")
+
+      tools =
+        FileSystem.tools(%{
+          filesystem_scope: {:agent, agent_id},
+          enabled_tools: ["move_file"],
+          entry_to_map: &FileSystem.default_entry_to_map/1
+        })
+
+      [move_file_tool] = tools
+
+      %{tool: move_file_tool}
+    end
+
+    test "moves a file to a new path", %{agent_id: agent_id, tool: tool} do
+      args = %{"old_path" => "/source.txt", "new_path" => "/destination.txt"}
+
+      assert {:ok, message} = tool.function.(args, %{state: State.new!()})
+      assert message =~ "Moved successfully"
+      assert message =~ "/source.txt -> /destination.txt"
+
+      # Verify file exists at new path
+      assert {:ok, %{content: "file content"}} =
+               FileSystemServer.read_file({:agent, agent_id}, "/destination.txt")
+
+      # Verify file no longer exists at old path
+      assert {:error, :enoent} =
+               FileSystemServer.read_file({:agent, agent_id}, "/source.txt")
+    end
+
+    test "renames a file in same directory", %{agent_id: agent_id, tool: tool} do
+      args = %{"old_path" => "/source.txt", "new_path" => "/renamed.txt"}
+
+      assert {:ok, message} = tool.function.(args, %{state: State.new!()})
+      assert message =~ "Moved successfully"
+
+      assert {:ok, %{content: "file content"}} =
+               FileSystemServer.read_file({:agent, agent_id}, "/renamed.txt")
+    end
+
+    test "moves a directory with children", %{agent_id: agent_id, tool: tool} do
+      FileSystemServer.write_file({:agent, agent_id}, "/dir/file1.txt", "content1")
+      FileSystemServer.write_file({:agent, agent_id}, "/dir/file2.txt", "content2")
+
+      args = %{"old_path" => "/dir", "new_path" => "/new_dir"}
+
+      assert {:ok, message} = tool.function.(args, %{state: State.new!()})
+      assert message =~ "Moved successfully"
+
+      # Verify children moved
+      assert {:ok, %{content: "content1"}} =
+               FileSystemServer.read_file({:agent, agent_id}, "/new_dir/file1.txt")
+
+      assert {:ok, %{content: "content2"}} =
+               FileSystemServer.read_file({:agent, agent_id}, "/new_dir/file2.txt")
+
+      # Verify old paths gone
+      assert {:error, :enoent} =
+               FileSystemServer.read_file({:agent, agent_id}, "/dir/file1.txt")
+    end
+
+    test "returns error for non-existent source", %{tool: tool} do
+      args = %{"old_path" => "/missing.txt", "new_path" => "/dest.txt"}
+
+      assert {:error, message} = tool.function.(args, %{state: State.new!()})
+      assert message =~ "not found"
+    end
+
+    test "returns error when target already exists", %{agent_id: agent_id, tool: tool} do
+      FileSystemServer.write_file({:agent, agent_id}, "/existing.txt", "other content")
+
+      args = %{"old_path" => "/source.txt", "new_path" => "/existing.txt"}
+
+      assert {:error, message} = tool.function.(args, %{state: State.new!()})
+      assert message =~ "already exists"
+    end
+
+    test "rejects paths without leading slash", %{tool: tool} do
+      args = %{"old_path" => "no-slash.txt", "new_path" => "/dest.txt"}
+
+      assert {:error, message} = tool.function.(args, %{state: State.new!()})
+      assert message =~ "must start with"
+    end
+
+    test "rejects path traversal attempts", %{tool: tool} do
+      args = %{"old_path" => "/source.txt", "new_path" => "/../etc/passwd"}
+
+      assert {:error, message} = tool.function.(args, %{state: State.new!()})
+      assert message =~ "not allowed"
+    end
+
+    test "returns error when old_path is missing", %{tool: tool} do
+      args = %{"new_path" => "/dest.txt"}
+
+      assert {:error, message} = tool.function.(args, %{state: State.new!()})
+      assert message =~ "old_path and new_path are required"
     end
   end
 
