@@ -1,26 +1,63 @@
 # Changelog
 
-## (Next)
+## v0.4.0
 
-Adds file move/rename, metadata-only persistence optimization, and a clearer FileSystem API with separate functions for entry-level fields vs custom metadata. [#38](https://github.com/sagents-ai/sagents/pull/38)
+Major FileSystem API expansion with directory entries, richer FileEntry struct, file move/rename, metadata-only persistence optimization, and a clearer API surface. Also adds `tool_context` for caller-supplied data in tools, `MessagePreprocessor` for display/LLM message splitting, and improved middleware messaging.
+
+**Breaking changes** — see Upgrading section below.
+
+### Upgrading from v0.3.1
+
+**FileEntry field renames:**
+- `FileEntry.dirty` → `FileEntry.dirty_content`
+- `FileEntry.dirty_metadata` → `FileEntry.dirty_non_content`
+
+**API renames:**
+- `FileSystemState.update_metadata/4` → `update_custom_metadata/4` (no longer accepts `:title` opt — use `update_entry/4` for title changes)
+- `FileSystemServer.update_metadata/4` → `update_custom_metadata/4`
+- `Persistence.list_persisted_files/2` → `list_persisted_entries/2` (now returns `[%FileEntry{}]` instead of `[path_string]`)
+
+**Return type changes:**
+- `FileSystemServer.write_file/4` returns `{:ok, %FileEntry{}}` instead of `:ok`
+- `FileSystemServer.read_file/2` returns `{:ok, %FileEntry{}}` instead of `{:ok, content_string}`
+- `FileSystemState.write_file/4` returns `{:ok, entry, state}` instead of `{:ok, state}`
 
 ### Added
-- `move_file/3` on `FileSystemState` and `FileSystemServer` — atomically moves a file or directory (and its children) to a new path, re-keying entries and transferring debounce timers
-- `move_in_storage/3` optional callback on `Persistence` behaviour — persistence backends can implement this to handle path changes efficiently (e.g. database update instead of delete+create). Falls back to marking entries dirty for the next persist cycle.
-- `update_entry/4` on `FileSystemState` and `FileSystemServer` — updates entry-level fields (`title`, `id`, `file_type`) via `FileEntry.update_entry_changeset/2`
-- `update_custom_metadata/4` on `FileSystemState` and `FileSystemServer` — replaces `update_metadata/4` with a clearer name that reflects it only updates `metadata.custom`
-- `FileEntry.update_entry_changeset/2` — changeset that only casts updatable entry-level fields
-- `dirty_non_content` flag on `FileEntry` — tracks non-content changes separately from content changes, enabling metadata-only persistence optimization
-- `update_metadata_in_storage/2` optional callback on `Persistence` behaviour — persistence backends can implement this for efficient metadata-only updates without rewriting file content
-- `persist_file/2` routes to `update_metadata_in_storage` when only non-content fields changed and the backend supports it, falling back to `write_to_storage` otherwise
+- Directory entries as first-class `FileEntry` with `entry_type: :directory`, automatic `mkdir -p` ancestor creation, and `new_directory/2` constructor [#34](https://github.com/sagents-ai/sagents/pull/34)
+- `title`, `id`, and `file_type` fields on `FileEntry` for richer file metadata [#34](https://github.com/sagents-ai/sagents/pull/34)
+- `FileEntry.update_entry_changeset/2` — changeset for safe entry-level field updates (title, id, file_type) [#39](https://github.com/sagents-ai/sagents/pull/39)
+- `update_entry/4` on `FileSystemState` and `FileSystemServer` — updates entry-level fields via changeset [#39](https://github.com/sagents-ai/sagents/pull/39)
+- `update_custom_metadata/4` on `FileSystemState` and `FileSystemServer` — replaces `update_metadata/4` with a clearer name scoped to `metadata.custom` [#39](https://github.com/sagents-ai/sagents/pull/39)
+- `list_entries/1` on `FileSystemState` and `FileSystemServer` — returns all entries with synthesized directories for tree UIs [#34](https://github.com/sagents-ai/sagents/pull/34)
+- `create_directory/3` on `FileSystemState` and `FileSystemServer` [#34](https://github.com/sagents-ai/sagents/pull/34)
+- `move_file/3` on `FileSystemState` and `FileSystemServer` — atomically moves a file or directory (and its children) to a new path, re-keying entries and transferring debounce timers [#39](https://github.com/sagents-ai/sagents/pull/39)
+- `move_in_storage/3` optional callback on `Persistence` behaviour — persistence backends can implement this to handle path changes efficiently [#39](https://github.com/sagents-ai/sagents/pull/39)
+- `update_metadata_in_storage/2` optional callback on `Persistence` behaviour — efficient metadata-only updates without rewriting file content [#38](https://github.com/sagents-ai/sagents/pull/38)
+- `dirty_non_content` flag on `FileEntry` — tracks non-content changes separately from content changes, enabling metadata-only persistence optimization [#38](https://github.com/sagents-ai/sagents/pull/38), [#39](https://github.com/sagents-ai/sagents/pull/39)
+- `persist_file/2` routes to `update_metadata_in_storage` when only non-content fields changed and the backend supports it, falling back to `write_to_storage` otherwise [#38](https://github.com/sagents-ai/sagents/pull/38)
+- `default: true` option on `FileSystemConfig` — catch-all config for path-agnostic persistence backends (e.g. database), specific configs take priority [#33](https://github.com/sagents-ai/sagents/pull/33)
+- Configurable `entry_to_map` option on FileSystem middleware — controls how entries are serialized to JSON for LLM tool results, with `default_entry_to_map/1` fallback [#34](https://github.com/sagents-ai/sagents/pull/34)
+- `tool_context` field on `Agent` — caller-supplied map (user IDs, tenant info, scopes) merged into `LLMChain.custom_context` for tool functions [#35](https://github.com/sagents-ai/sagents/pull/35)
+- `Sagents.MessagePreprocessor` behaviour — intercepts messages in AgentServer to produce separate display and LLM versions, enabling rich reference expansion (e.g. `@ProjectBrief` → full content for LLM, styled chip for UI) [#37](https://github.com/sagents-ai/sagents/pull/37)
+- `notify_middleware/3` on `AgentServer` — renamed from `send_middleware_message/3` to better reflect its general-purpose notification role (deprecated wrapper retained for backwards compatibility) [#36](https://github.com/sagents-ai/sagents/pull/36)
+- FileSystem setup guide documentation [#32](https://github.com/sagents-ai/sagents/pull/32)
+- Middleware messaging documentation rewrite covering external notification and async task patterns [#36](https://github.com/sagents-ai/sagents/pull/36)
 
 ### Changed
-- **BREAKING:** `update_metadata/4` renamed to `update_custom_metadata/4` on both `FileSystemState` and `FileSystemServer`
-- **BREAKING:** `FileEntry.dirty` field renamed to `dirty_content` — clarifies it tracks content modifications
-- Non-content updates (`update_custom_metadata`, `update_entry`) persist immediately by default. Pass `persist: :debounce` to opt into debounced persistence.
+- **BREAKING:** `FileEntry.dirty` field renamed to `dirty_content` [#39](https://github.com/sagents-ai/sagents/pull/39)
+- **BREAKING:** `update_metadata/4` renamed to `update_custom_metadata/4` on both `FileSystemState` and `FileSystemServer` [#39](https://github.com/sagents-ai/sagents/pull/39)
+- **BREAKING:** `FileSystemServer.write_file/4` returns `{:ok, %FileEntry{}}` instead of `:ok` [#34](https://github.com/sagents-ai/sagents/pull/34)
+- **BREAKING:** `FileSystemServer.read_file/2` returns `{:ok, %FileEntry{}}` instead of `{:ok, content_string}` [#34](https://github.com/sagents-ai/sagents/pull/34)
+- **BREAKING:** `FileSystemState.write_file/4` returns `{:ok, entry, state}` instead of `{:ok, state}` [#34](https://github.com/sagents-ai/sagents/pull/34)
+- **BREAKING:** `Persistence.list_persisted_files/2` renamed to `list_persisted_entries/2`, returns `[%FileEntry{}]` instead of `[path_string]` [#34](https://github.com/sagents-ai/sagents/pull/34)
+- Non-content updates (`update_custom_metadata`, `update_entry`) persist immediately by default; pass `persist: :debounce` to opt into debounced persistence [#39](https://github.com/sagents-ai/sagents/pull/39)
+- New persisted files persist immediately on creation; only subsequent content updates are debounced [#34](https://github.com/sagents-ai/sagents/pull/34)
+- FileSystem middleware `ls` tool now returns JSON array of entry maps instead of path strings [#34](https://github.com/sagents-ai/sagents/pull/34)
+- Updated code generator templates to thread `tool_context` and `message_preprocessor` through Coordinator and Factory [#35](https://github.com/sagents-ai/sagents/pull/35), [#37](https://github.com/sagents-ai/sagents/pull/37)
+- Documentation examples updated to use latest Anthropic model names [#32](https://github.com/sagents-ai/sagents/pull/32)
 
 ### Fixed
-- `FileEntry.update_content/3` now resets `dirty_non_content` to `false`, preventing a data loss scenario where a metadata update followed by a content write (before debounce fires) would incorrectly route to `update_metadata_in_storage` and lose the content change
+- `FileEntry.update_content/3` now resets `dirty_non_content` to `false`, preventing a data loss scenario where a metadata update followed by a content write would incorrectly route to `update_metadata_in_storage` and lose the content change [#38](https://github.com/sagents-ai/sagents/pull/38)
 
 ## v0.3.1
 
