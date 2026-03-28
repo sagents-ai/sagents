@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.1
+
+### Added
+- `move_file` tool on FileSystem middleware, allowing agents to move or rename files and directories through the tool interface. Delegates to `FileSystemServer.move_file/3`. [#41](https://github.com/sagents-ai/sagents/pull/41)
+
 ## v0.4.0
 
 Major FileSystem API expansion with directory entries, richer FileEntry struct, file move/rename, metadata-only persistence optimization, and a clearer API surface. Also adds `tool_context` for caller-supplied data in tools, `MessagePreprocessor` for display/LLM message splitting, and improved middleware messaging.
