@@ -230,6 +230,54 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       refute Map.has_key?(state.debounce_timers, "/timed")
       assert Map.get(state.debounce_timers, "/moved") == timer_ref
     end
+
+    test "returns error when moving between different persistence backends", %{state: state} do
+      # Set up two different persistence configs
+      state = add_persistence_config(state, TestPersistMetaRouting, "disk_files")
+      state = add_persistence_config(state, TestPersistNoMetaCallback, "db_files")
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/disk_files/doc.txt", "content")
+
+      assert {:error, message, _state} =
+               FileSystemState.move_file(state, "/disk_files/doc.txt", "/db_files/doc.txt")
+
+      assert message =~ "Cannot move files across different storage backends"
+      assert message =~ "/disk_files"
+    end
+
+    test "allows move within the same persistence backend", %{state: state} do
+      state = add_persistence_config(state, TestPersistMetaRouting, "Memories")
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/Memories/old.txt", "content")
+
+      assert {:ok, [moved], _state} =
+               FileSystemState.move_file(state, "/Memories/old.txt", "/Memories/new.txt")
+
+      assert moved.path == "/Memories/new.txt"
+    end
+
+    test "returns error when moving to a read-only directory", %{state: state} do
+      state = add_persistence_config(state, TestPersistMetaRouting, "writable")
+
+      {:ok, readonly_config} =
+        FileSystemConfig.new(%{
+          base_directory: "readonly",
+          persistence_module: TestPersistMetaRouting,
+          readonly: true
+        })
+
+      {:ok, state} = FileSystemState.register_persistence(state, readonly_config)
+
+      {:ok, _entry, state} =
+        FileSystemState.write_file(state, "/writable/doc.txt", "content")
+
+      assert {:error, message, _state} =
+               FileSystemState.move_file(state, "/writable/doc.txt", "/readonly/doc.txt")
+
+      assert message =~ "Cannot move to read-only directory"
+    end
   end
 
   describe "delete_file/2" do

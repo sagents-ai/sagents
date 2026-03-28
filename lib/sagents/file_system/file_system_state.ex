@@ -505,38 +505,52 @@ defmodule Sagents.FileSystem.FileSystemState do
 
   def move_file(%FileSystemState{} = state, old_path, new_path) do
     config = find_config_for_path(state, old_path)
+    new_config = find_config_for_path(state, new_path)
 
-    if config && config.readonly do
-      {:error, "Cannot move from read-only directory: #{config.base_directory}", state}
-    else
-      case Map.get(state.files, old_path) do
-        nil ->
-          {:error, :enoent, state}
+    cond do
+      config && config.readonly ->
+        {:error, "Cannot move from read-only directory: #{config.base_directory}", state}
 
-        _root_entry ->
-          # Collect the root entry and all children
-          affected =
-            state.files
-            |> Enum.filter(fn {path, _} ->
-              path == old_path or String.starts_with?(path, old_path <> "/")
-            end)
-            |> Enum.sort_by(fn {path, _} -> String.length(path) end)
+      new_config && new_config.readonly ->
+        {:error, "Cannot move to read-only directory: #{new_config.base_directory}", state}
 
-          # Check target doesn't conflict (except with entries we're moving)
-          moving_paths = MapSet.new(affected, fn {path, _} -> path end)
+      !same_persistence_config?(state, old_path, new_path) ->
+        base_dir = if config, do: "/#{config.base_directory}", else: "the current directory"
 
-          conflict =
-            Enum.any?(affected, fn {path, _} ->
-              target = String.replace_prefix(path, old_path, new_path)
-              Map.has_key?(state.files, target) and not MapSet.member?(moving_paths, target)
-            end)
+        {:error,
+         "Cannot move files across different storage backends. " <>
+           "The file can only be moved within #{base_dir}.",
+         state}
 
-          if conflict do
-            {:error, :already_exists, state}
-          else
-            do_move_entries(state, affected, old_path, new_path, config)
-          end
-      end
+      true ->
+        case Map.get(state.files, old_path) do
+          nil ->
+            {:error, :enoent, state}
+
+          _root_entry ->
+            # Collect the root entry and all children
+            affected =
+              state.files
+              |> Enum.filter(fn {path, _} ->
+                path == old_path or String.starts_with?(path, old_path <> "/")
+              end)
+              |> Enum.sort_by(fn {path, _} -> String.length(path) end)
+
+            # Check target doesn't conflict (except with entries we're moving)
+            moving_paths = MapSet.new(affected, fn {path, _} -> path end)
+
+            conflict =
+              Enum.any?(affected, fn {path, _} ->
+                target = String.replace_prefix(path, old_path, new_path)
+                Map.has_key?(state.files, target) and not MapSet.member?(moving_paths, target)
+              end)
+
+            if conflict do
+              {:error, :already_exists, state}
+            else
+              do_move_entries(state, affected, old_path, new_path, config)
+            end
+        end
     end
   end
 
@@ -784,7 +798,8 @@ defmodule Sagents.FileSystem.FileSystemState do
   @spec list_files(t()) :: [String.t()]
   def list_files(%FileSystemState{} = state) do
     state.files
-    |> Map.keys()
+    |> Enum.reject(fn {_path, entry} -> entry.entry_type == :directory end)
+    |> Enum.map(fn {path, _entry} -> path end)
     |> Enum.sort()
   end
 
@@ -993,6 +1008,12 @@ defmodule Sagents.FileSystem.FileSystemState do
       Enum.find_value(state.persistence_configs, fn {_base_dir, config} ->
         if config.default, do: config
       end)
+  end
+
+  # Check whether two paths route to the same persistence config.
+  # Returns true if both paths would use the same backend (or both have no config).
+  defp same_persistence_config?(state, path_a, path_b) do
+    find_config_for_path(state, path_a) == find_config_for_path(state, path_b)
   end
 
   # Persist a file to storage immediately (used for new file creation).
