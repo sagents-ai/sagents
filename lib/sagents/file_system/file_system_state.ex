@@ -519,8 +519,7 @@ defmodule Sagents.FileSystem.FileSystemState do
 
         {:error,
          "Cannot move files across different storage backends. " <>
-           "The file can only be moved within #{base_dir}.",
-         state}
+           "The file can only be moved within #{base_dir}.", state}
 
       true ->
         case Map.get(state.files, old_path) do

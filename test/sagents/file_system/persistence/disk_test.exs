@@ -227,7 +227,9 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
       {:ok, entry} = FileEntry.new_persisted_file("/Memories/original.txt", "content")
       {:ok, written_entry} = Disk.write_to_storage(entry, opts)
 
-      assert {:ok, moved_entry} = Disk.move_in_storage(written_entry, "/Memories/renamed.txt", opts)
+      assert {:ok, moved_entry} =
+               Disk.move_in_storage(written_entry, "/Memories/renamed.txt", opts)
+
       assert moved_entry.path == "/Memories/renamed.txt"
 
       # Old path should not exist, new path should
@@ -249,7 +251,9 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
 
     test "moves a directory on disk", %{opts: opts, tmp_dir: tmp_dir} do
       # Create a directory with a file inside
-      {:ok, dir_entry} = FileEntry.new_persisted_file("/Memories/mydir/child.txt", "child content")
+      {:ok, dir_entry} =
+        FileEntry.new_persisted_file("/Memories/mydir/child.txt", "child content")
+
       {:ok, _} = Disk.write_to_storage(dir_entry, opts)
 
       # Create directory entry
