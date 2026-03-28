@@ -325,8 +325,8 @@ defmodule Sagents.AgentServerPresenceTest do
       agent_pid = AgentServer.get_pid(agent_id)
       assert is_pid(agent_pid)
 
-      # Wait a moment for the handle_continue to complete
-      Process.sleep(10)
+      # Synchronize: ensure handle_continue has completed
+      _ = AgentServer.get_state(agent_id)
 
       # Verify presence was tracked
       tracked = AgentPresence.get_tracked()
@@ -355,10 +355,8 @@ defmodule Sagents.AgentServerPresenceTest do
           # No presence_module specified
         )
 
-      agent_pid = AgentServer.get_pid(agent_id)
-      assert is_pid(agent_pid)
-
-      Process.sleep(10)
+      # Synchronize: ensure handle_continue has completed
+      _ = AgentServer.get_state(agent_id)
 
       # No presence should be tracked
       tracked = AgentPresence.get_tracked()
@@ -403,8 +401,8 @@ defmodule Sagents.AgentServerPresenceTest do
           conversation_id: conversation_id
         )
 
-      _agent_pid = AgentServer.get_pid(agent_id)
-      Process.sleep(10)
+      # Synchronize: ensure handle_continue has completed
+      _ = AgentServer.get_state(agent_id)
 
       tracked = AgentPresence.get_tracked()
       assert length(tracked) == 1
@@ -429,8 +427,8 @@ defmodule Sagents.AgentServerPresenceTest do
           presence_module: AgentPresence
         )
 
-      _agent_pid = AgentServer.get_pid(agent_id)
-      Process.sleep(10)
+      # Synchronize: ensure handle_continue has completed
+      _ = AgentServer.get_state(agent_id)
 
       tracked = AgentPresence.get_tracked()
       assert length(tracked) == 1
@@ -456,8 +454,8 @@ defmodule Sagents.AgentServerPresenceTest do
           presence_module: AgentPresence
         )
 
-      _agent_pid = AgentServer.get_pid(agent_id)
-      Process.sleep(10)
+      # Synchronize: ensure handle_continue has completed
+      _ = AgentServer.get_state(agent_id)
 
       assert [tracked] = AgentPresence.get_tracked()
 
@@ -495,19 +493,19 @@ defmodule Sagents.AgentServerPresenceTest do
           presence_module: Sagents.TestPresence
         )
 
-      agent_pid = AgentServer.get_pid(agent_id)
-      assert is_pid(agent_pid)
-      Process.sleep(10)
+      # Synchronize: ensure handle_continue has completed (presence is tracked)
+      _ = AgentServer.get_state(agent_id)
 
       # Get initial last_activity_at
       initial_metadata = get_presence_metadata(agent_id)
       assert initial_metadata != nil
       initial_activity = initial_metadata.last_activity_at
 
-      # Wait a moment then touch
+      # Wait a moment so timestamps differ, then touch
       Process.sleep(50)
       AgentServer.touch(agent_id)
-      Process.sleep(10)
+      # Synchronize: ensure touch handler has completed
+      _ = AgentServer.get_state(agent_id)
 
       # Verify last_activity_at was updated
       updated_metadata = get_presence_metadata(agent_id)
@@ -531,19 +529,19 @@ defmodule Sagents.AgentServerPresenceTest do
           presence_module: Sagents.TestPresence
         )
 
-      agent_pid = AgentServer.get_pid(agent_id)
-      assert is_pid(agent_pid)
-      Process.sleep(10)
+      # Synchronize: ensure handle_continue has completed (presence is tracked)
+      _ = AgentServer.get_state(agent_id)
 
       # Get initial last_activity_at
       initial_metadata = get_presence_metadata(agent_id)
       assert initial_metadata != nil
       initial_activity = initial_metadata.last_activity_at
 
-      # Trigger execution which changes status
+      # Wait a moment so timestamps differ, then trigger execution
       Process.sleep(50)
       AgentServer.add_message(agent_id, Message.new_user!("test"))
-      Process.sleep(50)
+      # Synchronize: ensure message handling and status update completed
+      _ = AgentServer.get_state(agent_id)
 
       # Verify last_activity_at was updated
       updated_metadata = get_presence_metadata(agent_id)
