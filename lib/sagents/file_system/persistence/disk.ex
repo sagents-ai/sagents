@@ -149,6 +149,17 @@ defmodule Sagents.FileSystem.Persistence.Disk do
   end
 
   @impl true
+  def move_in_storage(%FileEntry{path: old_path} = entry, new_path, opts) do
+    old_full_path = build_file_path(old_path, opts)
+    new_full_path = build_file_path(new_path, opts)
+
+    with :ok <- File.mkdir_p(Path.dirname(new_full_path)),
+         :ok <- File.rename(old_full_path, new_full_path) do
+      {:ok, %{entry | path: new_path}}
+    end
+  end
+
+  @impl true
   def list_persisted_entries(_agent_id, opts) do
     storage_path = Keyword.fetch!(opts, :path)
     base_directory = Keyword.get(opts, :base_directory, "")

@@ -222,6 +222,56 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
     end
   end
 
+  describe "move_in_storage/3" do
+    test "moves a file on disk", %{opts: opts, tmp_dir: tmp_dir} do
+      {:ok, entry} = FileEntry.new_persisted_file("/Memories/original.txt", "content")
+      {:ok, written_entry} = Disk.write_to_storage(entry, opts)
+
+      assert {:ok, moved_entry} = Disk.move_in_storage(written_entry, "/Memories/renamed.txt", opts)
+      assert moved_entry.path == "/Memories/renamed.txt"
+
+      # Old path should not exist, new path should
+      refute File.exists?(Path.join(tmp_dir, "original.txt"))
+      assert File.read!(Path.join(tmp_dir, "renamed.txt")) == "content"
+    end
+
+    test "creates target parent directories", %{opts: opts, tmp_dir: tmp_dir} do
+      {:ok, entry} = FileEntry.new_persisted_file("/Memories/file.txt", "content")
+      {:ok, written_entry} = Disk.write_to_storage(entry, opts)
+
+      assert {:ok, moved_entry} =
+               Disk.move_in_storage(written_entry, "/Memories/new_dir/file.txt", opts)
+
+      assert moved_entry.path == "/Memories/new_dir/file.txt"
+      assert File.read!(Path.join([tmp_dir, "new_dir", "file.txt"])) == "content"
+      refute File.exists?(Path.join(tmp_dir, "file.txt"))
+    end
+
+    test "moves a directory on disk", %{opts: opts, tmp_dir: tmp_dir} do
+      # Create a directory with a file inside
+      {:ok, dir_entry} = FileEntry.new_persisted_file("/Memories/mydir/child.txt", "child content")
+      {:ok, _} = Disk.write_to_storage(dir_entry, opts)
+
+      # Create directory entry
+      {:ok, entry} = FileEntry.new_indexed_file("/Memories/mydir")
+      entry = %{entry | entry_type: :directory}
+
+      assert {:ok, moved} = Disk.move_in_storage(entry, "/Memories/renamed_dir", opts)
+      assert moved.path == "/Memories/renamed_dir"
+
+      # The directory and its contents should be at the new path
+      assert File.exists?(Path.join([tmp_dir, "renamed_dir", "child.txt"]))
+      assert File.read!(Path.join([tmp_dir, "renamed_dir", "child.txt"])) == "child content"
+      refute File.exists?(Path.join(tmp_dir, "mydir"))
+    end
+
+    test "returns error for non-existent source", %{opts: opts} do
+      {:ok, entry} = FileEntry.new_indexed_file("/Memories/nonexistent.txt")
+
+      assert {:error, :enoent} = Disk.move_in_storage(entry, "/Memories/dest.txt", opts)
+    end
+  end
+
   describe "path requirement" do
     test "requires path to be provided" do
       # This test verifies that path is required
