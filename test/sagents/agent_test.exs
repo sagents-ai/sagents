@@ -134,8 +134,8 @@ defmodule Sagents.AgentTest do
 
       {:ok, agent} = Agent.new(%{model: mock_model(), tools: [tool]})
 
-      # Now includes custom tool + write_todos (TodoList) + 7 filesystem tools (ls, read_file, write_file, edit_file, search_text, edit_lines, delete_file) + SubAgents
-      assert length(agent.tools) == 10
+      # Now includes custom tool + write_todos (TodoList) + 8 filesystem tools (ls, read_file, write_file, edit_file, search_text, edit_lines, delete_file, move_file) + SubAgents
+      assert length(agent.tools) == 11
       tool_names = Enum.map(agent.tools, & &1.name)
       assert "custom_tool" in tool_names
       assert "write_todos" in tool_names
@@ -194,8 +194,8 @@ defmodule Sagents.AgentTest do
           middleware: [TestMiddleware1, TestMiddleware2]
         })
 
-      # write_todos + 7 filesystem tools + tool1 + tool2 + SubAgents = 11
-      assert length(agent.tools) == 11
+      # write_todos + 8 filesystem tools + tool1 + tool2 + SubAgents = 12
+      assert length(agent.tools) == 12
       tool_names = Enum.map(agent.tools, & &1.name)
       assert "write_todos" in tool_names
       assert "ls" in tool_names
@@ -219,8 +219,8 @@ defmodule Sagents.AgentTest do
           middleware: [TestMiddleware1]
         })
 
-      # user_tool + write_todos + 7 filesystem tools + tool1 = 10
-      assert length(agent.tools) == 11
+      # user_tool + write_todos + 8 filesystem tools + tool1 = 12
+      assert length(agent.tools) == 12
       tool_names = Enum.map(agent.tools, & &1.name)
       assert "write_todos" in tool_names
       assert "user_tool" in tool_names
@@ -455,8 +455,8 @@ defmodule Sagents.AgentTest do
       assert agent.assembled_system_prompt =~ "math assistant"
       assert agent.assembled_system_prompt =~ "logging"
       assert agent.assembled_system_prompt =~ "validation"
-      # calculator + write_todos + 7 filesystem tools + tool1 + tool2 + SubAgents = 12
-      assert length(agent.tools) == 12
+      # calculator + write_todos + 8 filesystem tools + tool1 + tool2 + SubAgents = 13
+      assert length(agent.tools) == 13
 
       # Execute
       initial_state = State.new!(%{messages: [Message.new_user!("What is 2+2?")]})

@@ -10,6 +10,7 @@ defmodule Sagents.Middleware.FileSystem do
   - `search_text`: Search for text patterns within files or across all files
   - `edit_lines`: Replace a range of lines by line number
   - `delete_file`: Delete files from the filesystem
+  - `move_file`: Move or rename files and directories
 
   ## Usage
 
@@ -42,7 +43,7 @@ defmodule Sagents.Middleware.FileSystem do
         ]
       )
 
-  Available tools: `"ls"`, `"read_file"`, `"write_file"`, `"edit_file"`, `"search_text"`, `"edit_lines"`, `"delete_file"`
+  Available tools: `"ls"`, `"read_file"`, `"write_file"`, `"edit_file"`, `"search_text"`, `"edit_lines"`, `"delete_file"`, `"move_file"`
 
   ### Custom Tool Descriptions
 
@@ -152,6 +153,7 @@ defmodule Sagents.Middleware.FileSystem do
   - `search_text`: Search for text patterns in specific files or across all files
   - `edit_lines`: Replace a block of lines by line number range
   - `delete_file`: Delete files from the filesystem
+  - `move_file`: Move or rename files and directories
 
   ## File Organization
 
@@ -175,6 +177,7 @@ defmodule Sagents.Middleware.FileSystem do
   - Use `write_file` only for new files
   - Provide sufficient context in `old_string` to ensure unique matches
   - Group related files in the same directory
+  - Use `move_file` to rename files or move them to a different directory
   - Never `delete_file` without first using `ls` to locate it
 
   ## Persistence Behavior
@@ -210,7 +213,8 @@ defmodule Sagents.Middleware.FileSystem do
           "edit_file",
           "search_text",
           "edit_lines",
-          "delete_file"
+          "delete_file",
+          "move_file"
         ]),
       custom_tool_descriptions: Keyword.get(opts, :custom_tool_descriptions, %{}),
       entry_to_map: Keyword.get(opts, :entry_to_map, &__MODULE__.default_entry_to_map/1)
@@ -233,7 +237,8 @@ defmodule Sagents.Middleware.FileSystem do
       "edit_file" => build_edit_file_tool(config),
       "search_text" => build_search_text_tool(config),
       "edit_lines" => build_edit_lines_tool(config),
-      "delete_file" => build_delete_file_tool(config)
+      "delete_file" => build_delete_file_tool(config),
+      "move_file" => build_move_file_tool(config)
     }
 
     enabled_tools =
@@ -244,7 +249,8 @@ defmodule Sagents.Middleware.FileSystem do
         "edit_file",
         "search_text",
         "edit_lines",
-        "delete_file"
+        "delete_file",
+        "move_file"
       ])
 
     enabled_tools
@@ -476,6 +482,46 @@ defmodule Sagents.Middleware.FileSystem do
         required: ["file_path"]
       },
       function: fn args, context -> execute_delete_file_tool(args, context, config) end
+    })
+  end
+
+  defp build_move_file_tool(config) do
+    default_description = """
+    Moves or renames a file or directory to a new path.
+
+    Usage:
+    - Provide the current path (old_path) and the desired new path (new_path)
+    - Works for both files and directories (moves all children too)
+    - Use this to rename files or reorganize the directory structure
+    - The target path must not already exist
+
+    Examples:
+    - Rename: move_file(old_path: "/draft.txt", new_path: "/final.txt")
+    - Move to directory: move_file(old_path: "/notes.txt", new_path: "/archive/notes.txt")
+    - Rename directory: move_file(old_path: "/Chapter 1", new_path: "/Part 1")
+    """
+
+    description = get_custom_description(config, "move_file", default_description)
+
+    Function.new!(%{
+      name: "move_file",
+      description: description,
+      display_text: "Moving file",
+      parameters_schema: %{
+        type: "object",
+        properties: %{
+          old_path: %{
+            type: "string",
+            description: "Current path of the file or directory to move"
+          },
+          new_path: %{
+            type: "string",
+            description: "New path for the file or directory"
+          }
+        },
+        required: ["old_path", "new_path"]
+      },
+      function: fn args, context -> execute_move_file_tool(args, context, config) end
     })
   end
 
@@ -790,6 +836,42 @@ defmodule Sagents.Middleware.FileSystem do
           end
         else
           {:error, reason} -> {:error, reason}
+        end
+    end
+  rescue
+    e ->
+      {:error, "Filesystem not available: #{Exception.message(e)}"}
+  end
+
+  defp execute_move_file_tool(args, _context, config) do
+    old_path = get_arg(args, "old_path")
+    new_path = get_arg(args, "new_path")
+
+    cond do
+      is_nil(old_path) or is_nil(new_path) ->
+        {:error, "old_path and new_path are required"}
+
+      true ->
+        with {:ok, normalized_old} <- validate_path(old_path),
+             {:ok, normalized_new} <- validate_path(new_path) do
+          case FileSystemServer.move_file(
+                 config.filesystem_scope,
+                 normalized_old,
+                 normalized_new
+               ) do
+            {:ok, moved_entries} ->
+              {:ok,
+               "Moved successfully: #{normalized_old} -> #{normalized_new} (#{length(moved_entries)} entries)"}
+
+            {:error, :enoent} ->
+              {:error, "File not found: #{normalized_old}"}
+
+            {:error, :already_exists} ->
+              {:error, "Target already exists: #{normalized_new}"}
+
+            {:error, reason} ->
+              {:error, "Failed to move file: #{inspect(reason)}"}
+          end
         end
     end
   rescue
