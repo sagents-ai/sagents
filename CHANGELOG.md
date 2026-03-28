@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.2
+
+### Added
+- `move_in_storage/3` implementation on `Persistence.Disk` -- files and directories are now renamed on the host filesystem via `File.rename/2` when `move_file` is used, with automatic parent directory creation [#43](https://github.com/sagents-ai/sagents/pull/43)
+- Cross-persistence backend validation on `move_file/3` -- moves between different storage backends (e.g., disk to database) are rejected with an error message that includes the source `base_directory` so the agent knows the valid move scope [#43](https://github.com/sagents-ai/sagents/pull/43)
+- Read-only destination check on `move_file/3` -- moving files into a read-only directory now returns an error (previously only the source was checked) [#43](https://github.com/sagents-ai/sagents/pull/43)
+
+### Fixed
+- `FileSystemState.list_files/1` now filters out directory entries, returning only file paths. Previously, directory `FileEntry` items were included in the result, causing downstream callers to treat directories as files [#43](https://github.com/sagents-ai/sagents/pull/43)
+
 ## v0.4.1
 
 ### Added
