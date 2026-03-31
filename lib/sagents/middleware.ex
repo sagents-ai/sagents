@@ -311,7 +311,7 @@ defmodule Sagents.Middleware do
   @doc """
   Handle a resume after an interrupt.
 
-  Called by `Agent.resume/4` to give each middleware a chance to claim and handle
+  Called by `Agent.resume/3` to give each middleware a chance to claim and handle
   an interrupt. The middleware should pattern-match on `state.interrupt_data` to
   decide whether the interrupt belongs to it.
 
@@ -328,7 +328,7 @@ defmodule Sagents.Middleware do
   - `state` - The current `Sagents.State` struct (with interrupt_data set)
   - `resume_data` - The data provided by the caller to resume execution (polymorphic)
   - `config` - The middleware configuration from `init/1`
-  - `opts` - Options from `Agent.resume/4` (includes `:callbacks` for LLMChain event handlers)
+  - `opts` - Options from `Agent.resume/3` (includes `:callbacks` for LLMChain event handlers)
   """
   @callback handle_resume(
               Sagents.Agent.t(),
