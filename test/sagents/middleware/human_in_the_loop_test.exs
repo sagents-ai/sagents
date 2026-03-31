@@ -949,4 +949,71 @@ defmodule Sagents.Middleware.HumanInTheLoopTest do
       assert reason =~ "No interrupt data found in state"
     end
   end
+
+  describe "handle_resume/5" do
+    test "returns {:cont, state} for non-HITL interrupts" do
+      config = %{interrupt_on: %{"write_file" => %{allowed_decisions: [:approve, :reject]}}}
+      state = State.new!(%{interrupt_data: %{type: :ask_user_question}})
+
+      assert {:cont, ^state} =
+               HumanInTheLoop.handle_resume(nil, state, [], config, [])
+    end
+
+    test "returns {:cont, state} when resume_data is not a list" do
+      config = %{interrupt_on: %{"write_file" => %{allowed_decisions: [:approve, :reject]}}}
+
+      state =
+        State.new!(%{
+          interrupt_data: %{
+            action_requests: [%{tool_call_id: "call_1", tool_name: "write_file"}],
+            hitl_tool_call_ids: ["call_1"]
+          }
+        })
+
+      # Non-list resume_data should pass through (not a HITL resume)
+      assert {:cont, ^state} =
+               HumanInTheLoop.handle_resume(nil, state, %{type: :answer}, config, [])
+    end
+
+    test "returns {:error, ...} for invalid decisions" do
+      config = %{interrupt_on: %{"write_file" => %{allowed_decisions: [:approve, :reject]}}}
+
+      state =
+        State.new!(%{
+          interrupt_data: %{
+            action_requests: [%{tool_call_id: "call_1", tool_name: "write_file"}],
+            hitl_tool_call_ids: ["call_1"]
+          }
+        })
+
+      # Wrong number of decisions
+      assert {:error, reason} =
+               HumanInTheLoop.handle_resume(
+                 nil,
+                 state,
+                 [%{type: :approve}, %{type: :approve}],
+                 config,
+                 []
+               )
+
+      assert reason =~ "Decision count"
+    end
+
+    test "claims interrupt with action_requests" do
+      config = %{interrupt_on: %{"write_file" => %{allowed_decisions: [:approve, :reject]}}}
+
+      state =
+        State.new!(%{
+          interrupt_data: %{
+            action_requests: [%{tool_call_id: "call_1", tool_name: "write_file"}],
+            hitl_tool_call_ids: ["call_1"]
+          }
+        })
+
+      # This will fail at build_chain since there's no real agent, but it proves
+      # handle_resume CLAIMS the interrupt (not {:cont, state})
+      result = HumanInTheLoop.handle_resume(nil, state, [%{type: :approve}], config, [])
+      refute match?({:cont, _}, result)
+    end
+  end
 end

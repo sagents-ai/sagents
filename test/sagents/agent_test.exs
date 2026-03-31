@@ -1002,7 +1002,7 @@ defmodule Sagents.AgentTest do
 
       state = State.new!(%{interrupt_data: %{type: :unknown_type}})
 
-      assert {:error, "Unknown interrupt type in state.interrupt_data"} =
+      assert {:error, "No middleware handled the resume for this interrupt"} =
                Agent.resume(agent, state, [])
     end
 
@@ -1014,7 +1014,7 @@ defmodule Sagents.AgentTest do
 
       state = State.new!()
 
-      assert {:error, "Unknown interrupt type in state.interrupt_data"} =
+      assert {:error, "No middleware handled the resume for this interrupt"} =
                Agent.resume(agent, state, [])
     end
 
@@ -1192,6 +1192,289 @@ defmodule Sagents.AgentTest do
       # For this test, we just verify it takes the right path (not :unknown)
       result = Agent.resume(agent, state, [%{type: :approve}])
       refute match?({:error, "Unknown interrupt type" <> _}, result)
+    end
+
+    test "ask_user interrupt is claimed by AskUserQuestion middleware, not HITL" do
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"}),
+            middleware: [
+              Sagents.Middleware.AskUserQuestion,
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"write_file" => true}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
+
+      # Mock the LLM for the re-execution after resume
+      expect(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Great choice!")]}
+      end)
+
+      # Build state with ask_user interrupt placeholder
+      interrupt_result =
+        LangChain.Message.ToolResult.new!(%{
+          tool_call_id: "call_ask",
+          content: "Waiting for user response...",
+          name: "ask_user",
+          is_interrupt: true
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [interrupt_result]})
+
+      question_data = %{
+        type: :ask_user_question,
+        question: "Which DB?",
+        response_type: :single_select,
+        options: [%{label: "PG", value: "pg"}, %{label: "Mongo", value: "mongo"}],
+        allow_other: false,
+        allow_cancel: true,
+        tool_call_id: "call_ask"
+      }
+
+      state =
+        State.new!(%{
+          messages: [Message.new_user!("hi"), tool_msg],
+          interrupt_data: question_data
+        })
+
+      response = %{type: :answer, selected: ["pg"], tool_call_id: "call_ask"}
+      result = Agent.resume(agent, state, response)
+
+      assert {:ok, final_state} = result
+      # The tool result should be replaced with the answer
+      tool_message = Enum.find(final_state.messages, &(&1.role == :tool))
+      [resolved] = tool_message.tool_results
+      refute resolved.is_interrupt
+    end
+
+    test "HITL resume surfaces ask_user interrupt when both tools in same turn" do
+      # When the LLM calls both delete_file (HITL) and ask_user in one turn:
+      # 1. HITL fires pre-tool, interrupts for delete_file approval
+      # 2. User approves -> HITL executes ALL tools via execute_tool_calls_with_decisions
+      # 3. delete_file runs (approved), ask_user runs (auto-approved) -> interrupt ToolResult
+      # 4. HITL detects the interrupt ToolResult, returns {:cont, state} with ask_user interrupt_data
+      # 5. apply_handle_resume_hooks re-scans -> AskUserQuestion claims it with {:interrupt}
+      # 6. Agent.resume returns {:interrupt, state, %{type: :ask_user_question}}
+
+      # Standalone delete_file tool (HITL middleware doesn't provide tools, just gates them)
+      delete_tool =
+        LangChain.Function.new!(%{
+          name: "delete_file",
+          description: "Delete a file",
+          parameters_schema: %{
+            type: "object",
+            properties: %{file_path: %{type: "string"}},
+            required: ["file_path"]
+          },
+          function: fn _args, _ctx -> {:ok, "File deleted"} end
+        })
+
+      # AskUserQuestion middleware provides the ask_user tool via tools/1.
+      # No standalone ask_user tool needed.
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"}),
+            middleware: [
+              Sagents.Middleware.AskUserQuestion,
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"delete_file" => true}]}
+            ],
+            tools: [delete_tool]
+          },
+          replace_default_middleware: true
+        )
+
+      # No LLM call should happen -- HITL detects the secondary interrupt and
+      # returns {:cont}, which re-scans to AskUserQuestion returning
+      # {:interrupt}. Agent.resume never calls execute(). Stub to catch any
+      # unexpected calls.
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        flunk("LLM should not be called -- the interrupt should be caught before execute()")
+      end)
+
+      # The assistant called both tools with proper arguments
+      ask_user_args = %{
+        "question" => "Which DB?",
+        "response_type" => "single_select",
+        "options" => [
+          %{"label" => "PG", "value" => "pg"},
+          %{"label" => "Mongo", "value" => "mongo"}
+        ]
+      }
+
+      assistant_msg =
+        Message.new_assistant!(%{
+          tool_calls: [
+            LangChain.Message.ToolCall.new!(%{
+              call_id: "call_delete",
+              name: "delete_file",
+              arguments: %{"file_path" => "/tmp/test.txt"}
+            }),
+            LangChain.Message.ToolCall.new!(%{
+              call_id: "call_ask",
+              name: "ask_user",
+              arguments: ask_user_args
+            })
+          ]
+        })
+
+      state =
+        State.new!(%{
+          messages: [Message.new_user!("Delete and ask"), assistant_msg],
+          interrupt_data: %{
+            action_requests: [
+              %{
+                tool_call_id: "call_delete",
+                tool_name: "delete_file",
+                arguments: %{"file_path" => "/tmp/test.txt"}
+              }
+            ],
+            review_configs: %{
+              "delete_file" => %{allowed_decisions: [:approve, :edit, :reject]}
+            },
+            hitl_tool_call_ids: ["call_delete"]
+          }
+        })
+
+      result = Agent.resume(agent, state, [%{type: :approve}])
+
+      assert {:interrupt, interrupted_state, interrupt_data} = result
+      assert interrupt_data.type == :ask_user_question
+      assert interrupt_data.question == "Which DB?"
+
+      # The delete_file tool result should also be in messages (it executed successfully)
+      tool_msg = Enum.find(interrupted_state.messages, &(&1.role == :tool))
+      delete_result = Enum.find(tool_msg.tool_results, &(&1.name == "delete_file"))
+      refute delete_result.is_interrupt
+    end
+
+    test "ask_user works without HITL middleware in the stack" do
+      # When HITL is not in the middleware stack, ask_user interrupts flow
+      # through the normal mode pipeline (execute_tools ->
+      # check_tool_interrupts). No HITL pre-tool gate, no
+      # execute_tool_calls_with_decisions.
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"}),
+            middleware: [Sagents.Middleware.AskUserQuestion],
+            tools: []
+          },
+          replace_default_middleware: true
+        )
+
+      # Mock LLM to return an ask_user tool call
+      ask_user_args = %{
+        "question" => "What's your name?",
+        "response_type" => "freeform"
+      }
+
+      expect(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok,
+         [
+           Message.new_assistant!(%{
+             tool_calls: [
+               ToolCall.new!(%{
+                 call_id: "call_ask",
+                 name: "ask_user",
+                 arguments: ask_user_args
+               })
+             ]
+           })
+         ]}
+      end)
+
+      state = State.new!(%{messages: [Message.new_user!("Ask me something")]})
+      result = Agent.execute(agent, state)
+
+      # Should interrupt for the question (no HITL involved)
+      assert {:interrupt, interrupted_state, interrupt_data} = result
+      assert interrupt_data.type == :ask_user_question
+      assert interrupt_data.question == "What's your name?"
+
+      # Now resume with an answer
+      expect(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Nice to meet you, Mark!")]}
+      end)
+
+      response = %{type: :answer, other_text: "Mark", tool_call_id: "call_ask"}
+      assert {:ok, final_state} = Agent.resume(agent, interrupted_state, response)
+      last_msg = List.last(final_state.messages)
+      assert last_msg.role == :assistant
+    end
+
+    test "HITL resume with no secondary interrupts still works (regression)" do
+      # When HITL resumes and all tools complete normally (no interrupt
+      # ToolResults), behavior must be identical to before: {:ok, state} ->
+      # Agent.execute continues.
+
+      delete_tool =
+        LangChain.Function.new!(%{
+          name: "delete_file",
+          description: "Delete a file",
+          parameters_schema: %{
+            type: "object",
+            properties: %{file_path: %{type: "string"}},
+            required: ["file_path"]
+          },
+          function: fn _args, _ctx -> {:ok, "File deleted"} end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"}),
+            middleware: [
+              Sagents.Middleware.AskUserQuestion,
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"delete_file" => true}]}
+            ],
+            tools: [delete_tool]
+          },
+          replace_default_middleware: true
+        )
+
+      # After HITL resume + tool execution, Agent.execute calls the LLM
+      expect(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("File has been deleted.")]}
+      end)
+
+      assistant_msg =
+        Message.new_assistant!(%{
+          tool_calls: [
+            ToolCall.new!(%{
+              call_id: "call_delete",
+              name: "delete_file",
+              arguments: %{"file_path" => "/tmp/test.txt"}
+            })
+          ]
+        })
+
+      state =
+        State.new!(%{
+          messages: [Message.new_user!("Delete the file"), assistant_msg],
+          interrupt_data: %{
+            action_requests: [
+              %{
+                tool_call_id: "call_delete",
+                tool_name: "delete_file",
+                arguments: %{"file_path" => "/tmp/test.txt"}
+              }
+            ],
+            review_configs: %{
+              "delete_file" => %{allowed_decisions: [:approve, :edit, :reject]}
+            },
+            hitl_tool_call_ids: ["call_delete"]
+          }
+        })
+
+      # Resume with approve -- no secondary interrupts, should complete normally
+      result = Agent.resume(agent, state, [%{type: :approve}])
+      assert {:ok, final_state} = result
+      last_msg = List.last(final_state.messages)
+      assert last_msg.role == :assistant
     end
   end
 

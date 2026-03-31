@@ -1728,4 +1728,131 @@ defmodule Sagents.Middleware.SubAgentTest do
       assert extra == extra_data
     end
   end
+
+  describe "handle_resume/5" do
+    test "returns {:cont, state} for non-subagent interrupt types" do
+      state = State.new!(%{interrupt_data: %{type: :ask_user_question}})
+      config = %{}
+
+      assert {:cont, ^state} =
+               SubAgentMiddleware.handle_resume(nil, state, [], config, [])
+    end
+
+    test "claims subagent_hitl interrupt and replaces tool result on success" do
+      expect(SubAgentServer, :resume, fn "sub-1", [%{type: :approve}] ->
+        {:ok, "Research completed"}
+      end)
+
+      expect(SubAgentServer, :stop, fn "sub-1" -> :ok end)
+
+      tool_result =
+        LangChain.Message.ToolResult.new!(%{
+          tool_call_id: "call_task",
+          name: "task",
+          content: "placeholder",
+          is_interrupt: true,
+          interrupt_data: %{type: :subagent_hitl, sub_agent_id: "sub-1"}
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [tool_result]})
+
+      state =
+        State.new!(%{
+          messages: [tool_msg],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-1",
+            subagent_type: "researcher",
+            tool_call_id: "call_task",
+            interrupt_data: %{action_requests: []}
+          }
+        })
+
+      assert {:ok, updated_state} =
+               SubAgentMiddleware.handle_resume(nil, state, [%{type: :approve}], %{}, [])
+
+      # Placeholder should be replaced
+      [result] = List.last(updated_state.messages).tool_results
+      refute result.is_interrupt
+
+      content_text =
+        case result.content do
+          text when is_binary(text) -> text
+          parts when is_list(parts) -> Enum.map_join(parts, "", & &1.content)
+        end
+
+      assert content_text == "Research completed"
+    end
+
+    test "returns {:interrupt, ...} when sub-agent re-interrupts" do
+      new_inner = %{action_requests: [%{tool_name: "file_write"}]}
+
+      expect(SubAgentServer, :resume, fn "sub-1", _ ->
+        {:interrupt, new_inner}
+      end)
+
+      state =
+        State.new!(%{
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-1",
+            subagent_type: "researcher",
+            tool_call_id: "call_task",
+            interrupt_data: %{action_requests: []}
+          }
+        })
+
+      assert {:interrupt, _updated_state, updated_interrupt} =
+               SubAgentMiddleware.handle_resume(nil, state, [%{type: :approve}], %{}, [])
+
+      assert updated_interrupt.type == :subagent_hitl
+      assert updated_interrupt.interrupt_data == new_inner
+    end
+
+    test "returns {:ok, state} with error tool result on sub-agent failure" do
+      expect(SubAgentServer, :resume, fn "sub-1", _ ->
+        {:error, :process_not_found}
+      end)
+
+      expect(SubAgentServer, :stop, fn "sub-1" -> :ok end)
+
+      tool_result =
+        LangChain.Message.ToolResult.new!(%{
+          tool_call_id: "call_task",
+          name: "task",
+          content: "placeholder",
+          is_interrupt: true,
+          interrupt_data: %{type: :subagent_hitl}
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [tool_result]})
+
+      state =
+        State.new!(%{
+          messages: [tool_msg],
+          interrupt_data: %{
+            type: :subagent_hitl,
+            sub_agent_id: "sub-1",
+            subagent_type: "researcher",
+            tool_call_id: "call_task",
+            interrupt_data: %{}
+          }
+        })
+
+      assert {:ok, updated_state} =
+               SubAgentMiddleware.handle_resume(nil, state, [%{type: :approve}], %{}, [])
+
+      [result] = List.last(updated_state.messages).tool_results
+      assert result.is_error
+      refute result.is_interrupt
+
+      content_text =
+        case result.content do
+          text when is_binary(text) -> text
+          parts when is_list(parts) -> Enum.map_join(parts, "", & &1.content)
+        end
+
+      assert content_text =~ "SubAgent resume failed"
+    end
+  end
 end

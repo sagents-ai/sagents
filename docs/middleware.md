@@ -21,6 +21,9 @@ Middleware is the primary extension mechanism in Sagents. Each middleware can:
   {:ok, State.t()} | {:interrupt, State.t(), interrupt_data :: map()} | {:error, reason}
 @callback after_model(state :: State.t(), config :: map()) ::
   {:ok, State.t()} | {:interrupt, State.t(), interrupt_data :: map()} | {:error, reason}
+@callback handle_resume(agent :: Agent.t(), state :: State.t(), resume_data :: term(),
+  config :: map(), opts :: keyword()) ::
+  {:ok, State.t()} | {:cont, State.t()} | {:interrupt, State.t(), map()} | {:error, reason}
 @callback handle_message(message :: term(), state :: State.t(), config :: map()) ::
   {:ok, State.t()} | {:error, reason}
 @callback on_server_start(state :: State.t(), config :: map()) ::
@@ -321,12 +324,102 @@ end
 The interrupt pauses execution and broadcasts to subscribers. Resume with:
 
 ```elixir
-# User approves
-AgentServer.resume(agent_id, [%{type: :approve}])
-
-# User rejects - execution continues but message is removed
-AgentServer.resume(agent_id, [%{type: :reject}])
+AgentServer.resume(agent_id, resume_data)
 ```
+
+### Tool-Level Interrupts
+
+Tools can also trigger interrupts by returning `{:interrupt, display_message, interrupt_data}` from their function. This is how `AskUserQuestion` works -- the `ask_user` tool returns an interrupt, which the mode pipeline detects via `check_tool_interrupts` and surfaces to the caller.
+
+```elixir
+Function.new!(%{
+  name: "confirm_action",
+  description: "Ask the user to confirm before proceeding",
+  parameters_schema: %{...},
+  function: fn args, _ctx ->
+    {:interrupt, "Waiting for confirmation...", %{
+      type: :my_custom_confirmation,
+      action: args["action"],
+      details: args["details"]
+    }}
+  end
+})
+```
+
+### Handling Resume with `handle_resume/5`
+
+When `Agent.resume/4` is called, the middleware stack is cycled in order. Each middleware's `handle_resume/5` gets a chance to claim the interrupt by pattern-matching on `state.interrupt_data`.
+
+```elixir
+@callback handle_resume(agent, state, resume_data, config, opts) ::
+  {:ok, State.t()}              # Handled, ready for re-execution
+  | {:cont, State.t()}          # Not mine (or handled, pass along)
+  | {:interrupt, State.t(), map()} # Handled, but needs another round
+  | {:error, reason}            # Handled, but invalid
+```
+
+The default (when not implemented) is `{:cont, state}` -- pass through to the next middleware.
+
+**Return values explained:**
+
+- **`{:cont, state}`** -- "Not my interrupt" or "I handled my part, let the next middleware look." If no middleware claims the interrupt, `Agent.resume` returns an error.
+
+- **`{:ok, state}`** -- "Fully handled. The state is ready for the agent to continue execution." `Agent.resume` calls `Agent.execute` with the updated state.
+
+- **`{:interrupt, state, new_interrupt_data}`** -- "I recognize this, and it needs to go back to the user." `Agent.resume` returns the interrupt to the caller without calling `execute`.
+
+- **`{:error, reason}`** -- "I recognize this interrupt but the resume_data is invalid."
+
+### Claim vs Resolve
+
+When `resume_data` is `nil`, the middleware is being asked to **claim** an interrupt (identify it as its own type and surface it). When `resume_data` is non-nil, the middleware is being asked to **resolve** it (process the user's response).
+
+This distinction matters when interrupts are discovered during another middleware's `handle_resume`. For example, when HumanInTheLoop executes tools and one of them produces a new interrupt, HITL sets the new `interrupt_data` on state and returns `{:cont}`. The resume cycle re-scans the middleware stack with `resume_data = nil`, and the owning middleware claims it:
+
+```elixir
+defmodule MyApp.Middleware.CustomConfirmation do
+  @behaviour Sagents.Middleware
+
+  # Claim: resume_data is nil, just surface the interrupt to the user
+  @impl true
+  def handle_resume(_agent, %State{interrupt_data: %{type: :my_confirmation}} = state,
+                    nil, _config, _opts) do
+    {:interrupt, state, state.interrupt_data}
+  end
+
+  # Resolve: resume_data has the user's response
+  def handle_resume(_agent, %State{interrupt_data: %{type: :my_confirmation}} = state,
+                    %{confirmed: confirmed}, _config, _opts) do
+    if confirmed do
+      # Build tool result, replace the interrupt placeholder
+      result = ToolResult.new!(%{
+        tool_call_id: state.interrupt_data.tool_call_id,
+        content: "User confirmed the action.",
+        name: "confirm_action",
+        is_interrupt: false
+      })
+      {:ok, State.replace_tool_result(state, state.interrupt_data.tool_call_id, result)}
+    else
+      result = ToolResult.new!(%{
+        tool_call_id: state.interrupt_data.tool_call_id,
+        content: "User declined. Do not proceed with this action.",
+        name: "confirm_action",
+        is_interrupt: false
+      })
+      {:ok, State.replace_tool_result(state, state.interrupt_data.tool_call_id, result)}
+    end
+  end
+
+  # Not our interrupt type
+  def handle_resume(_agent, state, _resume_data, _config, _opts), do: {:cont, state}
+end
+```
+
+### Re-scan Mechanism
+
+When a middleware returns `{:cont, state}` with new `interrupt_data` on state (different from what the cycle started with), `Agent.resume` automatically re-scans the middleware stack from the beginning with `resume_data = nil`. This allows the owning middleware to claim the interrupt regardless of its position in the stack.
+
+This is how HumanInTheLoop and AskUserQuestion interact when the LLM calls both a gated tool and `ask_user` in the same turn: HITL executes all tools, discovers the ask_user interrupt in the results, sets it on state, and returns `{:cont}`. The re-scan lets AskUserQuestion claim it.
 
 ## Async Operations
 
@@ -469,33 +562,41 @@ end
 
 ## Middleware Ordering
 
-Middleware order matters:
+Middleware order matters for `before_model` (runs in list order) and `after_model` (runs in reverse). The `handle_resume` cycle runs in list order.
 
 ```elixir
 middleware: [
-  TodoList,           # 1. Runs first in before_model, last in after_model
-  FileSystem,         # 2.
-  Summarization,      # 3. Should run before PatchToolCalls
-  PatchToolCalls,     # 4. Fixes dangling calls
-  HumanInTheLoop,     # 5. Runs last in before_model, first in after_model
+  TodoList,           # 1. Task management
+  FileSystem,         # 2. File operations
+  SubAgent,           # 3. Child agent delegation
+  Summarization,      # 4. Conversation compression
+  PatchToolCalls,     # 5. Fix dangling tool calls
+  AskUserQuestion,    # 6. Structured questions (interrupt-producing)
+  HumanInTheLoop,     # 7. MUST BE LAST - human approval gate
 ]
 ```
 
 ### before_model Order
 
 ```
-User message → TodoList → FileSystem → Summarization → PatchToolCalls → HITL → LLM
+User message → TodoList → FileSystem → ... → PatchToolCalls → AskUserQuestion → HITL → LLM
 ```
 
 ### after_model Order (Reversed)
 
 ```
-LLM response → HITL → PatchToolCalls → Summarization → FileSystem → TodoList → Done
+LLM response → HITL → AskUserQuestion → PatchToolCalls → ... → FileSystem → TodoList → Done
 ```
 
 This "sandwich" pattern means:
 - Early middleware can set up context for later middleware
 - Early middleware sees the final processed result
+
+### Why HumanInTheLoop Must Be Last
+
+During `handle_resume`, HITL executes all tool calls from the interrupted assistant message -- including auto-approved tools from other middleware. If an auto-approved tool produces its own interrupt (e.g., `ask_user`), HITL detects it and returns `{:cont}` with the new interrupt_data on state. The resume cycle then re-scans the middleware stack so the owning middleware can claim it.
+
+`HumanInTheLoop.maybe_append/2` enforces this by always appending to the end of the middleware list. All interrupt-producing middleware (like AskUserQuestion or custom interrupt middleware) should be positioned before HITL in the stack.
 
 ## Broadcasting Events
 

@@ -2,14 +2,14 @@ defmodule Sagents.Middleware.HumanInTheLoop do
   @moduledoc """
   Middleware that enables human oversight and intervention in agent workflows.
 
-  HumanInTheLoop (HITL) allows pausing agent execution before executing sensitive
-  or critical tool operations, providing humans with the ability to approve, edit,
-  or reject tool calls.
+  HumanInTheLoop (HITL) allows pausing agent execution before executing
+  sensitive or critical tool operations, providing humans with the ability to
+  approve, edit, or reject tool calls.
 
   ## Configuration
 
-  The middleware is configured with an `interrupt_on` map that specifies which tools
-  should trigger human approval:
+  The middleware is configured with an `interrupt_on` map that specifies which
+  tools should trigger human approval:
 
       # Simple boolean configuration
       interrupt_on = %{
@@ -62,8 +62,8 @@ defmodule Sagents.Middleware.HumanInTheLoop do
 
   ## Interrupt Structure
 
-  When a tool requires approval, execution returns an interrupt tuple with detailed
-  information about the tools requiring approval.
+  When a tool requires approval, execution returns an interrupt tuple with
+  detailed information about the tools requiring approval.
 
   ### Structure
 
@@ -119,12 +119,14 @@ defmodule Sagents.Middleware.HumanInTheLoop do
 
   ## Resume Structure
 
-  Resume execution by providing decisions that correspond to each action request in order.
+  Resume execution by providing decisions that correspond to each action request
+  in order.
 
   ### Decision Types
 
   - `:approve` - Execute the tool with its original arguments
-  - `:edit` - Execute the tool with modified arguments (requires `:arguments` field)
+  - `:edit` - Execute the tool with modified arguments (requires `:arguments`
+    field)
   - `:reject` - Skip tool execution, provide rejection message to agent
 
   ### Decision Format
@@ -159,23 +161,37 @@ defmodule Sagents.Middleware.HumanInTheLoop do
 
   ## Position in Middleware Stack
 
-  HITL middleware should run late in the after_model phase, after PatchToolCalls
-  but before any execution middleware. This ensures tool calls are complete and
-  valid before requesting human approval.
+  **HITL must be the last middleware in the stack.** This is required because
+  during `handle_resume`, HITL executes ALL tool calls from the interrupted
+  assistant message (auto-approving non-HITL tools). If an auto-approved tool
+  produces its own interrupt (e.g., `ask_user`), HITL detects this and hands off
+  via `{:cont}` so the owning middleware can claim it. Since the `handle_resume`
+  middleware cycle is single-pass, only middleware that comes AFTER HITL in the
+  stack will see the handoff. Placing interrupt-producing middleware before HITL
+  ensures they get a chance to claim interrupts discovered during HITL's tool
+  execution.
+
+  `HumanInTheLoop.maybe_append/2` enforces this by always appending to the end
+  of the middleware list.
 
   Default stack position:
-  1. TodoListMiddleware
-  2. FilesystemMiddleware
-  3. PatchToolCallsMiddleware
-  4. **HumanInTheLoopMiddleware** ← Position in stack
-  5. Custom user middleware
+  1. TodoList
+  2. FileSystem
+  3. SubAgent
+  4. Summarization
+  5. PatchToolCalls
+  6. AskUserQuestion (or other interrupt-producing middleware)
+  7. **HumanInTheLoop** ← Always last
   """
 
   @behaviour Sagents.Middleware
 
+  alias Sagents.Agent
   alias Sagents.State
   alias Sagents.AgentServer
+  alias LangChain.Message
   alias LangChain.Message.ToolCall
+  alias LangChain.Chains.LLMChain
 
   @type interrupt_config :: %{
           allowed_decisions: [atom()]
@@ -364,6 +380,109 @@ defmodule Sagents.Middleware.HumanInTheLoop do
     end
   end
 
+  @doc """
+  Handle resume for HITL interrupts.
+
+  Claims interrupts where `state.interrupt_data` has `:action_requests`.
+  Validates decisions, executes approved tools via LLMChain, and returns
+  the updated state with tool results added.
+  """
+  @impl true
+  def handle_resume(
+        agent,
+        %State{interrupt_data: %{action_requests: _}} = state,
+        decisions,
+        config,
+        opts
+      )
+      when is_list(decisions) do
+    case process_decisions(state, decisions, config) do
+      {:ok, ^state} ->
+        execute_approved_tools(agent, state, decisions, opts)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def handle_resume(_agent, state, _resume_data, _config, _opts), do: {:cont, state}
+
+  defp execute_approved_tools(agent, state, decisions, opts) do
+    messages = state.messages
+    callbacks = Keyword.get(opts, :callbacks)
+
+    if Enum.all?(messages, &is_struct(&1, Message)) do
+      case Agent.build_chain(agent, messages, state, callbacks) do
+        {:ok, chain} ->
+          # Get the assistant message with tool calls
+          assistant_msg =
+            Enum.reverse(messages)
+            |> Enum.find(fn msg ->
+              msg.role == :assistant && msg.tool_calls != nil && msg.tool_calls != []
+            end)
+
+          case assistant_msg do
+            nil ->
+              {:error, "No tool calls found in state"}
+
+            %{tool_calls: all_tool_calls} ->
+              interrupt_data = state.interrupt_data || %{}
+              hitl_tool_call_ids = Map.get(interrupt_data, :hitl_tool_call_ids, [])
+              action_requests = Map.get(interrupt_data, :action_requests, [])
+
+              # Build decisions map indexed by tool_call_id
+              decisions_by_id =
+                action_requests
+                |> Enum.zip(decisions)
+                |> Map.new(fn {action_req, decision} ->
+                  {action_req.tool_call_id, decision}
+                end)
+
+              # Build full decisions array matching ALL tool calls
+              # Auto-approve non-HITL tools, use human decisions for HITL tools
+              full_decisions =
+                Enum.map(all_tool_calls, fn tc ->
+                  if tc.call_id in hitl_tool_call_ids do
+                    Map.fetch!(decisions_by_id, tc.call_id)
+                  else
+                    %{type: :approve}
+                  end
+                end)
+
+              # Execute tool calls with decisions via LLMChain
+              updated_chain =
+                LLMChain.execute_tool_calls_with_decisions(
+                  chain,
+                  all_tool_calls,
+                  full_decisions
+                )
+
+              # Extract the tool result message and add to state
+              tool_result_message = List.last(updated_chain.exchanged_messages)
+              state_with_results = State.add_message(state, tool_result_message)
+
+              # Check if any auto-approved tools produced interrupts during
+              # execution. If so, return {:cont} with the new interrupt_data on
+              # state so the middleware cycle re-scans and the owning middleware
+              # can claim it.
+              interrupted = find_interrupt_results(tool_result_message)
+
+              if interrupted == [] do
+                {:ok, state_with_results}
+              else
+                interrupt_data = build_interrupt_data_from_results(interrupted)
+                {:cont, %{state_with_results | interrupt_data: interrupt_data}}
+              end
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:error, "All messages must be LangChain.Message structs"}
+    end
+  end
+
   # Private functions
 
   defp normalize_interrupt_config(interrupt_on) when is_map(interrupt_on) do
@@ -448,6 +567,31 @@ defmodule Sagents.Middleware.HumanInTheLoop do
       action_requests: action_requests,
       review_configs: review_configs,
       hitl_tool_call_ids: hitl_tool_call_ids
+    }
+  end
+
+  # Find tool results that have is_interrupt: true (produced by auto-approved
+  # tools that returned {:interrupt, ...} during
+  # execute_tool_calls_with_decisions).
+  defp find_interrupt_results(%Message{tool_results: results}) when is_list(results) do
+    Enum.filter(results, & &1.is_interrupt)
+  end
+
+  defp find_interrupt_results(_), do: []
+
+  # Build interrupt_data from interrupt ToolResults, matching the format
+  # produced by LangChain.Chains.LLMChain.Mode.Steps.extract_interrupt_data.
+  defp build_interrupt_data_from_results([single]) do
+    Map.put(single.interrupt_data, :tool_call_id, single.tool_call_id)
+  end
+
+  defp build_interrupt_data_from_results(multiple) do
+    %{
+      type: :multiple_interrupts,
+      interrupts:
+        Enum.map(multiple, fn result ->
+          Map.merge(result.interrupt_data, %{tool_call_id: result.tool_call_id})
+        end)
     }
   end
 
