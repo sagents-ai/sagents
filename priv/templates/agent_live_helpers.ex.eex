@@ -686,6 +686,22 @@ defmodule <%= module %> do
       end
   """
   def handle_hitl_decision(socket, index, decision_type) do
+    agent_id = socket.assigns[:agent_id]
+
+    if is_nil(agent_id) do
+      Logger.error("Cannot process HITL decision: agent_id is nil (agent may have shut down)")
+
+      put_flash(
+        socket,
+        :error,
+        "Agent is no longer running. Please send a new message to continue."
+      )
+    else
+      handle_hitl_decision_impl(socket, agent_id, index, decision_type)
+    end
+  end
+
+  defp handle_hitl_decision_impl(socket, agent_id, index, decision_type) do
     pending_tools = socket.assigns.pending_tools
     decision_label = if decision_type == :approve, do: "approved", else: "rejected"
 
@@ -700,7 +716,7 @@ defmodule <%= module %> do
 
     if remaining_tools == [] do
       # All tools decided — resume the agent with the full decisions list
-      case AgentServer.resume(socket.assigns.agent_id, accumulated) do
+      case AgentServer.resume(agent_id, accumulated) do
         :ok ->
           socket
           |> assign(:agent_status, :running)
@@ -757,39 +773,51 @@ defmodule <%= module %> do
     Must include `:tool_call_id` matching the current question.
   """
   def handle_question_response(socket, response) do
-    current_question = socket.assigns.pending_question
-    response = Map.put(response, :tool_call_id, current_question.tool_call_id)
+    agent_id = socket.assigns[:agent_id]
 
-    accumulated = (socket.assigns[:question_responses] || []) ++ [response]
-    remaining = socket.assigns[:remaining_questions] || []
+    if is_nil(agent_id) do
+      Logger.error("Cannot process question response: agent_id is nil (agent may have shut down)")
 
-    case remaining do
-      [] ->
-        # All questions answered -- resume the agent.
-        # Single question: send as-is. Multiple: send the list.
-        resume_data = if length(accumulated) == 1, do: hd(accumulated), else: accumulated
+      put_flash(
+        socket,
+        :error,
+        "Agent is no longer running. Please send a new message to restart."
+      )
+    else
+      current_question = socket.assigns.pending_question
+      response = Map.put(response, :tool_call_id, current_question.tool_call_id)
 
-        case AgentServer.resume(socket.assigns.agent_id, resume_data) do
-          :ok ->
-            socket
-            |> assign(:agent_status, :running)
-            |> assign(:loading, true)
-            |> assign(:pending_question, nil)
-            |> assign(:remaining_questions, [])
-            |> assign(:question_responses, [])
-            |> assign(:interrupt_data, nil)
+      accumulated = (socket.assigns[:question_responses] || []) ++ [response]
+      remaining = socket.assigns[:remaining_questions] || []
 
-          {:error, reason} ->
-            Logger.error("Failed to resume agent with question response: #{inspect(reason)}")
-            put_flash(socket, :error, "Failed to submit response: #{inspect(reason)}")
-        end
+      case remaining do
+        [] ->
+          # All questions answered -- resume the agent.
+          # Single question: send as-is. Multiple: send the list.
+          resume_data = if length(accumulated) == 1, do: hd(accumulated), else: accumulated
 
-      [next | rest] ->
-        # More questions to answer -- present the next one
-        socket
-        |> assign(:pending_question, next)
-        |> assign(:remaining_questions, rest)
-        |> assign(:question_responses, accumulated)
+          case AgentServer.resume(agent_id, resume_data) do
+            :ok ->
+              socket
+              |> assign(:agent_status, :running)
+              |> assign(:loading, true)
+              |> assign(:pending_question, nil)
+              |> assign(:remaining_questions, [])
+              |> assign(:question_responses, [])
+              |> assign(:interrupt_data, nil)
+
+            {:error, reason} ->
+              Logger.error("Failed to resume agent with question response: #{inspect(reason)}")
+              put_flash(socket, :error, "Failed to submit response: #{inspect(reason)}")
+          end
+
+        [next | rest] ->
+          # More questions to answer -- present the next one
+          socket
+          |> assign(:pending_question, next)
+          |> assign(:remaining_questions, rest)
+          |> assign(:question_responses, accumulated)
+      end
     end
   end
 
