@@ -140,10 +140,12 @@ defmodule Sagents.Middleware.SubAgent do
 
   require Logger
 
+  alias Sagents.State
   alias Sagents.SubAgent
   alias Sagents.SubAgentServer
   alias Sagents.SubAgentsDynamicSupervisor
   alias LangChain.Function
+  alias LangChain.Message.ToolResult
 
   ## Middleware Callbacks
 
@@ -663,6 +665,70 @@ defmodule Sagents.Middleware.SubAgent do
         {:error, "SubAgent execution failed: #{inspect(reason)}"}
     end
   end
+
+  @doc """
+  Handle resume for SubAgent interrupts.
+
+  Claims interrupts where `state.interrupt_data` has `type: :subagent_hitl`.
+  Delegates to SubAgentServer.resume and handles completion, re-interrupt,
+  and error cases. Also handles `type: :multiple_interrupts` by processing
+  the first interrupt and queuing the rest.
+  """
+  @impl true
+  def handle_resume(
+        _agent,
+        %State{interrupt_data: %{type: :subagent_hitl} = data} = state,
+        resume_data,
+        _config,
+        _opts
+      ) do
+    %{sub_agent_id: sub_agent_id, subagent_type: subagent_type, tool_call_id: tool_call_id} =
+      data
+
+    case SubAgentServer.resume(sub_agent_id, resume_data) do
+      {:ok, result} ->
+        SubAgentServer.stop(sub_agent_id)
+
+        new_tool_result =
+          ToolResult.new!(%{
+            tool_call_id: tool_call_id,
+            content: result,
+            name: "task",
+            is_interrupt: false
+          })
+
+        patched_state = State.replace_tool_result(state, tool_call_id, new_tool_result)
+        {:ok, patched_state}
+
+      {:interrupt, new_inner_interrupt_data} ->
+        updated_interrupt = %{
+          type: :subagent_hitl,
+          sub_agent_id: sub_agent_id,
+          subagent_type: subagent_type,
+          tool_call_id: tool_call_id,
+          interrupt_data: new_inner_interrupt_data
+        }
+
+        {:interrupt, %{state | interrupt_data: updated_interrupt}, updated_interrupt}
+
+      {:error, reason} ->
+        SubAgentServer.stop(sub_agent_id)
+
+        error_result =
+          ToolResult.new!(%{
+            tool_call_id: tool_call_id,
+            content: "SubAgent resume failed: #{inspect(reason)}",
+            name: "task",
+            is_error: true,
+            is_interrupt: false
+          })
+
+        patched_state = State.replace_tool_result(state, tool_call_id, error_result)
+        {:ok, patched_state}
+    end
+  end
+
+  def handle_resume(_agent, state, _resume_data, _config, _opts), do: {:cont, state}
 
   ## Resuming Existing SubAgent
 

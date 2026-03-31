@@ -308,6 +308,40 @@ defmodule Sagents.Middleware do
   """
   @callback callbacks(middleware_config) :: map()
 
+  @doc """
+  Handle a resume after an interrupt.
+
+  Called by `Agent.resume/4` to give each middleware a chance to claim and handle
+  an interrupt. The middleware should pattern-match on `state.interrupt_data` to
+  decide whether the interrupt belongs to it.
+
+  ## Return Values
+
+  - `{:cont, state}` - "Not mine, pass to next middleware." Default when not implemented.
+  - `{:ok, updated_state}` - "Handled. State is ready for re-execution." Halts the chain.
+  - `{:interrupt, state, new_interrupt_data}` - "Handled, but needs another round." Halts the chain.
+  - `{:error, reason}` - "Handled, but invalid." Halts the chain.
+
+  ## Parameters
+
+  - `agent` - The `Sagents.Agent` struct
+  - `state` - The current `Sagents.State` struct (with interrupt_data set)
+  - `resume_data` - The data provided by the caller to resume execution (polymorphic)
+  - `config` - The middleware configuration from `init/1`
+  - `opts` - Options from `Agent.resume/4` (includes `:callbacks` for LLMChain event handlers)
+  """
+  @callback handle_resume(
+              Sagents.Agent.t(),
+              State.t(),
+              resume_data :: term(),
+              middleware_config(),
+              opts :: keyword()
+            ) ::
+              {:ok, State.t()}
+              | {:cont, State.t()}
+              | {:interrupt, State.t(), interrupt_data :: map()}
+              | {:error, term()}
+
   @optional_callbacks [
     init: 1,
     system_prompt: 1,
@@ -317,7 +351,8 @@ defmodule Sagents.Middleware do
     handle_message: 3,
     state_schema: 0,
     on_server_start: 2,
-    callbacks: 1
+    callbacks: 1,
+    handle_resume: 5
   ]
 
   @doc """
@@ -535,6 +570,54 @@ defmodule Sagents.Middleware do
       module.on_server_start(state, config)
     rescue
       UndefinedFunctionError -> {:ok, state}
+    end
+  end
+
+  @doc """
+  Apply handle_resume callback from middleware.
+
+  Returns `{:cont, state}` if the middleware does not implement the callback,
+  allowing the next middleware in the stack to try.
+
+  ## Parameters
+
+  - `agent` - The Agent struct
+  - `state` - The current agent state (with interrupt_data)
+  - `resume_data` - The polymorphic resume data from the caller
+  - `entry` - MiddlewareEntry struct with module and config
+
+  ## Returns
+
+  - `{:cont, state}` - Middleware does not handle this interrupt
+  - `{:ok, updated_state}` - Interrupt handled, state ready for re-execution
+  - `{:interrupt, state, new_interrupt_data}` - Handled but needs another round
+  - `{:error, reason}` - Handled but invalid
+  """
+  @spec apply_handle_resume(
+          Sagents.Agent.t(),
+          State.t(),
+          term(),
+          Sagents.MiddlewareEntry.t(),
+          keyword()
+        ) ::
+          {:ok, State.t()}
+          | {:cont, State.t()}
+          | {:interrupt, State.t(), map()}
+          | {:error, term()}
+  def apply_handle_resume(
+        agent,
+        state,
+        resume_data,
+        %MiddlewareEntry{
+          module: module,
+          config: config
+        },
+        opts \\ []
+      ) do
+    try do
+      module.handle_resume(agent, state, resume_data, config, opts)
+    rescue
+      UndefinedFunctionError -> {:cont, state}
     end
   end
 end

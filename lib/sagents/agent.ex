@@ -47,10 +47,7 @@ defmodule Sagents.Agent do
   alias LangChain.LangChainError
   alias LangChain.Message
   alias LangChain.Chains.LLMChain
-  alias Sagents.MiddlewareEntry
   alias Sagents.Middleware.HumanInTheLoop
-  alias Sagents.SubAgentServer
-  alias LangChain.Message.ToolResult
 
   @primary_key false
   embedded_schema do
@@ -509,294 +506,84 @@ defmodule Sagents.Agent do
   end
 
   @doc """
-  Resume agent execution after a human-in-the-loop interrupt.
+  Resume agent execution after an interrupt.
 
-  Takes decisions from the human reviewer and continues agent execution.
+  Cycles through the middleware stack, giving each middleware a chance to claim
+  and handle the interrupt via `handle_resume/4`. The first middleware that returns
+  `{:ok, state}` or `{:interrupt, ...}` or `{:error, ...}` wins. If no middleware
+  claims the interrupt, returns an error.
 
   ## Parameters
 
   - `agent` - The agent instance
-  - `state` - The state at the point of interruption
-  - `decisions` - List of decision maps from human reviewer
+  - `state` - The state at the point of interruption (with `interrupt_data` set)
+  - `resume_data` - Data provided by the caller to resume (polymorphic per middleware)
   - `opts` - Options (same as `execute/3`, including `:callbacks`)
-
-  ## Decision Format
-
-      decisions = [
-        %{type: :approve},                                    # Approve with original arguments
-        %{type: :edit, arguments: %{"path" => "other.txt"}}, # Edit arguments
-        %{type: :reject}                                      # Reject execution
-      ]
 
   ## Examples
 
-      # Get interrupt from execution
+      # HITL resume with decisions
       {:interrupt, state, interrupt_data} = Agent.execute(agent, initial_state)
-
-      # Examine the interrupt data
-      # interrupt_data.action_requests - List of tools needing approval
-      # interrupt_data.review_configs - Map of tool_name => %{allowed_decisions: [...]}
-
-      # Example: Display to user and get decisions
-      decisions =
-        Enum.map(interrupt_data.action_requests, fn request ->
-          # Show request.tool_name, request.arguments to user
-          case get_user_choice(request) do
-            :approve -> %{type: :approve}
-            :reject -> %{type: :reject}
-            {:edit, new_args} -> %{type: :edit, arguments: new_args}
-          end
-        end)
-
-      # Resume execution with decisions
+      decisions = [%{type: :approve}, %{type: :reject}]
       {:ok, final_state} = Agent.resume(agent, state, decisions)
 
-      # Or handle edit decision example
-      decisions = [
-        %{type: :approve},  # Approve first tool
-        %{type: :edit, arguments: %{"path" => "/tmp/safe.txt"}},  # Edit second tool's path
-        %{type: :reject}  # Reject third tool
-      ]
-
-      {:ok, final_state} = Agent.resume(agent, state, decisions)
+      # AskUserQuestion resume with response
+      {:interrupt, state, %{type: :ask_user_question}} = Agent.execute(agent, initial_state)
+      response = %{type: :answer, selected: ["PostgreSQL"]}
+      {:ok, final_state} = Agent.resume(agent, state, response)
   """
-  def resume(%Agent{} = agent, %State{} = state, decisions, opts \\ [])
-      when is_list(decisions) do
+  def resume(%Agent{} = agent, %State{} = state, resume_data, opts \\ []) do
     # Ensure agent_id is set in state (library handles this automatically)
     state = %{state | agent_id: agent.agent_id}
 
-    case classify_interrupt(state.interrupt_data) do
-      :direct_hitl ->
-        resume_direct_hitl(agent, state, decisions, opts)
+    case apply_handle_resume_hooks(agent, state, resume_data, agent.middleware, opts) do
+      {:ok, updated_state} ->
+        execute(agent, %{updated_state | interrupt_data: nil}, opts)
 
-      {:subagent_hitl, sub_agent_id, subagent_type, tool_call_id, _inner_interrupt_data} ->
-        resume_subagent_hitl(
-          agent,
-          state,
-          sub_agent_id,
-          subagent_type,
-          tool_call_id,
-          decisions,
-          opts
-        )
-
-      :unknown ->
-        {:error, "Unknown interrupt type in state.interrupt_data"}
-    end
-  end
-
-  defp classify_interrupt(nil), do: :unknown
-
-  defp classify_interrupt(%{type: :subagent_hitl} = data) do
-    {:subagent_hitl, data.sub_agent_id, data.subagent_type, data.tool_call_id,
-     data.interrupt_data}
-  end
-
-  defp classify_interrupt(%{type: :multiple_interrupts} = data) do
-    # Multiple simultaneous interrupts — surface first, queue rest
-    case data.interrupts do
-      [first | _rest] ->
-        classify_interrupt(first)
-
-      _ ->
-        :unknown
-    end
-  end
-
-  defp classify_interrupt(%{action_requests: _}), do: :direct_hitl
-  defp classify_interrupt(_), do: :unknown
-
-  defp resume_direct_hitl(agent, state, decisions, opts) do
-    # Find the HumanInTheLoop middleware in the stack
-    hitl_middleware =
-      Enum.find(agent.middleware, fn %MiddlewareEntry{module: module} ->
-        module == HumanInTheLoop
-      end)
-
-    case hitl_middleware do
-      nil ->
-        {:error, "Agent does not have HumanInTheLoop middleware configured"}
-
-      %MiddlewareEntry{module: module, config: config} ->
-        case module.process_decisions(state, decisions, config) do
-          {:ok, ^state} ->
-            execute_approved_tools_and_update_state(agent, state, decisions, opts)
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-    end
-  end
-
-  defp resume_subagent_hitl(
-         agent,
-         state,
-         sub_agent_id,
-         subagent_type,
-         tool_call_id,
-         decisions,
-         opts
-       ) do
-    callbacks = Keyword.get(opts, :callbacks)
-
-    # Direct call to SubAgentServer — no chain rebuild, no tool re-execution
-    case SubAgentServer.resume(sub_agent_id, decisions) do
-      {:ok, result} ->
-        # Sub-agent completed — stop its process (no longer needed)
-        SubAgentServer.stop(sub_agent_id)
-
-        # Fire callback before continuing execution so UI updates in real-time
-        fire_callback(callbacks, :on_subagent_resolved, [
-          %{type: :subagent_hitl, tool_call_id: tool_call_id, subagent_type: subagent_type},
-          :completed
-        ])
-
-        # Patch the placeholder tool result with real content
-        new_tool_result =
-          ToolResult.new!(%{
-            tool_call_id: tool_call_id,
-            content: result,
-            name: "task",
-            is_interrupt: false
-          })
-
-        patched_state = State.replace_tool_result(state, tool_call_id, new_tool_result)
-
-        # Check for more pending interrupts or continue execution
-        maybe_resume_next_pending_or_continue(agent, patched_state, opts)
-
-      {:interrupt, new_inner_interrupt_data} ->
-        # Sub-agent interrupted again — update interrupt_data, stay interrupted
-        updated_interrupt = %{
-          type: :subagent_hitl,
-          sub_agent_id: sub_agent_id,
-          subagent_type: subagent_type,
-          tool_call_id: tool_call_id,
-          interrupt_data: new_inner_interrupt_data
-        }
-
-        {:interrupt, %{state | interrupt_data: updated_interrupt}, updated_interrupt}
+      {:interrupt, interrupted_state, new_interrupt_data} ->
+        {:interrupt, %{interrupted_state | interrupt_data: new_interrupt_data},
+         new_interrupt_data}
 
       {:error, reason} ->
-        # Sub-agent failed — stop its process (can't be resumed)
-        SubAgentServer.stop(sub_agent_id)
-
-        # Fire callback before continuing execution so UI updates in real-time
-        fire_callback(callbacks, :on_subagent_resolved, [
-          %{type: :subagent_hitl, tool_call_id: tool_call_id, subagent_type: subagent_type},
-          :failed
-        ])
-
-        # Create error tool result
-        error_result =
-          ToolResult.new!(%{
-            tool_call_id: tool_call_id,
-            content: "SubAgent resume failed: #{inspect(reason)}",
-            name: "task",
-            is_error: true,
-            is_interrupt: false
-          })
-
-        patched_state = State.replace_tool_result(state, tool_call_id, error_result)
-        # Continue execution — LLM will see the error in tool results
-        execute(agent, patched_state, opts)
+        {:error, reason}
     end
   end
 
-  defp maybe_resume_next_pending_or_continue(agent, state, opts) do
-    case pop_pending_interrupt(state) do
-      {:next, next_interrupt, remaining_state} ->
-        # More pending sub-agent interrupts — surface the next one
-        {:interrupt, remaining_state, next_interrupt}
+  defp apply_handle_resume_hooks(agent, state, resume_data, middleware, opts) do
+    original_interrupt_data = state.interrupt_data
 
-      :none ->
-        # All interrupts drained — continue normal execution
-        execute(agent, state, opts)
+    result =
+      Enum.reduce_while(middleware, {:cont, state}, fn mw, {:cont, current_state} ->
+        case Middleware.apply_handle_resume(agent, current_state, resume_data, mw, opts) do
+          {:cont, updated_state} -> {:cont, {:cont, updated_state}}
+          {:ok, updated_state} -> {:halt, {:ok, updated_state}}
+          {:interrupt, s, d} -> {:halt, {:interrupt, s, d}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+
+    case result do
+      {:cont, new_state} ->
+        if new_state.interrupt_data != nil and
+             new_state.interrupt_data != original_interrupt_data do
+          # A middleware (e.g., HITL) discovered a secondary interrupt during
+          # its work and set it on state via {:cont}. Re-scan the middleware
+          # stack so the owning middleware can claim it. Pass nil for
+          # resume_data since this is a claim cycle, not a user-initiated
+          # resume.
+          apply_handle_resume_hooks(agent, new_state, nil, middleware, opts)
+        else
+          {:error, "No middleware handled the resume for this interrupt"}
+        end
+
+      other ->
+        other
     end
   end
 
-  defp pop_pending_interrupt(state) do
-    case state.interrupt_data do
-      %{type: :multiple_interrupts, interrupts: [next | rest]} when rest != [] ->
-        remaining_interrupt = %{type: :multiple_interrupts, interrupts: rest}
-        remaining_state = %{state | interrupt_data: remaining_interrupt}
-        {:next, next, remaining_state}
-
-      %{type: :multiple_interrupts, interrupts: [last]} ->
-        remaining_state = %{state | interrupt_data: last}
-        {:next, last, remaining_state}
-
-      _ ->
-        :none
-    end
-  end
-
-  defp execute_approved_tools_and_update_state(
-         %Agent{} = agent,
-         %State{} = state,
-         decisions,
-         opts
-       ) do
-    callbacks = Keyword.get(opts, :callbacks)
-
-    # Rebuild chain to access tools and execute tool calls with decisions
-    with {:ok, langchain_messages} <- validate_messages(state.messages),
-         {:ok, chain} <- build_chain(agent, langchain_messages, state, callbacks) do
-      # Get the assistant message with tool calls
-      assistant_msg =
-        Enum.reverse(state.messages)
-        |> Enum.find(fn msg ->
-          msg.role == :assistant && msg.tool_calls != nil && msg.tool_calls != []
-        end)
-
-      case assistant_msg do
-        nil ->
-          {:error, "No tool calls found in state"}
-
-        %{tool_calls: all_tool_calls} ->
-          # Get interrupt_data from state to determine which tools need HITL
-          interrupt_data = state.interrupt_data || %{}
-          hitl_tool_call_ids = Map.get(interrupt_data, :hitl_tool_call_ids, [])
-          action_requests = Map.get(interrupt_data, :action_requests, [])
-
-          # Build decisions map indexed by tool_call_id
-          decisions_by_id =
-            action_requests
-            |> Enum.zip(decisions)
-            |> Map.new(fn {action_req, decision} ->
-              {action_req.tool_call_id, decision}
-            end)
-
-          # Build full decisions array matching ALL tool calls
-          # Auto-approve non-HITL tools, use human decisions for HITL tools
-          full_decisions =
-            Enum.map(all_tool_calls, fn tc ->
-              if tc.call_id in hitl_tool_call_ids do
-                # Use human decision for HITL tool
-                Map.fetch!(decisions_by_id, tc.call_id)
-              else
-                # Auto-approve non-HITL tool
-                %{type: :approve}
-              end
-            end)
-
-          # Use LLMChain's API to execute tool calls with full decisions
-          # This handles tool execution, callbacks, and adding the tool result message
-          updated_chain =
-            LLMChain.execute_tool_calls_with_decisions(chain, all_tool_calls, full_decisions)
-
-          # Extract the NEW tool result message that was added to the chain
-          # (the last message in the chain's exchanged_messages)
-          tool_result_message = List.last(updated_chain.exchanged_messages)
-
-          # Add the tool result message to our state
-          state_with_results = State.add_message(state, tool_result_message)
-
-          # Continue agent execution with the tool results
-          # This allows the LLM to respond to the tool results
-          execute(agent, state_with_results, opts)
-      end
-    end
+  @doc false
+  def build_chain(agent, messages, state, callbacks) do
+    build_chain_impl(agent, messages, state, callbacks)
   end
 
   # Private functions
@@ -856,7 +643,7 @@ defmodule Sagents.Agent do
 
   defp execute_model(%Agent{} = agent, %State{} = state, callbacks, opts) do
     with {:ok, langchain_messages} <- validate_messages(state.messages),
-         {:ok, chain} <- build_chain(agent, langchain_messages, state, callbacks),
+         {:ok, chain} <- build_chain_impl(agent, langchain_messages, state, callbacks),
          result <- execute_chain(chain, agent.middleware, agent, opts) do
       case result do
         {:ok, executed_chain} ->
@@ -914,7 +701,7 @@ defmodule Sagents.Agent do
     end
   end
 
-  defp build_chain(agent, messages, state, callbacks) do
+  defp build_chain_impl(agent, messages, state, callbacks) do
     # Add system message if we have a system prompt
     messages_with_system =
       case agent.assembled_system_prompt do

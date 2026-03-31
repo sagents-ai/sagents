@@ -450,7 +450,7 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
       decisions = [%{type: :approve}]
 
       assert {:error, reason} = Agent.resume(agent, state, decisions)
-      assert reason =~ "Unknown interrupt type"
+      assert reason =~ "No middleware handled the resume"
     end
 
     @tag :live_call

@@ -840,26 +840,30 @@ defmodule Sagents.AgentServer do
   end
 
   @doc """
-  Resume agent execution after a human-in-the-loop interrupt.
+  Resume agent execution after an interrupt.
 
   ## Parameters
 
   - `agent_id` - The agent identifier
-  - `decisions` - List of decision maps from human reviewer (see `Sagents.Agent.resume/3`)
+  - `resume_data` - Data to resume with (polymorphic per middleware).
+    For HITL: list of decision maps. For AskUserQuestion: response map.
 
   ## Examples
 
+      # HITL resume
       decisions = [
         %{type: :approve},
         %{type: :edit, arguments: %{"path" => "safe.txt"}},
         %{type: :reject}
       ]
-
       :ok = AgentServer.resume("my-agent-1", decisions)
+
+      # AskUserQuestion resume
+      :ok = AgentServer.resume("my-agent-1", %{type: :answer, selected: ["PostgreSQL"]})
   """
-  @spec resume(String.t(), list(map())) :: :ok | {:error, term()}
-  def resume(agent_id, decisions) when is_list(decisions) do
-    GenServer.call(get_name(agent_id), {:resume, decisions}, :infinity)
+  @spec resume(String.t(), term()) :: :ok | {:error, term()}
+  def resume(agent_id, resume_data) do
+    GenServer.call(get_name(agent_id), {:resume, resume_data}, :infinity)
   end
 
   # The `get_state/1` function is available to aid in testing and not intended as a general public API.
@@ -1505,7 +1509,15 @@ defmodule Sagents.AgentServer do
   end
 
   @impl true
-  def handle_call({:resume, decisions}, _from, %ServerState{status: :interrupted} = server_state) do
+  def handle_call(
+        {:resume, resume_data},
+        _from,
+        %ServerState{status: :interrupted} = server_state
+      ) do
+    # Capture interrupt_data before clearing -- resume_agent needs it for
+    # display message updates (e.g., marking ask_user tools as completed).
+    resolved_interrupt_data = server_state.interrupt_data
+
     # Transition back to running
     new_state = %{
       server_state
@@ -1522,14 +1534,14 @@ defmodule Sagents.AgentServer do
     # Resume execution async (callbacks are built in resume_agent)
     task =
       Task.async(fn ->
-        resume_agent(new_state, decisions)
+        resume_agent(new_state, resume_data, resolved_interrupt_data)
       end)
 
     {:reply, :ok, Map.put(new_state, :task, task)}
   end
 
   @impl true
-  def handle_call({:resume, _decisions}, _from, server_state) do
+  def handle_call({:resume, _resume_data}, _from, server_state) do
     {:reply, {:error, "Cannot resume, server is not interrupted"}, server_state}
   end
 
@@ -2109,7 +2121,7 @@ defmodule Sagents.AgentServer do
       # BEFORE the main agent continues execution. This ensures the UI updates
       # the tool call status in real-time rather than waiting for the full LLM cycle.
       on_subagent_resolved: fn interrupt_data, status ->
-        maybe_update_subagent_tool_display(server_state, interrupt_data, status)
+        maybe_update_interrupt_tool_display(server_state, interrupt_data, status)
       end
     }
   end
@@ -2144,16 +2156,19 @@ defmodule Sagents.AgentServer do
     end
   end
 
-  defp resume_agent(server_state, decisions) do
+  defp resume_agent(server_state, resume_data, resolved_interrupt_data) do
+    # For interrupt types that resolve via State.replace_tool_result (not LLMChain
+    # re-execution), fire the display update explicitly here. HITL tools get their
+    # completion callbacks through LLMChain.execute_tool_calls_with_decisions, so
+    # they are NOT included here to avoid double-updating.
+    maybe_resolve_interrupt_display_on_resume(server_state, resolved_interrupt_data)
+
     # Same callback assembly as execute_agent/2
     pubsub_callbacks = build_pubsub_callbacks(server_state)
     middleware_callbacks = Middleware.collect_callbacks(server_state.agent.middleware)
     callbacks = [pubsub_callbacks | middleware_callbacks]
 
-    # Note: Sub-agent tool display updates happen via on_subagent_resolved callback
-    # fired from Agent.resume_subagent_hitl BEFORE the main agent continues execution.
-    # This ensures real-time UI updates rather than waiting for the full LLM cycle.
-    case Agent.resume(server_state.agent, server_state.state, decisions, callbacks: callbacks) do
+    case Agent.resume(server_state.agent, server_state.state, resume_data, callbacks: callbacks) do
       {:ok, new_state} ->
         broadcast_state_changes(server_state, new_state)
         {:ok, new_state}
@@ -2215,7 +2230,7 @@ defmodule Sagents.AgentServer do
     }
 
     # Update sub-agent tool call display message to "interrupted"
-    maybe_update_subagent_tool_display(updated_state, interrupt_data, :interrupted)
+    maybe_update_interrupt_tool_display(updated_state, interrupt_data, :interrupted)
 
     # Persist agent state on interrupt
     maybe_persist_state(updated_state, :on_interrupt)
@@ -2351,8 +2366,11 @@ defmodule Sagents.AgentServer do
     end
   end
 
-  # Update the display message for a sub-agent tool call on interrupt/resume
-  defp maybe_update_subagent_tool_display(
+  # Update the display message for interrupted tool calls on interrupt/resume.
+  # Handles subagent HITL, ask_user questions, and multiple_interrupts.
+
+  # --- SubAgent HITL ---
+  defp maybe_update_interrupt_tool_display(
          server_state,
          %{type: :subagent_hitl, tool_call_id: tool_call_id},
          :interrupted
@@ -2363,7 +2381,7 @@ defmodule Sagents.AgentServer do
     })
   end
 
-  defp maybe_update_subagent_tool_display(
+  defp maybe_update_interrupt_tool_display(
          server_state,
          %{type: :subagent_hitl, tool_call_id: tool_call_id},
          :completed
@@ -2375,11 +2393,10 @@ defmodule Sagents.AgentServer do
       display_text: "Task completed"
     })
 
-    # Also resolve the interrupted tool result display message
     maybe_resolve_tool_result(server_state, tool_call_id, "Task completed")
   end
 
-  defp maybe_update_subagent_tool_display(
+  defp maybe_update_interrupt_tool_display(
          server_state,
          %{type: :subagent_hitl, tool_call_id: tool_call_id},
          :failed
@@ -2390,12 +2407,65 @@ defmodule Sagents.AgentServer do
       error: "Task failed"
     })
 
-    # Also resolve the interrupted tool result display message
     maybe_resolve_tool_result(server_state, tool_call_id, "Task failed")
   end
 
-  # Not a sub-agent interrupt — no tool display update needed
-  defp maybe_update_subagent_tool_display(_server_state, _interrupt_data, _status), do: :ok
+  # --- AskUserQuestion ---
+  defp maybe_update_interrupt_tool_display(
+         server_state,
+         %{type: :ask_user_question, tool_call_id: tool_call_id},
+         :interrupted
+       ) do
+    broadcast_tool_event(server_state, :interrupted, %{
+      call_id: tool_call_id,
+      display_text: "Waiting for user response"
+    })
+  end
+
+  defp maybe_update_interrupt_tool_display(
+         server_state,
+         %{type: :ask_user_question, tool_call_id: tool_call_id},
+         :completed
+       ) do
+    broadcast_tool_event(server_state, :completed, %{
+      call_id: tool_call_id,
+      name: "ask_user",
+      result: "Question answered"
+    })
+
+    maybe_resolve_tool_result(server_state, tool_call_id, "Question answered")
+  end
+
+  # --- Multiple interrupts: update each inner interrupt ---
+  defp maybe_update_interrupt_tool_display(
+         server_state,
+         %{type: :multiple_interrupts, interrupts: interrupts},
+         status
+       ) do
+    Enum.each(interrupts, fn interrupt ->
+      maybe_update_interrupt_tool_display(server_state, interrupt, status)
+    end)
+  end
+
+  # Not a recognized interrupt type -- no tool display update needed
+  defp maybe_update_interrupt_tool_display(_server_state, _interrupt_data, _status), do: :ok
+
+  # Fire display updates on resume for interrupt types that DON'T go through
+  # LLMChain tool re-execution (and thus don't fire on_tool_execution_completed).
+  defp maybe_resolve_interrupt_display_on_resume(server_state, %{type: :ask_user_question} = data) do
+    maybe_update_interrupt_tool_display(server_state, data, :completed)
+  end
+
+  defp maybe_resolve_interrupt_display_on_resume(server_state, %{
+         type: :multiple_interrupts,
+         interrupts: interrupts
+       }) do
+    Enum.each(interrupts, fn interrupt ->
+      maybe_resolve_interrupt_display_on_resume(server_state, interrupt)
+    end)
+  end
+
+  defp maybe_resolve_interrupt_display_on_resume(_server_state, _interrupt_data), do: :ok
 
   # Resolve the interrupted tool result display message if the persistence module supports it
   defp maybe_resolve_tool_result(%ServerState{} = server_state, tool_call_id, result_content) do
