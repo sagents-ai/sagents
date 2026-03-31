@@ -348,7 +348,7 @@ Function.new!(%{
 
 ### Handling Resume with `handle_resume/5`
 
-When `Agent.resume/4` is called, the middleware stack is cycled in order. Each middleware's `handle_resume/5` gets a chance to claim the interrupt by pattern-matching on `state.interrupt_data`.
+When `Agent.resume/3` is called, the middleware stack is cycled in order. Each middleware's `handle_resume/5` gets a chance to claim the interrupt by pattern-matching on `state.interrupt_data`.
 
 ```elixir
 @callback handle_resume(agent, state, resume_data, config, opts) ::
