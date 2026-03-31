@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.4.3
+
+Introduces a generalized interrupt/resume system via the new `handle_resume/5` middleware callback, replacing the hardcoded HITL resume logic in `Agent.resume/4`. Also adds `AskUserQuestion` middleware for structured user prompts with typed question and response data.
+
+### Added
+- `handle_resume/5` optional callback on `Middleware` behaviour -- gives each middleware a chance to claim and resolve interrupts during `Agent.resume/4`, replacing the previous monolithic resume handler [#45](https://github.com/sagents-ai/sagents/pull/45)
+- `Middleware.apply_handle_resume/5` helper -- safely invokes `handle_resume/5` with `UndefinedFunctionError` rescue for middleware that don't implement it [#45](https://github.com/sagents-ai/sagents/pull/45)
+- `AskUserQuestion` middleware -- provides an `ask_user` tool for structured questions with typed response formats (`:single_select`, `:multi_select`, `:freeform`), option lists, `allow_other`, and `allow_cancel` fields [#45](https://github.com/sagents-ai/sagents/pull/45)
+- `handle_resume/5` implementation on `HumanInTheLoop` -- moves existing HITL decision processing (approve/reject/edit, tool execution, sub-agent forwarding) into the middleware callback pattern [#45](https://github.com/sagents-ai/sagents/pull/45)
+- `handle_resume/5` implementation on `SubAgent` -- handles sub-agent HITL interrupt forwarding and resolution [#45](https://github.com/sagents-ai/sagents/pull/45)
+- Re-scan mechanism in `Agent.resume/4` -- when a middleware returns `{:cont}` with new `interrupt_data` on state, the middleware stack is re-scanned with `resume_data = nil` so the owning middleware can claim it [#45](https://github.com/sagents-ai/sagents/pull/45)
+- `Agent.build_chain/4` exposed as public for middleware that need to rebuild the LLMChain during resume (e.g., HITL tool execution) [#45](https://github.com/sagents-ai/sagents/pull/45)
+- Display message handling for `ask_user` interrupts in `AgentServer` -- broadcasts `:interrupted`/`:completed` tool events for UI updates [#45](https://github.com/sagents-ai/sagents/pull/45)
+- AskUserQuestion added to default middleware stack in generator template (`factory.ex.eex`) [#45](https://github.com/sagents-ai/sagents/pull/45)
+- LiveView helper template (`agent_live_helpers.ex.eex`) updated with question response handling, `agent_id` nil-guards, and interrupt type dispatch [#45](https://github.com/sagents-ai/sagents/pull/45)
+- Documentation for `handle_resume/5`, tool-level interrupts, claim vs resolve pattern, re-scan mechanism, and middleware ordering in `docs/middleware.md` [#45](https://github.com/sagents-ai/sagents/pull/45)
+
+### Changed
+- `Agent.resume/4` replaced ~230 lines of hardcoded HITL/sub-agent resume logic with a generic middleware cycle via `apply_handle_resume_hooks/5` [#45](https://github.com/sagents-ai/sagents/pull/45)
+- `AgentServer.resume/2` accepts polymorphic `resume_data` instead of requiring a `list(map())` of decisions [#45](https://github.com/sagents-ai/sagents/pull/45)
+- `AgentServer` renamed `maybe_update_subagent_tool_display/3` to `maybe_update_interrupt_tool_display/3` to reflect support for multiple interrupt types [#45](https://github.com/sagents-ai/sagents/pull/45)
+
 ## v0.4.2
 
 ### Added
