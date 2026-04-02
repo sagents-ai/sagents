@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.4
+
+### Changed
+- Updated LangChain dependency from `~> 0.6.3` to `>= 0.7.0`, which includes fixes for HITL issues in sagents. The version constraint was relaxed for easier future updates [#49](https://github.com/sagents-ai/sagents/pull/49)
+
+### Fixed
+- Fixed documentation with fully qualified module references in middleware docs and code [#47](https://github.com/sagents-ai/sagents/pull/47) [#48](https://github.com/sagents-ai/sagents/pull/48)
+
 ## v0.4.3
 
 Introduces a generalized interrupt/resume system via the new `handle_resume/5` middleware callback, replacing the hardcoded HITL resume logic in `Agent.resume/3`. Also adds `AskUserQuestion` middleware for structured user prompts with typed question and response data.
