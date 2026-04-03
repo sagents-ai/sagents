@@ -499,6 +499,10 @@ defmodule Sagents.Agent do
           # Interrupt from execute_model - return immediately without after_model hooks
           {:interrupt, interrupted_state, interrupt_data}
 
+        {:pause, paused_state} ->
+          # Infrastructure pause - return immediately without after_model hooks
+          {:pause, paused_state}
+
         {:error, reason} ->
           {:error, reason}
       end
@@ -677,6 +681,13 @@ defmodule Sagents.Agent do
 
             {:error, reason} ->
               {:error, reason}
+          end
+
+        {:pause, paused_chain} ->
+          # Infrastructure pause (e.g., node draining). Extract state and propagate.
+          case extract_state_from_chain(paused_chain, state) do
+            {:ok, paused_state} -> {:pause, paused_state}
+            {:error, reason} -> {:error, reason}
           end
 
         {:error, reason} ->

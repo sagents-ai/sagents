@@ -382,6 +382,30 @@ defmodule Sagents.AgentServerTest do
       assert length(state.messages) == 2
     end
 
+    test "handles agent pause", %{agent: agent, agent_id: agent_id} do
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        {:pause, state}
+      end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      assert :ok = AgentServer.execute(agent_id)
+
+      # Wait for execution to complete
+      Process.sleep(50)
+
+      assert AgentServer.get_status(agent_id) == :paused
+    end
+
     test "handles agent interrupt", %{agent: agent, agent_id: agent_id} do
       initial_state = State.new!(%{messages: [Message.new_user!("Write file")]})
 

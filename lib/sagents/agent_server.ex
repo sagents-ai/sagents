@@ -220,7 +220,7 @@ defmodule Sagents.AgentServer do
   alias LangChain.Message.ContentPart
 
   @typedoc "Status of the agent server"
-  @type status :: :idle | :running | :interrupted | :cancelled | :error
+  @type status :: :idle | :running | :interrupted | :paused | :cancelled | :error
 
   @presence_check_delay 1_000
 
@@ -2159,6 +2159,11 @@ defmodule Sagents.AgentServer do
         broadcast_state_changes(server_state, interrupted_state)
         {:interrupt, interrupted_state, interrupt_data}
 
+      {:pause, %State{} = paused_state} ->
+        # Infrastructure pause (e.g., node draining) - broadcast state and propagate
+        broadcast_state_changes(server_state, paused_state)
+        {:pause, paused_state}
+
       {:error, reason} ->
         {:error, reason}
     end
@@ -2251,6 +2256,29 @@ defmodule Sagents.AgentServer do
 
     # Broadcast debug event for state update
     broadcast_debug_event(updated_state, {:agent_state_update, interrupted_state})
+
+    {:noreply, Map.delete(updated_state, :task)}
+  end
+
+  defp handle_execution_result({:pause, paused_state}, server_state) do
+    updated_state = %{
+      server_state
+      | status: :paused,
+        state: paused_state,
+        error: nil
+    }
+
+    # Persist agent state so it can be resumed after restart
+    maybe_persist_state(updated_state, :on_completion)
+
+    broadcast_event(updated_state, {:status_changed, :paused, nil})
+    update_presence_status(updated_state, :paused)
+
+    # Reset activity timer -- agent is paused, not done
+    updated_state = reset_inactivity_timer(updated_state)
+
+    # Broadcast debug event for state update
+    broadcast_debug_event(updated_state, {:agent_state_update, paused_state})
 
     {:noreply, Map.delete(updated_state, :task)}
   end
