@@ -1399,7 +1399,15 @@ defmodule Sagents.AgentServer do
     # This allows middleware to broadcast initial state, set up subscriptions, etc.
     # E.g., TodoList middleware broadcasts initial todos for UI sync
     Enum.each(server_state.agent.middleware, fn entry ->
-      Middleware.apply_on_server_start(server_state.state, entry)
+      case Middleware.apply_on_server_start(server_state.state, entry) do
+        {:ok, _state} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error(
+            "Middleware #{inspect(entry.module)} on_server_start failed: #{inspect(reason)}"
+          )
+      end
     end)
 
     # If this server was restored from persisted state (e.g., Horde migration),

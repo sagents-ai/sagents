@@ -79,6 +79,48 @@ defmodule Sagents.AgentServerTest do
     end
   end
 
+  describe "on_server_start middleware errors" do
+    test "logs error when middleware on_server_start fails" do
+      # Define a middleware module that fails on on_server_start
+      defmodule FailingStartMiddleware do
+        @behaviour Sagents.Middleware
+
+        @impl true
+        def init(_opts), do: {:ok, %{}}
+
+        @impl true
+        def on_server_start(_state, _config) do
+          {:error, "initialization failed: bad config"}
+        end
+      end
+
+      agent =
+        create_test_agent(middleware: [FailingStartMiddleware])
+
+      agent_id = agent.agent_id
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, _pid} =
+            AgentServer.start_link(
+              agent: agent,
+              name: AgentServer.get_name(agent_id),
+              pubsub: nil
+            )
+
+          # Synchronize to ensure handle_continue has completed
+          _ = AgentServer.get_state(agent_id)
+        end)
+
+      assert log =~ "FailingStartMiddleware"
+      assert log =~ "on_server_start failed"
+      assert log =~ "initialization failed: bad config"
+
+      # Agent should still be running despite middleware failure
+      assert AgentServer.get_status(agent_id) == :idle
+    end
+  end
+
   describe "get_state/1" do
     test "returns current state" do
       agent = create_test_agent()
