@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.5.0
+
+Adds infrastructure pause/resume support for node draining, a new `DebugLog` middleware for local file-based agent diagnostics, broader LLM error visibility via new callbacks, and updates the LangChain dependency to v0.8.0. No breaking changes at the sagents API level. All sagents-level changes are additive and backward-compatible; users who directly import `LangChain.*` modules should review the LangChain 0.8.0 release notes for any transitive changes.
+
+### Added
+- `DebugLog` middleware - a new built-in middleware that writes a structured debug log file of agent execution (messages, tool calls, errors, state transitions), useful for post-hoc troubleshooting without wiring up PubSub subscribers
+- `{:pause, state}` execution result on `Agent.execute/3` - propagates infrastructure pause signals from the LLMChain (e.g., node draining) without treating them as errors or completions. Returned alongside the existing `{:ok, _}`, `{:interrupt, _, _}`, and `{:error, _}` cases
+- `:paused` status on `AgentServer` - added to the `@type status` union (`:idle | :running | :interrupted | :paused | :cancelled | :error`). `AgentServer` handles `{:pause, state}` by persisting state, broadcasting `{:status_changed, :paused, nil}`, updating presence, and resetting the inactivity timer so the agent can be resumed after restart
+- `on_llm_error` callback wired into `AgentServer` - broadcasts a debug event `{:llm_error, error}` on the debug PubSub channel for *every* individual LLM API call failure, including transient errors that the chain subsequently recovers from via retry or fallback
+- `on_error` callback wired into `AgentServer` - broadcasts `{:chain_error, error}` on the main PubSub channel when the chain hits a terminal error after all retries and fallbacks are exhausted
+- Error logging when a middleware's `on_server_start/2` callback returns `{:error, reason}` - the `AgentServer` now logs which middleware failed and the reason, and continues starting the server rather than silently ignoring the failure
+
+### Changed
+- Updated LangChain dependency from `>= 0.7.0` to `>= 0.8.0`, which brings expanded and improved error handling and the `on_llm_error` / `on_error` callback hooks that this release surfaces through `AgentServer`
+
 ## v0.4.4
 
 ### Changed
