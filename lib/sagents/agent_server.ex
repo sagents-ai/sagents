@@ -2124,6 +2124,22 @@ defmodule Sagents.AgentServer do
         broadcast_tool_event(server_state, :failed, tool_info)
       end,
 
+      # LLM error callbacks for visibility into transient and terminal failures.
+      #
+      # :on_llm_error fires on EVERY individual LLM API call failure, including
+      # transient errors during retries and fallback attempts. This is the
+      # diagnostic callback -- it fires even when the chain recovers.
+      on_llm_error: fn _chain, error ->
+        broadcast_debug_event(server_state, {:llm_error, error})
+      end,
+
+      # :on_error fires ONCE when the chain encounters a terminal error and is
+      # returning it to the caller. This fires after all recovery options
+      # (retries, fallbacks) are exhausted.
+      on_error: fn _chain, error ->
+        broadcast_event(server_state, {:chain_error, error})
+      end,
+
       # Sub-agent HITL resolution callback
       # Fired from Agent.resume_subagent_hitl after the sub-agent completes/fails,
       # BEFORE the main agent continues execution. This ensures the UI updates
