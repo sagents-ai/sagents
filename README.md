@@ -235,6 +235,7 @@ Sagents includes several pre-built middleware components:
 | **Summarization** | Automatic conversation compression when token limits approach |
 | **PatchToolCalls** | Fix dangling tool calls from interrupted conversations |
 | **ConversationTitle** | Auto-generate conversation titles from first user message |
+| **DebugLog** | Local dev tool — writes per-conversation structured logs (messages, tool calls, state changes) to dedicated files for debugging |
 
 ### FileSystem Middleware
 
