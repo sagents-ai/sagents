@@ -2,7 +2,7 @@
 
 ## v0.5.0
 
-Adds infrastructure pause/resume support for node draining, a new `DebugLog` middleware for local file-based agent diagnostics, broader LLM error visibility via new callbacks, and updates the LangChain dependency to v0.8.0. No breaking changes at the sagents API level. All sagents-level changes are additive and backward-compatible; users who directly import `LangChain.*` modules should review the LangChain 0.8.0 release notes for any transitive changes.
+Adds infrastructure pause/resume support for node draining, a new `DebugLog` middleware for local file-based agent diagnostics, broader LLM error visibility via new callbacks, and updates the LangChain dependency to v0.8.0. No breaking changes at the sagents API level. All sagents-level changes are additive and backward-compatible; users who directly import `LangChain.*` modules should review the LangChain 0.8.0 release notes for any transitive changes. [#50](https://github.com/sagents-ai/sagents/pull/50)
 
 ### Added
 - `DebugLog` middleware - a new built-in middleware that writes a structured debug log file of agent execution (messages, tool calls, errors, state transitions), useful for post-hoc troubleshooting without wiring up PubSub subscribers
