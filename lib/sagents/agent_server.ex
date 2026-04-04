@@ -220,7 +220,7 @@ defmodule Sagents.AgentServer do
   alias LangChain.Message.ContentPart
 
   @typedoc "Status of the agent server"
-  @type status :: :idle | :running | :interrupted | :cancelled | :error
+  @type status :: :idle | :running | :interrupted | :paused | :cancelled | :error
 
   @presence_check_delay 1_000
 
@@ -1399,7 +1399,15 @@ defmodule Sagents.AgentServer do
     # This allows middleware to broadcast initial state, set up subscriptions, etc.
     # E.g., TodoList middleware broadcasts initial todos for UI sync
     Enum.each(server_state.agent.middleware, fn entry ->
-      Middleware.apply_on_server_start(server_state.state, entry)
+      case Middleware.apply_on_server_start(server_state.state, entry) do
+        {:ok, _state} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error(
+            "Middleware #{inspect(entry.module)} on_server_start failed: #{inspect(reason)}"
+          )
+      end
     end)
 
     # If this server was restored from persisted state (e.g., Horde migration),
@@ -2116,6 +2124,22 @@ defmodule Sagents.AgentServer do
         broadcast_tool_event(server_state, :failed, tool_info)
       end,
 
+      # LLM error callbacks for visibility into transient and terminal failures.
+      #
+      # :on_llm_error fires on EVERY individual LLM API call failure, including
+      # transient errors during retries and fallback attempts. This is the
+      # diagnostic callback -- it fires even when the chain recovers.
+      on_llm_error: fn _chain, error ->
+        broadcast_debug_event(server_state, {:llm_error, error})
+      end,
+
+      # :on_error fires ONCE when the chain encounters a terminal error and is
+      # returning it to the caller. This fires after all recovery options
+      # (retries, fallbacks) are exhausted.
+      on_error: fn _chain, error ->
+        broadcast_event(server_state, {:chain_error, error})
+      end,
+
       # Sub-agent HITL resolution callback
       # Fired from Agent.resume_subagent_hitl after the sub-agent completes/fails,
       # BEFORE the main agent continues execution. This ensures the UI updates
@@ -2150,6 +2174,11 @@ defmodule Sagents.AgentServer do
         # Broadcast state changes up to interrupt point
         broadcast_state_changes(server_state, interrupted_state)
         {:interrupt, interrupted_state, interrupt_data}
+
+      {:pause, %State{} = paused_state} ->
+        # Infrastructure pause (e.g., node draining) - broadcast state and propagate
+        broadcast_state_changes(server_state, paused_state)
+        {:pause, paused_state}
 
       {:error, reason} ->
         {:error, reason}
@@ -2243,6 +2272,29 @@ defmodule Sagents.AgentServer do
 
     # Broadcast debug event for state update
     broadcast_debug_event(updated_state, {:agent_state_update, interrupted_state})
+
+    {:noreply, Map.delete(updated_state, :task)}
+  end
+
+  defp handle_execution_result({:pause, paused_state}, server_state) do
+    updated_state = %{
+      server_state
+      | status: :paused,
+        state: paused_state,
+        error: nil
+    }
+
+    # Persist agent state so it can be resumed after restart
+    maybe_persist_state(updated_state, :on_completion)
+
+    broadcast_event(updated_state, {:status_changed, :paused, nil})
+    update_presence_status(updated_state, :paused)
+
+    # Reset activity timer -- agent is paused, not done
+    updated_state = reset_inactivity_timer(updated_state)
+
+    # Broadcast debug event for state update
+    broadcast_debug_event(updated_state, {:agent_state_update, paused_state})
 
     {:noreply, Map.delete(updated_state, :task)}
   end

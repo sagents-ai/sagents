@@ -79,6 +79,48 @@ defmodule Sagents.AgentServerTest do
     end
   end
 
+  describe "on_server_start middleware errors" do
+    test "logs error when middleware on_server_start fails" do
+      # Define a middleware module that fails on on_server_start
+      defmodule FailingStartMiddleware do
+        @behaviour Sagents.Middleware
+
+        @impl true
+        def init(_opts), do: {:ok, %{}}
+
+        @impl true
+        def on_server_start(_state, _config) do
+          {:error, "initialization failed: bad config"}
+        end
+      end
+
+      agent =
+        create_test_agent(middleware: [FailingStartMiddleware])
+
+      agent_id = agent.agent_id
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, _pid} =
+            AgentServer.start_link(
+              agent: agent,
+              name: AgentServer.get_name(agent_id),
+              pubsub: nil
+            )
+
+          # Synchronize to ensure handle_continue has completed
+          _ = AgentServer.get_state(agent_id)
+        end)
+
+      assert log =~ "FailingStartMiddleware"
+      assert log =~ "on_server_start failed"
+      assert log =~ "initialization failed: bad config"
+
+      # Agent should still be running despite middleware failure
+      assert AgentServer.get_status(agent_id) == :idle
+    end
+  end
+
   describe "get_state/1" do
     test "returns current state" do
       agent = create_test_agent()
@@ -338,6 +380,30 @@ defmodule Sagents.AgentServerTest do
       assert AgentServer.get_status(agent_id) == :idle
       state = AgentServer.get_state(agent_id)
       assert length(state.messages) == 2
+    end
+
+    test "handles agent pause", %{agent: agent, agent_id: agent_id} do
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        {:pause, state}
+      end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      assert :ok = AgentServer.execute(agent_id)
+
+      # Wait for execution to complete
+      Process.sleep(50)
+
+      assert AgentServer.get_status(agent_id) == :paused
     end
 
     test "handles agent interrupt", %{agent: agent, agent_id: agent_id} do
@@ -694,6 +760,22 @@ defmodule Sagents.AgentServerTest do
       assert_receive {:agent, {:status_changed, :error, "Test error"}}, 200
     end
 
+    test "broadcasts chain_error via on_error callback", %{agent: agent, agent_id: agent_id} do
+      error = LangChain.LangChainError.exception(message: "All retries exhausted")
+
+      Agent
+      |> expect(:execute, fn ^agent, state, opts ->
+        # Extract the PubSub callbacks and fire on_error like LLMChain would
+        [pubsub_callbacks | _] = Keyword.fetch!(opts, :callbacks)
+        pubsub_callbacks.on_error.(nil, error)
+        {:ok, state}
+      end)
+
+      :ok = AgentServer.execute(agent_id)
+
+      assert_receive {:agent, {:chain_error, ^error}}, 200
+    end
+
     test "broadcasts cancelled status when task is cancelled", %{agent: agent, agent_id: agent_id} do
       Agent
       |> expect(:execute, fn ^agent, state, _opts ->
@@ -713,6 +795,52 @@ defmodule Sagents.AgentServerTest do
 
       # Should receive cancelled status (wrapped in {:agent, event} tuple)
       assert_receive {:agent, {:status_changed, :cancelled, _state}}, 100
+    end
+  end
+
+  describe "error callback debug events" do
+    setup do
+      pubsub_name = :"test_pubsub_#{:erlang.unique_integer([:positive])}"
+      {:ok, _} = start_supervised({Phoenix.PubSub, name: pubsub_name})
+
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+      initial_state = State.new!()
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: {Phoenix.PubSub, pubsub_name},
+          debug_pubsub: {Phoenix.PubSub, pubsub_name}
+        )
+
+      # Subscribe to both main and debug channels
+      :ok = AgentServer.subscribe(agent_id)
+      AgentServer.subscribe_debug(agent_id)
+
+      {:ok, agent: agent, agent_id: agent_id}
+    end
+
+    test "broadcasts llm_error on debug channel via on_llm_error callback", %{
+      agent: agent,
+      agent_id: agent_id
+    } do
+      error = LangChain.LangChainError.exception(message: "Rate limit exceeded")
+
+      Agent
+      |> expect(:execute, fn ^agent, state, opts ->
+        # Extract the PubSub callbacks and fire on_llm_error like LLMChain would
+        # during a transient failure that gets retried
+        [pubsub_callbacks | _] = Keyword.fetch!(opts, :callbacks)
+        pubsub_callbacks.on_llm_error.(nil, error)
+        {:ok, state}
+      end)
+
+      :ok = AgentServer.execute(agent_id)
+
+      assert_receive {:agent, {:debug, {:llm_error, ^error}}}, 200
     end
   end
 

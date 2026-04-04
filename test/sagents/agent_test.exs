@@ -360,6 +360,24 @@ defmodule Sagents.AgentTest do
       # Verify mock response added
       assert Enum.at(result_state.messages, 1).role == :assistant
     end
+
+    test "propagates {:pause, state} from mode" do
+      # Use a mode that always returns {:pause, chain} to simulate
+      # infrastructure pause (e.g., node draining)
+      {:ok, agent} =
+        Agent.new(%{
+          model: mock_model(),
+          mode: Sagents.Test.PauseMode,
+          replace_default_middleware: true
+        })
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:pause, paused_state} = Agent.execute(agent, initial_state)
+      assert %State{} = paused_state
+      # Original message preserved, no assistant response added (paused before completion)
+      assert [%{role: :user}] = paused_state.messages
+    end
   end
 
   describe "execute/2 with callbacks as list" do
