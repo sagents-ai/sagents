@@ -55,7 +55,7 @@ defmodule Sagents.Middleware.DebugLogTest do
     test "computes path from config and agent_id", %{config: config} do
       path = DebugLog.log_path(config, "conversation-42")
       assert path =~ @test_log_dir
-      assert path =~ "debug_conversation-42_"
+      assert path =~ ~r/debug_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}_conversation-42\.log/
       assert path =~ ".log"
     end
 
