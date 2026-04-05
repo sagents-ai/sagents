@@ -693,8 +693,12 @@ AgentServer broadcasts events on topic `"agent_server:#{agent_id}"`:
 - `{:agent, {:status_changed, :idle, nil}}` - Ready for work
 - `{:agent, {:status_changed, :running, nil}}` - Executing
 - `{:agent, {:status_changed, :interrupted, interrupt_data}}` - Awaiting approval
+- `{:agent, {:status_changed, :paused, nil}}` - Infrastructure pause (e.g., node draining); state is persisted and the agent can be resumed after restart
 - `{:agent, {:status_changed, :cancelled, nil}}` - Cancelled by user
 - `{:agent, {:status_changed, :error, reason}}` - Execution failed
+
+### Error Events
+- `{:agent, {:chain_error, error}}` - Terminal chain error after all retries and fallbacks are exhausted. Fires alongside `{:status_changed, :error, _}` but carries the raw `LangChain.LangChainError` struct with structured details (see `:on_error` callback in LangChain)
 
 ### Message Events
 - `{:agent, {:llm_deltas, [%MessageDelta{}]}}` - Streaming tokens
@@ -723,6 +727,7 @@ Subscribe with `AgentServer.subscribe_debug(agent_id)` on topic `"agent_server:d
 
 - `{:agent, {:debug, {:agent_state_update, state}}}` - Full state snapshot
 - `{:agent, {:debug, {:middleware_action, module, data}}}` - Middleware events
+- `{:agent, {:debug, {:llm_error, error}}}` - Individual LLM API call failure, including transient errors during retries and model fallback attempts. Fires on every failed call even when the chain subsequently recovers — use this for diagnostics rather than user-facing error handling (see `:on_llm_error` callback in LangChain)
 
 ## Agent Discovery
 
