@@ -16,16 +16,28 @@ defmodule Sagents.Middleware.TodoList do
 
   ## Configuration
 
-  No configuration options currently supported. Future options may include:
+  - `:display_text` - Label shown in UI when the `write_todos` tool runs.
+    Defaults to `"Updating task list"`. Useful when the todo list is used
+    internally by the agent (e.g. self-organization during an onboarding
+    flow) and the default label would leak implementation detail to users.
 
-  - `:max_todos` - Maximum number of TODOs allowed
-  - `:auto_cleanup` - Automatically remove completed TODOs
+  ## Usage
+
+      # default label
+      {:ok, agent} = Agent.new(middleware: [TodoList])
+
+      # custom label for a user-facing flow where todos are internal
+      {:ok, agent} = Agent.new(
+        middleware: [{TodoList, display_text: "Updating my notes"}]
+      )
   """
 
   @behaviour Sagents.Middleware
 
   alias Sagents.{AgentServer, State, Todo}
   alias LangChain.Function
+
+  @default_display_text "Updating task list"
 
   @system_prompt """
   ## `write_todos`
@@ -116,13 +128,19 @@ defmodule Sagents.Middleware.TodoList do
   """
 
   @impl true
+  def init(opts) do
+    display_text = Keyword.get(opts, :display_text, @default_display_text)
+    {:ok, %{display_text: display_text}}
+  end
+
+  @impl true
   def system_prompt(_config) do
     @system_prompt
   end
 
   @impl true
-  def tools(_config) do
-    [build_write_todos_tool()]
+  def tools(config) do
+    [build_write_todos_tool(config)]
   end
 
   @impl true
@@ -134,11 +152,17 @@ defmodule Sagents.Middleware.TodoList do
   end
 
   # Build the tool function - called at runtime to avoid compile-time ordering issues
-  defp build_write_todos_tool do
+  defp build_write_todos_tool(config) do
+    display_text =
+      case config do
+        %{display_text: text} when is_binary(text) -> text
+        _ -> @default_display_text
+      end
+
     Function.new!(%{
       name: "write_todos",
       description: @tool_description,
-      display_text: "Updating task list",
+      display_text: display_text,
       parameters_schema: %{
         type: "object",
         properties: %{

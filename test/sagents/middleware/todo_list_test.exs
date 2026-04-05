@@ -38,6 +38,33 @@ defmodule Sagents.Middleware.TodoListTest do
     end
   end
 
+  describe "display_text configuration" do
+    test "defaults to 'Updating task list' when called with nil" do
+      [tool] = TodoList.tools(nil)
+      assert tool.display_text == "Updating task list"
+    end
+
+    test "uses default when init/1 is called with empty opts" do
+      {:ok, config} = TodoList.init([])
+      [tool] = TodoList.tools(config)
+      assert tool.display_text == "Updating task list"
+    end
+
+    test "uses custom display_text from init/1 opts" do
+      {:ok, config} = TodoList.init(display_text: "Updating my notes")
+      [tool] = TodoList.tools(config)
+      assert tool.display_text == "Updating my notes"
+    end
+
+    test "flows through Middleware.init_middleware/1 end-to-end" do
+      entry =
+        Sagents.Middleware.init_middleware({TodoList, display_text: "Keeping myself organized"})
+
+      [tool] = Sagents.Middleware.get_tools(entry)
+      assert tool.display_text == "Keeping myself organized"
+    end
+  end
+
   describe "write_todos tool - replace mode" do
     test "replaces all todos when merge is false" do
       state =
