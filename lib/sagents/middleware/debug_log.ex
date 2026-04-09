@@ -20,11 +20,27 @@ defmodule Sagents.Middleware.DebugLog do
 
   ## Configuration
 
+  - `:enabled` - Enable or disable logging (default: `true`). When `false`, all
+    callbacks become noops -- no files are created and no I/O occurs. Useful for
+    keeping the middleware in the stack but disabling it in non-dev environments.
   - `:log_dir` - Directory for log files (default: `"tmp/agent_logs"`)
   - `:prefix` - Filename prefix (default: `"debug"`)
   - `:log_deltas` - Log streaming deltas? (default: `false`)
   - `:pretty` - Pretty-print inspect output? (default: `true`)
   - `:inspect_limit` - Inspect limit for large structs (default: `:infinity`)
+
+  ## Disabling in Production
+
+  Since `Mix.env()` is not available in compiled releases, use application config:
+
+      # config/dev.exs (or simply omit -- defaults to true)
+      config :my_app, :debug_logging, true
+
+      # config/prod.exs
+      config :my_app, :debug_logging, false
+
+      # In your middleware stack
+      {Sagents.Middleware.DebugLog, [enabled: Application.compile_env(:my_app, :debug_logging, false)]}
 
   ## Log File Naming
 
@@ -48,6 +64,7 @@ defmodule Sagents.Middleware.DebugLog do
   @impl true
   def init(opts) do
     config = %{
+      enabled: Keyword.get(opts, :enabled, true),
       log_dir: Keyword.get(opts, :log_dir, "tmp/agent_logs"),
       prefix: Keyword.get(opts, :prefix, "debug"),
       log_deltas: Keyword.get(opts, :log_deltas, false),
@@ -60,6 +77,8 @@ defmodule Sagents.Middleware.DebugLog do
   end
 
   @impl true
+  def on_server_start(state, %{enabled: false}), do: {:ok, state}
+
   def on_server_start(state, config) do
     log_event(config, state.agent_id, "ON_SERVER_START", fn ->
       msg_count = length(state.messages)
@@ -87,6 +106,8 @@ defmodule Sagents.Middleware.DebugLog do
   end
 
   @impl true
+  def before_model(state, %{enabled: false}), do: {:ok, state}
+
   def before_model(state, config) do
     prev_count = State.get_metadata(state, "debug_log.msg_count", 0)
     current_count = length(state.messages)
@@ -116,6 +137,8 @@ defmodule Sagents.Middleware.DebugLog do
   end
 
   @impl true
+  def after_model(state, %{enabled: false}), do: {:ok, state}
+
   def after_model(state, config) do
     prev_count = State.get_metadata(state, "debug_log.msg_count", 0)
     current_count = length(state.messages)
@@ -169,6 +192,8 @@ defmodule Sagents.Middleware.DebugLog do
   end
 
   @impl true
+  def handle_resume(_agent, state, _resume_data, %{enabled: false}, _opts), do: {:cont, state}
+
   def handle_resume(agent, state, resume_data, config, _opts) do
     log_event(config, state.agent_id, "HANDLE_RESUME", fn ->
       lines = [
@@ -184,6 +209,8 @@ defmodule Sagents.Middleware.DebugLog do
   end
 
   @impl true
+  def handle_message(_message, state, %{enabled: false}), do: {:ok, state}
+
   def handle_message(message, state, config) do
     log_event(config, state.agent_id, "HANDLE_MESSAGE", fn ->
       safe_inspect(message, config)
@@ -193,6 +220,8 @@ defmodule Sagents.Middleware.DebugLog do
   end
 
   @impl true
+  def callbacks(%{enabled: false}), do: %{}
+
   def callbacks(config) do
     callback_map = %{
       on_llm_new_message: fn chain, message ->
