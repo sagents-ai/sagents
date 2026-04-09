@@ -364,6 +364,79 @@ defmodule Sagents.Middleware.DebugLogTest do
     end
   end
 
+  describe "enabled: false" do
+    setup do
+      {:ok, disabled_config} = DebugLog.init(log_dir: @test_log_dir, enabled: false)
+      {:ok, disabled_config: disabled_config}
+    end
+
+    test "init stores enabled: false in config" do
+      {:ok, config} = DebugLog.init(enabled: false)
+      assert config.enabled == false
+    end
+
+    test "init defaults enabled to true" do
+      {:ok, config} = DebugLog.init([])
+      assert config.enabled == true
+    end
+
+    test "on_server_start is a noop and creates no log file", %{disabled_config: config} do
+      state =
+        State.new!(%{
+          agent_id: "test-disabled-oss",
+          messages: [Message.new_user!("Hello")]
+        })
+
+      assert {:ok, ^state} = DebugLog.on_server_start(state, config)
+      refute File.exists?(DebugLog.log_path(config, "test-disabled-oss"))
+    end
+
+    test "before_model is a noop, creates no log file, and does not modify metadata", %{
+      disabled_config: config
+    } do
+      state =
+        State.new!(%{
+          agent_id: "test-disabled-bm",
+          messages: [Message.new_user!("Hello")]
+        })
+
+      assert {:ok, ^state} = DebugLog.before_model(state, config)
+      refute File.exists?(DebugLog.log_path(config, "test-disabled-bm"))
+      assert State.get_metadata(state, "debug_log.msg_count") == nil
+    end
+
+    test "after_model is a noop and creates no log file", %{disabled_config: config} do
+      state =
+        State.new!(%{
+          agent_id: "test-disabled-am",
+          messages: [Message.new_user!("Hello")],
+          metadata: %{"debug_log.msg_count" => 0}
+        })
+
+      assert {:ok, ^state} = DebugLog.after_model(state, config)
+      refute File.exists?(DebugLog.log_path(config, "test-disabled-am"))
+    end
+
+    test "handle_resume is a noop and creates no log file", %{disabled_config: config} do
+      agent = %Sagents.Agent{agent_id: "test-disabled-hr", model: nil, middleware: []}
+      state = State.new!(%{agent_id: "test-disabled-hr", messages: []})
+
+      assert {:cont, ^state} = DebugLog.handle_resume(agent, state, %{}, config, [])
+      refute File.exists?(DebugLog.log_path(config, "test-disabled-hr"))
+    end
+
+    test "handle_message is a noop and creates no log file", %{disabled_config: config} do
+      state = State.new!(%{agent_id: "test-disabled-hm", messages: []})
+
+      assert {:ok, ^state} = DebugLog.handle_message({:some, "message"}, state, config)
+      refute File.exists?(DebugLog.log_path(config, "test-disabled-hm"))
+    end
+
+    test "callbacks returns an empty map", %{disabled_config: config} do
+      assert DebugLog.callbacks(config) == %{}
+    end
+  end
+
   # -- Helpers --
 
   defp read_log(config, agent_id) do
