@@ -734,7 +734,11 @@ defmodule Sagents.Agent do
             state: state,
             # Make parent agent's middleware and tools available to tools (e.g., SubAgent middleware)
             parent_middleware: agent.middleware,
-            parent_tools: agent.tools
+            parent_tools: agent.tools,
+            # Preserve the original tool_context map as an explicit key so
+            # SubAgent middleware can extract it cleanly without reconstructing
+            # it.
+            tool_context: agent.tool_context || %{}
           }
         )
     }

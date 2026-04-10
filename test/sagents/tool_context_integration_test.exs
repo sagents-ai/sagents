@@ -67,13 +67,15 @@ defmodule Sagents.ToolContextIntegrationTest do
       {:ok, _final_state} = Agent.execute(agent, state)
 
       assert_received {:received_context, ctx}
-      # Caller context is present
+      # Caller context is present (flat, top-level)
       assert ctx.user_id == 42
       assert ctx.tenant == "acme"
       # Internal sagents context is still present
       assert Map.has_key?(ctx, :state)
       assert Map.has_key?(ctx, :parent_middleware)
       assert Map.has_key?(ctx, :parent_tools)
+      # Original tool_context preserved as explicit key for SubAgent extraction
+      assert ctx.tool_context == %{user_id: 42, tenant: "acme"}
     end
 
     test "tool_context defaults to empty map — internal context still flows", %{model: model} do
