@@ -9,7 +9,7 @@ defmodule Sagents.Middleware.FileSystem do
   - `replace_text`: Make targeted edits with string replacement
   - `replace_lines`: Replace a range of lines by line number
   - `update_file_attrs`: Update file attributes (title, tags, etc.) — no content changes
-  - `search_text`: Search for text patterns within files or across all files
+  - `find_in_file`: Find text or regex matches within a single file
   - `delete_file`: Delete files from the filesystem
   - `move_file`: Move or rename files and directories
 
@@ -47,7 +47,7 @@ defmodule Sagents.Middleware.FileSystem do
       )
 
   Available tools: `"list_files"`, `"read_file"`, `"create_file"`, `"replace_text"`,
-  `"replace_lines"`, `"update_file_attrs"`, `"search_text"`, `"delete_file"`,
+  `"replace_lines"`, `"update_file_attrs"`, `"find_in_file"`, `"delete_file"`,
   `"move_file"`
 
   ### Custom Tool Descriptions
@@ -141,7 +141,7 @@ defmodule Sagents.Middleware.FileSystem do
     "replace_text",
     "replace_lines",
     "update_file_attrs",
-    "search_text",
+    "find_in_file",
     "delete_file",
     "move_file"
   ]
@@ -156,7 +156,7 @@ defmodule Sagents.Middleware.FileSystem do
   - `replace_text`: Replace a string with another string in an existing file. The old_string must appear exactly once unless replace_all is set.
   - `replace_lines`: Replace a range of lines (by line number) with new content. More token-efficient than replace_text for large block replacements.
   - `update_file_attrs`: Update file attributes (title, tags, etc.) without modifying file content. Validated against the file schema.
-  - `search_text`: Search for text patterns within or across files.
+  - `find_in_file`: Find text or regex matches within a single file. Requires an exact file path — use `list_files` first to discover paths.
   - `delete_file`: Delete a file from the filesystem.
   - `move_file`: Move or rename a file or directory.
 
@@ -208,15 +208,67 @@ defmodule Sagents.Middleware.FileSystem do
           scope
       end
 
-    config = %{
-      filesystem_scope: filesystem_scope,
-      # Tool configuration
-      enabled_tools: Keyword.get(opts, :enabled_tools, @default_enabled_tools),
-      custom_tool_descriptions: Keyword.get(opts, :custom_tool_descriptions, %{}),
-      file_schema: Keyword.get(opts, :file_schema, FileEntry)
-    }
+    enabled_tools = Keyword.get(opts, :enabled_tools, @default_enabled_tools)
+    custom_tool_descriptions = Keyword.get(opts, :custom_tool_descriptions, %{})
 
-    {:ok, config}
+    with :ok <- validate_enabled_tools(enabled_tools),
+         :ok <- validate_custom_tool_descriptions(custom_tool_descriptions) do
+      config = %{
+        filesystem_scope: filesystem_scope,
+        # Tool configuration
+        enabled_tools: enabled_tools,
+        custom_tool_descriptions: custom_tool_descriptions,
+        file_schema: Keyword.get(opts, :file_schema, FileEntry)
+      }
+
+      {:ok, config}
+    end
+  end
+
+  # Rejects unknown tool names in `:enabled_tools` so misconfigured middleware
+  # fails fast at agent construction (rather than silently dropping the entry
+  # in `tools/1`). This is especially useful when a tool is renamed: stale
+  # config will surface immediately instead of becoming a silent no-op.
+  defp validate_enabled_tools(enabled_tools) when is_list(enabled_tools) do
+    unknown = Enum.reject(enabled_tools, &(&1 in @default_enabled_tools))
+
+    if unknown == [] do
+      :ok
+    else
+      {:error,
+       "Unknown tool name(s) in :enabled_tools: #{inspect(unknown)}. " <>
+         "Valid tools: #{inspect(@default_enabled_tools)}."}
+    end
+  end
+
+  defp validate_enabled_tools(other) do
+    {:error, ":enabled_tools must be a list of tool name strings, got: #{inspect(other)}"}
+  end
+
+  # Rejects unknown keys in `:custom_tool_descriptions`. Same rationale as
+  # `validate_enabled_tools/1`: a stale key from a renamed tool is silently
+  # ignored at lookup time (`get_custom_description/3`), which makes typos
+  # and migration leftovers invisible. Validates against the full set of
+  # known tools — not just the currently-enabled subset — so a description
+  # for a tool the user has temporarily disabled is still allowed.
+  defp validate_custom_tool_descriptions(descriptions) when is_map(descriptions) do
+    unknown =
+      descriptions
+      |> Map.keys()
+      |> Enum.reject(&(&1 in @default_enabled_tools))
+
+    if unknown == [] do
+      :ok
+    else
+      {:error,
+       "Unknown tool name(s) in :custom_tool_descriptions: #{inspect(unknown)}. " <>
+         "Valid tools: #{inspect(@default_enabled_tools)}."}
+    end
+  end
+
+  defp validate_custom_tool_descriptions(other) do
+    {:error,
+     ":custom_tool_descriptions must be a map of tool name strings to descriptions, got: #{inspect(other)}"}
   end
 
   @impl true
@@ -233,7 +285,7 @@ defmodule Sagents.Middleware.FileSystem do
       "replace_text" => build_replace_text_tool(config),
       "replace_lines" => build_replace_lines_tool(config),
       "update_file_attrs" => build_update_file_attrs_tool(config),
-      "search_text" => build_search_text_tool(config),
+      "find_in_file" => build_find_in_file_tool(config),
       "delete_file" => build_delete_file_tool(config),
       "move_file" => build_move_file_tool(config)
     }
@@ -468,32 +520,39 @@ defmodule Sagents.Middleware.FileSystem do
     })
   end
 
-  defp build_search_text_tool(config) do
+  defp build_find_in_file_tool(config) do
     default_description = """
-    Search for text patterns within files.
+    Find text or regex matches within a single file.
 
-    Can search within a specific file or across all loaded files.
-    Returns matches with line numbers and optional context lines.
+    Returns matches with line numbers and optional surrounding context lines.
+    This tool searches one specific file at a time. To search across multiple
+    files, call `list_files` first to discover paths, then call `find_in_file`
+    for each path you want to search.
+
+    Wildcards and glob patterns (e.g. `/chapters/*`) are NOT supported in
+    `file_path` — provide an exact path. Use `list_files` with a pattern to
+    enumerate matching files first.
 
     Usage:
     - Provide pattern (required) - text or regex to search for
-    - Provide file_path (optional) - if omitted, searches all files
+    - Provide file_path (required) - exact path to the file to search
     - Set case_sensitive (optional, default: true)
     - Set context_lines (optional, default: 0) - lines before/after to show
     - Set max_results (optional, default: 50) - limit number of results
 
     Examples (call with a JSON object matching the schema):
-    - Search a single file: {"pattern": "TODO", "file_path": "/notes.txt"}
-    - Search all files: {"pattern": "important", "case_sensitive": false}
-    - With surrounding context: {"pattern": "error", "context_lines": 2}
+    - Find a literal string: {"pattern": "TODO", "file_path": "/notes.txt"}
+    - Case-insensitive: {"pattern": "important", "file_path": "/notes.txt", "case_sensitive": false}
+    - With surrounding context: {"pattern": "error", "file_path": "/app.log", "context_lines": 2}
+    - Regex pattern: {"pattern": "error\\\\d+", "file_path": "/app.log"}
     """
 
-    description = get_custom_description(config, "search_text", default_description)
+    description = get_custom_description(config, "find_in_file", default_description)
 
     Function.new!(%{
-      name: "search_text",
+      name: "find_in_file",
       description: description,
-      display_text: "Searching files",
+      display_text: "Searching file",
       parameters_schema: %{
         "type" => "object",
         "properties" => %{
@@ -504,7 +563,7 @@ defmodule Sagents.Middleware.FileSystem do
           "file_path" => %{
             "type" => "string",
             "description" =>
-              "Optional: specific file to search. If omitted, searches all loaded files."
+              "Exact path of the file to search (e.g. '/notes.txt'). Wildcards/globs are not supported."
           },
           "case_sensitive" => %{
             "type" => "boolean",
@@ -522,9 +581,9 @@ defmodule Sagents.Middleware.FileSystem do
             "default" => 50
           }
         },
-        "required" => ["pattern"]
+        "required" => ["pattern", "file_path"]
       },
-      function: fn args, context -> execute_search_text_tool(args, context, config) end
+      function: fn args, context -> execute_find_in_file_tool(args, context, config) end
     })
   end
 
@@ -863,7 +922,7 @@ defmodule Sagents.Middleware.FileSystem do
       {:error, "Filesystem not available: #{Exception.message(e)}"}
   end
 
-  defp execute_search_text_tool(args, _context, config) do
+  defp execute_find_in_file_tool(args, _context, config) do
     pattern = get_arg(args, "pattern")
     file_path = get_arg(args, "file_path")
     case_sensitive = get_boolean_arg(args, "case_sensitive", true)
@@ -874,24 +933,35 @@ defmodule Sagents.Middleware.FileSystem do
       is_nil(pattern) ->
         {:error, "pattern is required"}
 
+      is_nil(file_path) ->
+        {:error, "file_path is required"}
+
+      String.contains?(file_path, ["*", "?", "[", "]"]) ->
+        {:error,
+         "Wildcards and globs are not supported in file_path. Provide an exact file path (e.g., '/notes.txt'). Use list_files to discover matching files first."}
+
       true ->
         # Compile regex pattern with inline flags for case-insensitive search
         pattern_with_flags = if case_sensitive, do: pattern, else: "(?i)#{pattern}"
 
         case Regex.compile(pattern_with_flags) do
           {:ok, regex} ->
-            if file_path do
-              # Search single file
-              search_single_file(
-                config.filesystem_scope,
-                file_path,
-                regex,
-                context_lines,
-                max_results
-              )
+            with {:ok, normalized_path} <- validate_path(file_path),
+                 {:ok, entry} <-
+                   FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
+              {matches, truncated} =
+                find_matches_in_content(entry.content || "", regex, context_lines, max_results)
+
+              format_search_results([{normalized_path, matches}], max_results, truncated)
             else
-              # Search all files
-              search_all_files(config.filesystem_scope, regex, context_lines, max_results)
+              {:error, :enoent} ->
+                {:error, "File not found: #{file_path}"}
+
+              {:error, reason} when is_binary(reason) ->
+                {:error, reason}
+
+              {:error, reason} ->
+                {:error, "Failed to search file: #{inspect(reason)}"}
             end
 
           {:error, _reason} ->
@@ -1038,58 +1108,6 @@ defmodule Sagents.Middleware.FileSystem do
 
   defp stringify_keys(map) do
     Map.new(map, fn {k, v} -> {to_string(k), v} end)
-  end
-
-  defp search_single_file(filesystem_scope, file_path, regex, context_lines, max_results) do
-    with {:ok, normalized_path} <- validate_path(file_path),
-         {:ok, entry} <- FileSystemServer.read_file(filesystem_scope, normalized_path) do
-      {matches, truncated} =
-        find_matches_in_content(entry.content || "", regex, context_lines, max_results)
-
-      format_search_results([{normalized_path, matches}], max_results, truncated)
-    else
-      {:error, :enoent} ->
-        {:error, "File not found: #{file_path}"}
-
-      {:error, reason} ->
-        {:error, "Failed to search file: #{inspect(reason)}"}
-    end
-  end
-
-  defp search_all_files(filesystem_scope, regex, context_lines, max_results) do
-    all_files = FileSystemServer.list_files(filesystem_scope)
-
-    # Search each file and collect matches, tracking total matches
-    {results, _total_matches, any_truncated} =
-      all_files
-      |> Enum.reduce({[], 0, false}, fn file_path, {acc, match_count, truncated} ->
-        # Calculate remaining limit for this file
-        remaining = max_results - match_count
-
-        if remaining <= 0 do
-          # Already hit limit, stop collecting
-          {acc, match_count, truncated}
-        else
-          case FileSystemServer.read_file(filesystem_scope, file_path) do
-            {:ok, entry} ->
-              {matches, file_truncated} =
-                find_matches_in_content(entry.content || "", regex, context_lines, remaining)
-
-              if Enum.empty?(matches) do
-                {acc, match_count, truncated}
-              else
-                {[{file_path, matches} | acc], match_count + length(matches),
-                 truncated or file_truncated}
-              end
-
-            {:error, _} ->
-              {acc, match_count, truncated}
-          end
-        end
-      end)
-
-    results = Enum.reverse(results)
-    format_search_results(results, max_results, any_truncated)
   end
 
   defp find_matches_in_content(content, regex, context_lines, max_results) do
