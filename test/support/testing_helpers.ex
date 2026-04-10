@@ -59,6 +59,56 @@ defmodule Sagents.TestingHelpers do
   end
 
   @doc """
+  Polls a function until it returns a truthy value or the timeout elapses.
+
+  Useful for synchronizing tests with asynchronous state changes that don't
+  expose a direct hook to wait on — for example, waiting for an Elixir
+  `Registry` to process the `:DOWN` message that follows a `GenServer.stop/2`,
+  or waiting for an ETS table to reflect an out-of-band write.
+
+  Returns `true` if the function returned a truthy value before the deadline, or
+  `false` if the timeout elapsed first. Pair it with `assert/1` so failures
+  surface at the test's call site:
+
+      assert wait_until(fn -> SubAgentServer.whereis(id) == nil end)
+
+  ## Options
+
+  - `:timeout` - total time to wait, in milliseconds (default: `1_000`)
+  - `:interval` - sleep duration between checks, in milliseconds (default: `10`)
+
+  ## Examples
+
+      # Wait for a process to be deregistered after stop
+      assert wait_until(fn ->
+        SubAgentServer.whereis(sub_agent_id) == nil
+      end)
+
+      # Custom timeout for a slower condition
+      assert wait_until(fn -> some_async_condition() end, timeout: 5_000)
+  """
+  @spec wait_until((-> any()), keyword()) :: boolean()
+  def wait_until(fun, opts \\ []) when is_function(fun, 0) do
+    timeout = Keyword.get(opts, :timeout, 1_000)
+    interval = Keyword.get(opts, :interval, 10)
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_until(fun, interval, deadline)
+  end
+
+  defp do_wait_until(fun, interval, deadline) do
+    if fun.() do
+      true
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        false
+      else
+        Process.sleep(interval)
+        do_wait_until(fun, interval, deadline)
+      end
+    end
+  end
+
+  @doc """
   Basic conversion of a Message to a DisplayMessage like data map.
   """
   def message_to_display_data(%LangChain.Message{} = message) do
