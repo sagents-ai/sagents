@@ -134,7 +134,7 @@ defmodule Sagents.AgentTest do
 
       {:ok, agent} = Agent.new(%{model: mock_model(), tools: [tool]})
 
-      # Now includes custom tool + write_todos (TodoList) + 9 filesystem tools (list_files, read_file, create_file, replace_text, replace_lines, update_file_attrs, search_text, delete_file, move_file) + SubAgents
+      # Now includes custom tool + write_todos (TodoList) + 9 filesystem tools (list_files, read_file, create_file, replace_text, replace_lines, update_file_attrs, find_in_file, delete_file, move_file) + SubAgents
       assert length(agent.tools) == 12
       tool_names = Enum.map(agent.tools, & &1.name)
       assert "custom_tool" in tool_names
@@ -260,6 +260,49 @@ defmodule Sagents.AgentTest do
       assert agent.middleware == []
       assert agent.tools == []
       assert agent.assembled_system_prompt == ""
+    end
+  end
+
+  describe "middleware initialization errors" do
+    # Regression: previously, when a middleware's init/1 returned {:error, _}
+    # the changeset got an error added but `assemble_full_system_prompt/1` and
+    # `collect_all_tools/1` continued running against the un-normalized cast
+    # value (raw {Module, opts} tuples), crashing with FunctionClauseError.
+    # Both functions now short-circuit on invalid changesets, so the original
+    # init error reaches the caller intact.
+    test "Agent.new returns {:error, changeset} when a middleware init/1 fails" do
+      assert {:error, %Ecto.Changeset{} = changeset} =
+               Agent.new(
+                 %{
+                   model: mock_model(),
+                   middleware: [
+                     {Sagents.Middleware.FileSystem,
+                      [agent_id: "test", enabled_tools: ["bogus_tool_name"]]}
+                   ]
+                 },
+                 replace_default_middleware: true
+               )
+
+      refute changeset.valid?
+      assert {message, _} = changeset.errors[:middleware]
+      assert message =~ "initialization failed"
+      assert message =~ "bogus_tool_name"
+      assert message =~ "find_in_file"
+    end
+
+    test "Agent.new! raises with a useful message when a middleware init/1 fails" do
+      assert_raise LangChainError, ~r/bogus_tool_name/, fn ->
+        Agent.new!(
+          %{
+            model: mock_model(),
+            middleware: [
+              {Sagents.Middleware.FileSystem,
+               [agent_id: "test", enabled_tools: ["bogus_tool_name"]]}
+            ]
+          },
+          replace_default_middleware: true
+        )
+      end
     end
   end
 

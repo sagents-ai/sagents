@@ -719,7 +719,7 @@ defmodule Sagents.Middleware.SubAgentTest do
          [
            agent_id: "test",
            custom_tool_descriptions: %{},
-           enabled_tools: ["read_file", "write_file"]
+           enabled_tools: ["read_file", "create_file"]
          ]}
       ]
 

@@ -374,6 +374,14 @@ defmodule Sagents.Agent do
     end
   end
 
+  # Skip when the changeset already has errors — most commonly this means
+  # `build_and_initialize_middleware/2` called `add_error` after a middleware
+  # `init/1` returned `{:error, _}`. In that case the `:middleware` field still
+  # holds the un-normalized cast value (raw `{Module, opts}` tuples), and
+  # iterating it here would crash with FunctionClauseError, masking the real
+  # error message we want the caller to see.
+  defp assemble_full_system_prompt(%Ecto.Changeset{valid?: false} = changeset), do: changeset
+
   defp assemble_full_system_prompt(changeset) do
     base_prompt = get_field(changeset, :base_system_prompt) || ""
     initialized_middleware = get_field(changeset, :middleware) || []
@@ -390,6 +398,8 @@ defmodule Sagents.Agent do
 
     put_change(changeset, :assembled_system_prompt, full_prompt)
   end
+
+  defp collect_all_tools(%Ecto.Changeset{valid?: false} = changeset), do: changeset
 
   defp collect_all_tools(changeset) do
     base_tools = get_field(changeset, :tools) || []
