@@ -229,7 +229,7 @@ Sagents includes several pre-built middleware components:
 | Middleware | Description |
 |------------|-------------|
 | **TodoList** | Task management with `write_todos` tool for tracking multi-step work |
-| **FileSystem** | Virtual filesystem with `ls`, `read_file`, `write_file`, `edit_file`, `search_text`, `edit_lines`, `delete_file` |
+| **FileSystem** | Virtual filesystem with `ls`, `read_file`, `write_file`, `edit_file`, `find_in_file`, `edit_lines`, `delete_file` |
 | **HumanInTheLoop** | Pause execution for human approval on configurable tools |
 | **SubAgent** | Delegate tasks to specialized child agents for parallel execution |
 | **Summarization** | Automatic conversation compression when token limits approach |
