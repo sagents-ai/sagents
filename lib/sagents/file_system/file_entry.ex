@@ -45,6 +45,8 @@ defmodule Sagents.FileSystem.FileEntry do
   Directory entry:
     %FileEntry{entry_type: :directory, persistence: :persisted, loaded: true, dirty_content: false, content: nil}
   """
+  @behaviour Sagents.FileSystem.FileSchema
+
   use Ecto.Schema
   import Ecto.Changeset
 
@@ -91,9 +93,17 @@ defmodule Sagents.FileSystem.FileEntry do
         }
 
   @doc """
-  Creates a changeset for a file entry.
+  Creates a changeset for a file entry from internal attrs.
+
+  This is the full internal changeset used by `new_memory_file/3`,
+  `new_persisted_file/3`, etc. It casts all schema fields including
+  `:path`, `:content`, and persistence-related state.
+
+  This is **not** the changeset used for LLM-supplied attribute updates —
+  that is `changeset/1` (the `Sagents.FileSystem.FileSchema` callback),
+  which only allows `:title`, `:id`, and `:file_type`.
   """
-  def changeset(entry \\ %FileEntry{}, attrs) do
+  def internal_changeset(entry \\ %FileEntry{}, attrs) do
     entry
     |> cast(attrs, [
       :path,
@@ -120,6 +130,43 @@ defmodule Sagents.FileSystem.FileEntry do
     entry
     |> cast(attrs, [:title, :id, :file_type])
   end
+
+  # --- Sagents.FileSystem.FileSchema callbacks ---
+
+  @doc """
+  Default `Sagents.FileSystem.FileSchema` changeset.
+
+  Casts only entry-level fields safe for LLM updates: `:title`, `:id`,
+  and `:file_type`. `:content` is intentionally **not** in the cast list —
+  content is changed via `replace_text`, `replace_lines`, or `create_file`,
+  never `update_file_attrs`.
+  """
+  @impl Sagents.FileSystem.FileSchema
+  def changeset(attrs) do
+    %__MODULE__{}
+    |> cast(attrs, [:title, :id, :file_type])
+  end
+
+  @doc """
+  Default `Sagents.FileSystem.FileSchema` representation of a file entry
+  for the LLM. Includes path, title, entry_type, file_type, persistence,
+  size, and (when present) id.
+  """
+  @impl Sagents.FileSystem.FileSchema
+  def to_llm_map(%__MODULE__{} = entry) do
+    %{
+      path: entry.path,
+      title: entry.title,
+      entry_type: entry.entry_type,
+      file_type: entry.file_type,
+      persistence: entry.persistence,
+      size: entry.metadata && entry.metadata.size
+    }
+    |> maybe_put_field(:id, entry.id)
+  end
+
+  defp maybe_put_field(map, _key, nil), do: map
+  defp maybe_put_field(map, key, value), do: Map.put(map, key, value)
 
   @doc """
   Validates that a name (title or path segment) is safe for use in paths.
@@ -163,7 +210,7 @@ defmodule Sagents.FileSystem.FileEntry do
         |> maybe_put(:file_type, file_type)
 
       %FileEntry{}
-      |> changeset(attrs)
+      |> internal_changeset(attrs)
       |> put_embed(:metadata, metadata)
       |> apply_action(:insert)
       |> case do
@@ -200,7 +247,7 @@ defmodule Sagents.FileSystem.FileEntry do
         |> maybe_put(:file_type, file_type)
 
       %FileEntry{}
-      |> changeset(attrs)
+      |> internal_changeset(attrs)
       |> put_embed(:metadata, metadata)
       |> apply_action(:insert)
       |> case do
@@ -239,7 +286,7 @@ defmodule Sagents.FileSystem.FileEntry do
 
     result =
       %FileEntry{}
-      |> changeset(attrs)
+      |> internal_changeset(attrs)
       |> maybe_put_embed_metadata(metadata)
       |> apply_action(:insert)
 
@@ -283,7 +330,7 @@ defmodule Sagents.FileSystem.FileEntry do
         }
 
         %FileEntry{}
-        |> changeset(attrs)
+        |> internal_changeset(attrs)
         |> put_embed(:metadata, metadata)
         |> apply_action(:insert)
         |> case do

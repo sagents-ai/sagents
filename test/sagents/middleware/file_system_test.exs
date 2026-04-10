@@ -1,3 +1,68 @@
+defmodule Sagents.Middleware.FileSystemTest.CustomFileSchema do
+  @moduledoc false
+  @behaviour Sagents.FileSystem.FileSchema
+
+  use Ecto.Schema
+  import Ecto.Changeset
+
+  @primary_key false
+  embedded_schema do
+    field :title, :string
+    field :system_tag, :string
+    field :tags, {:array, :string}, default: []
+    field :word_count, :integer
+  end
+
+  @impl true
+  def changeset(attrs) do
+    %__MODULE__{}
+    |> cast(attrs, [:title, :system_tag, :tags, :word_count])
+    |> validate_inclusion(:system_tag, ~w(draft review approved published))
+    |> validate_number(:word_count, greater_than: 0)
+  end
+
+  @impl true
+  def to_llm_map(entry) do
+    custom = (entry.metadata && entry.metadata.custom) || %{}
+
+    %{
+      custom_path: entry.path,
+      custom_title: entry.title,
+      system_tag: custom["system_tag"],
+      tags: custom["tags"],
+      word_count: custom["word_count"]
+    }
+    |> Map.reject(fn {_k, v} -> is_nil(v) end)
+  end
+end
+
+defmodule Sagents.Middleware.FileSystemTest.ContentLeakingFileSchema do
+  @moduledoc """
+  An intentionally-broken FileSchema that allows :content in the cast list.
+  Used to verify the middleware's defense-in-depth check rejects content
+  changes even when the schema lets them through.
+  """
+  @behaviour Sagents.FileSystem.FileSchema
+
+  use Ecto.Schema
+  import Ecto.Changeset
+
+  @primary_key false
+  embedded_schema do
+    field :title, :string
+    field :content, :string
+  end
+
+  @impl true
+  def changeset(attrs) do
+    %__MODULE__{}
+    |> cast(attrs, [:title, :content])
+  end
+
+  @impl true
+  def to_llm_map(entry), do: %{path: entry.path, title: entry.title}
+end
+
 defmodule Sagents.Middleware.FileSystemTest do
   use ExUnit.Case, async: false
 
@@ -25,12 +90,13 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert config.filesystem_scope == {:agent, agent_id}
 
       assert config.enabled_tools == [
-               "ls",
+               "list_files",
                "read_file",
-               "write_file",
-               "edit_file",
+               "create_file",
+               "replace_text",
+               "replace_lines",
+               "update_file_attrs",
                "search_text",
-               "edit_lines",
                "delete_file",
                "move_file"
              ]
@@ -42,14 +108,14 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert {:ok, config} =
                FileSystem.init(
                  filesystem_scope: {:agent, agent_id},
-                 enabled_tools: ["ls", "read_file"]
+                 enabled_tools: ["list_files", "read_file"]
                )
 
-      assert config.enabled_tools == ["ls", "read_file"]
+      assert config.enabled_tools == ["list_files", "read_file"]
     end
 
     test "initializes with custom tool descriptions", %{agent_id: agent_id} do
-      custom = %{"ls" => "Custom ls description"}
+      custom = %{"list_files" => "Custom list_files description"}
       assert {:ok, config} = FileSystem.init(agent_id: agent_id, custom_tool_descriptions: custom)
       assert config.custom_tool_descriptions == custom
     end
@@ -60,79 +126,16 @@ defmodule Sagents.Middleware.FileSystemTest do
       end
     end
 
-    test "accepts custom entry_to_map function", %{agent_id: agent_id} do
-      custom_fn = fn entry -> %{custom_path: entry.path} end
-
+    test "accepts custom file_schema module", %{agent_id: agent_id} do
       assert {:ok, config} =
-               FileSystem.init(agent_id: agent_id, entry_to_map: custom_fn)
+               FileSystem.init(agent_id: agent_id, file_schema: FileEntry)
 
-      assert config.entry_to_map == custom_fn
+      assert config.file_schema == FileEntry
     end
 
-    test "defaults entry_to_map to default_entry_to_map", %{agent_id: agent_id} do
+    test "defaults file_schema to FileEntry", %{agent_id: agent_id} do
       assert {:ok, config} = FileSystem.init(agent_id: agent_id)
-      assert is_function(config.entry_to_map, 1)
-    end
-  end
-
-  describe "default_entry_to_map/1" do
-    test "returns map with expected keys" do
-      {:ok, entry} =
-        FileEntry.new_persisted_file("/Characters/Hero", "some content", title: "Hero")
-
-      result = FileSystem.default_entry_to_map(entry)
-
-      assert result.path == "/Characters/Hero"
-      assert result.title == "Hero"
-      assert result.entry_type == :file
-      assert result.file_type == "markdown"
-      assert result.persistence == :persisted
-      assert is_integer(result.size)
-    end
-
-    test "excludes content" do
-      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "lots of content here")
-      result = FileSystem.default_entry_to_map(entry)
-      refute Map.has_key?(result, :content)
-    end
-
-    test "excludes id when nil" do
-      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data")
-      result = FileSystem.default_entry_to_map(entry)
-      refute Map.has_key?(result, :id)
-    end
-
-    test "includes id when present" do
-      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "data", id: "doc-123")
-      result = FileSystem.default_entry_to_map(entry)
-      assert result.id == "doc-123"
-    end
-
-    test "handles directory entries" do
-      {:ok, entry} = FileEntry.new_directory("/Characters", title: "Characters")
-      result = FileSystem.default_entry_to_map(entry)
-
-      assert result.entry_type == :directory
-      assert result.file_type == nil
-      assert result.title == "Characters"
-    end
-
-    test "includes size from metadata" do
-      {:ok, entry} = FileEntry.new_memory_file("/test.txt", "hello")
-      result = FileSystem.default_entry_to_map(entry)
-      assert result.size == byte_size("hello")
-    end
-  end
-
-  describe "maybe_add_field/3" do
-    test "adds field when value is non-nil" do
-      result = FileSystem.maybe_add_field(%{a: 1}, :b, "value")
-      assert result == %{a: 1, b: "value"}
-    end
-
-    test "skips field when value is nil" do
-      result = FileSystem.maybe_add_field(%{a: 1}, :b, nil)
-      assert result == %{a: 1}
+      assert config.file_schema == FileEntry
     end
   end
 
@@ -142,39 +145,44 @@ defmodule Sagents.Middleware.FileSystemTest do
       prompt = FileSystem.system_prompt(config)
 
       assert prompt =~ "Filesystem Tools"
-      assert prompt =~ "ls"
+      assert prompt =~ "list_files"
       assert prompt =~ "read_file"
-      assert prompt =~ "write_file"
-      assert prompt =~ "edit_file"
+      assert prompt =~ "create_file"
+      assert prompt =~ "replace_text"
+      assert prompt =~ "replace_lines"
+      assert prompt =~ "update_file_attrs"
       assert prompt =~ "must start with a forward slash"
     end
   end
 
   describe "tools/1" do
-    test "returns all eight filesystem tools by default", %{agent_id: agent_id} do
+    test "returns all nine filesystem tools by default", %{agent_id: agent_id} do
       tools =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
+          file_schema: FileEntry,
           enabled_tools: [
-            "ls",
+            "list_files",
             "read_file",
-            "write_file",
-            "edit_file",
+            "create_file",
+            "replace_text",
+            "replace_lines",
+            "update_file_attrs",
             "search_text",
-            "edit_lines",
             "delete_file",
             "move_file"
           ]
         })
 
-      assert length(tools) == 8
+      assert length(tools) == 9
       tool_names = Enum.map(tools, & &1.name)
-      assert "ls" in tool_names
+      assert "list_files" in tool_names
       assert "read_file" in tool_names
-      assert "write_file" in tool_names
-      assert "edit_file" in tool_names
+      assert "create_file" in tool_names
+      assert "replace_text" in tool_names
+      assert "replace_lines" in tool_names
+      assert "update_file_attrs" in tool_names
       assert "search_text" in tool_names
-      assert "edit_lines" in tool_names
       assert "delete_file" in tool_names
       assert "move_file" in tool_names
     end
@@ -183,32 +191,47 @@ defmodule Sagents.Middleware.FileSystemTest do
       tools =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file"]
+          file_schema: FileEntry,
+          enabled_tools: ["list_files", "read_file"]
         })
 
       assert length(tools) == 2
       tool_names = Enum.map(tools, & &1.name)
-      assert "ls" in tool_names
+      assert "list_files" in tool_names
       assert "read_file" in tool_names
-      refute "write_file" in tool_names
-      refute "edit_file" in tool_names
+      refute "create_file" in tool_names
+      refute "replace_text" in tool_names
+    end
+
+    test "old tool names no longer resolve", %{agent_id: agent_id} do
+      tools =
+        FileSystem.tools(%{
+          filesystem_scope: {:agent, agent_id},
+          file_schema: FileEntry,
+          enabled_tools: ["ls", "write_file", "edit_file", "edit_lines"]
+        })
+
+      assert tools == []
     end
   end
 
-  describe "ls tool" do
+  defp tool_named(tools, name), do: Enum.find(tools, &(&1.name == name))
+
+  describe "list_files tool" do
     test "lists files as JSON array of entry maps", %{agent_id: agent_id} do
       # Write some files
       FileSystemServer.write_file({:agent, agent_id}, "/file1.txt", "content1")
       FileSystemServer.write_file({:agent, agent_id}, "/file2.txt", "content2")
 
-      [ls_tool | _] =
+      list_files_tool =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file", "write_file", "edit_file"],
-          entry_to_map: &FileSystem.default_entry_to_map/1
+          enabled_tools: ["list_files"],
+          file_schema: FileEntry
         })
+        |> tool_named("list_files")
 
-      assert {:ok, result} = ls_tool.function.(%{}, %{state: State.new!()})
+      assert {:ok, result} = list_files_tool.function.(%{}, %{state: State.new!()})
       entries = Jason.decode!(result)
       assert is_list(entries)
       paths = Enum.map(entries, & &1["path"])
@@ -223,14 +246,15 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
 
     test "reports empty filesystem", %{agent_id: agent_id} do
-      [ls_tool | _] =
+      list_files_tool =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file", "write_file", "edit_file"],
-          entry_to_map: &FileSystem.default_entry_to_map/1
+          enabled_tools: ["list_files"],
+          file_schema: FileEntry
         })
+        |> tool_named("list_files")
 
-      assert {:ok, result} = ls_tool.function.(%{}, %{state: State.new!()})
+      assert {:ok, result} = list_files_tool.function.(%{}, %{state: State.new!()})
       assert result == "No files in filesystem"
     end
 
@@ -239,14 +263,17 @@ defmodule Sagents.Middleware.FileSystemTest do
       FileSystemServer.write_file({:agent, agent_id}, "/test.md", "content")
       FileSystemServer.write_file({:agent, agent_id}, "/other.txt", "content")
 
-      [ls_tool | _] =
+      list_files_tool =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file", "write_file", "edit_file"],
-          entry_to_map: &FileSystem.default_entry_to_map/1
+          enabled_tools: ["list_files"],
+          file_schema: FileEntry
         })
+        |> tool_named("list_files")
 
-      assert {:ok, result} = ls_tool.function.(%{"pattern" => "*test*"}, %{state: State.new!()})
+      assert {:ok, result} =
+               list_files_tool.function.(%{"pattern" => "*test*"}, %{state: State.new!()})
+
       entries = Jason.decode!(result)
       paths = Enum.map(entries, & &1["path"])
       assert "/test.txt" in paths
@@ -254,22 +281,21 @@ defmodule Sagents.Middleware.FileSystemTest do
       refute "/other.txt" in paths
     end
 
-    test "uses custom entry_to_map function", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/doc.txt", "hello")
+    test "uses custom file_schema module", %{agent_id: agent_id} do
+      FileSystemServer.write_file({:agent, agent_id}, "/doc.txt", "hello", title: "Doc Title")
 
-      custom_fn = fn entry -> %{custom_path: entry.path, custom_title: entry.title} end
-
-      [ls_tool | _] =
+      list_files_tool =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls"],
-          entry_to_map: custom_fn
+          enabled_tools: ["list_files"],
+          file_schema: Sagents.Middleware.FileSystemTest.CustomFileSchema
         })
+        |> tool_named("list_files")
 
-      assert {:ok, result} = ls_tool.function.(%{}, %{state: State.new!()})
+      assert {:ok, result} = list_files_tool.function.(%{}, %{state: State.new!()})
       [entry] = Jason.decode!(result)
       assert entry["custom_path"] == "/doc.txt"
-      assert Map.has_key?(entry, "custom_title")
+      assert entry["custom_title"] == "Doc Title"
       refute Map.has_key?(entry, "entry_type")
     end
   end
@@ -286,13 +312,14 @@ defmodule Sagents.Middleware.FileSystemTest do
 
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", String.trim(content))
 
-      [_, read_file_tool | _] =
+      tool =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file", "write_file", "edit_file"]
+          enabled_tools: ["read_file"]
         })
+        |> tool_named("read_file")
 
-      %{tool: read_file_tool}
+      %{tool: tool}
     end
 
     test "reads entire file with line numbers", %{tool: tool} do
@@ -347,16 +374,17 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
   end
 
-  describe "write_file tool" do
+  describe "create_file tool" do
     setup %{agent_id: agent_id} do
-      [_, _, write_file_tool | _] =
+      tool =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file", "write_file", "edit_file"],
-          entry_to_map: &FileSystem.default_entry_to_map/1
+          enabled_tools: ["create_file"],
+          file_schema: FileEntry
         })
+        |> tool_named("create_file")
 
-      %{tool: write_file_tool}
+      %{tool: tool}
     end
 
     test "creates new file and returns JSON entry map", %{agent_id: agent_id, tool: tool} do
@@ -383,6 +411,7 @@ defmodule Sagents.Middleware.FileSystemTest do
 
       assert {:error, message} = tool.function.(args, %{state: State.new!()})
       assert message =~ "already exists"
+      assert message =~ "replace_text or replace_lines"
     end
 
     test "rejects paths without leading slash", %{tool: tool} do
@@ -400,17 +429,18 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
   end
 
-  describe "edit_file tool" do
+  describe "replace_text tool" do
     setup %{agent_id: agent_id} do
       FileSystemServer.write_file({:agent, agent_id}, "/edit.txt", "Hello World")
 
-      [_, _, _, edit_file_tool] =
+      tool =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file", "write_file", "edit_file"]
+          enabled_tools: ["replace_text"]
         })
+        |> tool_named("replace_text")
 
-      %{tool: edit_file_tool}
+      %{tool: tool}
     end
 
     test "edits file with single occurrence", %{agent_id: agent_id, tool: tool} do
@@ -491,7 +521,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
           enabled_tools: ["move_file"],
-          entry_to_map: &FileSystem.default_entry_to_map/1
+          file_schema: FileEntry
         })
 
       [move_file_tool] = tools
@@ -924,7 +954,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       {:ok, config} =
         FileSystem.init(
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file", "write_file"]
+          enabled_tools: ["list_files", "read_file", "create_file"]
         )
 
       search_tool = config |> FileSystem.tools() |> get_search_text_tool()
@@ -1024,15 +1054,15 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
   end
 
-  defp get_edit_lines_tool(tools) when is_list(tools) do
-    Enum.find(tools, fn tool -> tool.name == "edit_lines" end)
+  defp get_replace_lines_tool(tools) when is_list(tools) do
+    Enum.find(tools, fn tool -> tool.name == "replace_lines" end)
   end
 
-  describe "edit_lines tool - basic functionality" do
-    test "edit_lines tool is enabled in FileSystem", %{agent_id: agent_id} do
+  describe "replace_lines tool - basic functionality" do
+    test "replace_lines tool is enabled in FileSystem", %{agent_id: agent_id} do
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
-      assert edit_lines_tool != nil
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
+      assert replace_lines_tool != nil
     end
 
     test "replaces a single line", %{agent_id: agent_id} do
@@ -1045,7 +1075,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/test.txt",
@@ -1054,7 +1084,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "REPLACED LINE 3"
       }
 
-      {:ok, result} = edit_lines_tool.function.(args, %{})
+      {:ok, result} = replace_lines_tool.function.(args, %{})
 
       assert result =~ "File edited successfully"
       assert result =~ "Replaced 1 lines (3-3)"
@@ -1079,7 +1109,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/test.txt",
@@ -1088,7 +1118,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "NEW LINE A\nNEW LINE B"
       }
 
-      {:ok, result} = edit_lines_tool.function.(args, %{})
+      {:ok, result} = replace_lines_tool.function.(args, %{})
 
       assert result =~ "File edited successfully"
       assert result =~ "Replaced 3 lines (2-4)"
@@ -1108,7 +1138,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       new_content = """
       New paragraph 1
@@ -1123,7 +1153,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => String.trim(new_content)
       }
 
-      {:ok, result} = edit_lines_tool.function.(args, %{})
+      {:ok, result} = replace_lines_tool.function.(args, %{})
       assert result =~ "Replaced 2 lines"
 
       {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/story.txt")
@@ -1136,7 +1166,7 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
   end
 
-  describe "edit_lines tool - boundary conditions" do
+  describe "replace_lines tool - boundary conditions" do
     test "replaces first line only", %{agent_id: agent_id} do
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", """
       Line 1
@@ -1145,7 +1175,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/test.txt",
@@ -1154,7 +1184,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "REPLACED FIRST LINE"
       }
 
-      {:ok, result} = edit_lines_tool.function.(args, %{})
+      {:ok, result} = replace_lines_tool.function.(args, %{})
       assert result =~ "Replaced 1 lines (1-1)"
 
       {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
@@ -1170,7 +1200,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/test.txt",
@@ -1179,7 +1209,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "REPLACED LAST LINE"
       }
 
-      {:ok, result} = edit_lines_tool.function.(args, %{})
+      {:ok, result} = replace_lines_tool.function.(args, %{})
       assert result =~ "Replaced 1 lines (4-4)"
 
       {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
@@ -1195,7 +1225,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/test.txt",
@@ -1204,7 +1234,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "Completely new content"
       }
 
-      {:ok, result} = edit_lines_tool.function.(args, %{})
+      {:ok, result} = replace_lines_tool.function.(args, %{})
       assert result =~ "Replaced 4 lines (1-4)"
 
       {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
@@ -1219,7 +1249,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/test.txt",
@@ -1228,7 +1258,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => ""
       }
 
-      {:ok, result} = edit_lines_tool.function.(args, %{})
+      {:ok, result} = replace_lines_tool.function.(args, %{})
       assert result =~ "Replaced 1 lines"
 
       {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
@@ -1238,10 +1268,10 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
   end
 
-  describe "edit_lines tool - error cases" do
+  describe "replace_lines tool - error cases" do
     test "returns error for non-existent file", %{agent_id: agent_id} do
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/nonexistent.txt",
@@ -1250,7 +1280,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "content"
       }
 
-      {:error, error_msg} = edit_lines_tool.function.(args, %{})
+      {:error, error_msg} = replace_lines_tool.function.(args, %{})
       assert error_msg =~ "File not found"
     end
 
@@ -1258,7 +1288,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "Line 1\nLine 2")
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/test.txt",
@@ -1267,7 +1297,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "content"
       }
 
-      {:error, error_msg} = edit_lines_tool.function.(args, %{})
+      {:error, error_msg} = replace_lines_tool.function.(args, %{})
       assert error_msg =~ "start_line must be >= 1"
     end
 
@@ -1275,7 +1305,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "Line 1\nLine 2\nLine 3")
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/test.txt",
@@ -1284,7 +1314,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "content"
       }
 
-      {:error, error_msg} = edit_lines_tool.function.(args, %{})
+      {:error, error_msg} = replace_lines_tool.function.(args, %{})
       assert error_msg =~ "end_line must be >= start_line"
     end
 
@@ -1292,7 +1322,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "Line 1\nLine 2")
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/test.txt",
@@ -1301,7 +1331,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "content"
       }
 
-      {:error, error_msg} = edit_lines_tool.function.(args, %{})
+      {:error, error_msg} = replace_lines_tool.function.(args, %{})
       assert error_msg =~ "start_line 10 is beyond file length"
     end
 
@@ -1309,7 +1339,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "Line 1\nLine 2\nLine 3")
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/test.txt",
@@ -1318,13 +1348,13 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "content"
       }
 
-      {:error, error_msg} = edit_lines_tool.function.(args, %{})
+      {:error, error_msg} = replace_lines_tool.function.(args, %{})
       assert error_msg =~ "end_line 10 is beyond file length"
     end
 
     test "returns error for invalid path", %{agent_id: agent_id} do
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "no-slash.txt",
@@ -1333,13 +1363,13 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "content"
       }
 
-      {:error, error_msg} = edit_lines_tool.function.(args, %{})
+      {:error, error_msg} = replace_lines_tool.function.(args, %{})
       assert error_msg =~ "Path must start with '/'"
     end
 
     test "returns error when file_path is missing", %{agent_id: agent_id} do
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "start_line" => 1,
@@ -1347,13 +1377,13 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "content"
       }
 
-      {:error, error_msg} = edit_lines_tool.function.(args, %{})
+      {:error, error_msg} = replace_lines_tool.function.(args, %{})
       assert error_msg =~ "file_path is required"
     end
 
     test "returns error when start_line is missing", %{agent_id: agent_id} do
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/test.txt",
@@ -1361,13 +1391,13 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "content"
       }
 
-      {:error, error_msg} = edit_lines_tool.function.(args, %{})
+      {:error, error_msg} = replace_lines_tool.function.(args, %{})
       assert error_msg =~ "start_line and end_line are required"
     end
 
     test "returns error when new_content is missing", %{agent_id: agent_id} do
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
       args = %{
         "file_path" => "/test.txt",
@@ -1375,13 +1405,13 @@ defmodule Sagents.Middleware.FileSystemTest do
         "end_line" => 1
       }
 
-      {:error, error_msg} = edit_lines_tool.function.(args, %{})
+      {:error, error_msg} = replace_lines_tool.function.(args, %{})
       assert error_msg =~ "new_content is required"
     end
   end
 
-  describe "edit_lines tool - integration scenarios" do
-    test "read then edit_lines workflow", %{agent_id: agent_id} do
+  describe "replace_lines tool - integration scenarios" do
+    test "read then replace_lines workflow", %{agent_id: agent_id} do
       FileSystemServer.write_file({:agent, agent_id}, "/document.md", """
       # Title
 
@@ -1404,8 +1434,8 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert read_result =~ "4\tOld content here."
       assert read_result =~ "5\tMore old content."
 
-      # Now use edit_lines to replace lines 4-5
-      edit_lines_tool = Enum.find(tools, fn tool -> tool.name == "edit_lines" end)
+      # Now use replace_lines to replace lines 4-5
+      replace_lines_tool = Enum.find(tools, fn tool -> tool.name == "replace_lines" end)
 
       args = %{
         "file_path" => "/document.md",
@@ -1414,7 +1444,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         "new_content" => "Brand new content.\nCompletely rewritten."
       }
 
-      {:ok, edit_result} = edit_lines_tool.function.(args, %{})
+      {:ok, edit_result} = replace_lines_tool.function.(args, %{})
       assert edit_result =~ "Replaced 2 lines"
 
       # Read again to verify
@@ -1424,26 +1454,26 @@ defmodule Sagents.Middleware.FileSystemTest do
       refute final_result =~ "Old content here."
     end
 
-    test "edit_lines can be disabled via config", %{agent_id: agent_id} do
+    test "replace_lines can be disabled via config", %{agent_id: agent_id} do
       {:ok, config} =
         FileSystem.init(
           filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["ls", "read_file", "write_file"]
+          enabled_tools: ["list_files", "read_file", "create_file"]
         )
 
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
-      assert edit_lines_tool == nil
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
+      assert replace_lines_tool == nil
     end
 
-    test "edit_lines tool has correct schema", %{agent_id: agent_id} do
+    test "replace_lines tool has correct schema", %{agent_id: agent_id} do
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      edit_lines_tool = config |> FileSystem.tools() |> get_edit_lines_tool()
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
 
-      assert edit_lines_tool.name == "edit_lines"
-      assert is_binary(edit_lines_tool.description)
+      assert replace_lines_tool.name == "replace_lines"
+      assert is_binary(replace_lines_tool.description)
 
       # Verify parameters schema
-      schema = edit_lines_tool.parameters_schema
+      schema = replace_lines_tool.parameters_schema
       assert schema.type == "object"
       assert "file_path" in schema.required
       assert "start_line" in schema.required
@@ -1455,6 +1485,203 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert Map.has_key?(properties, :start_line)
       assert Map.has_key?(properties, :end_line)
       assert Map.has_key?(properties, :new_content)
+    end
+  end
+
+  describe "update_file_attrs tool" do
+    alias Sagents.Middleware.FileSystemTest.{CustomFileSchema, ContentLeakingFileSchema}
+
+    defp update_attrs_tool(agent_id, opts \\ []) do
+      schema = Keyword.get(opts, :file_schema, FileEntry)
+
+      FileSystem.tools(%{
+        filesystem_scope: {:agent, agent_id},
+        enabled_tools: ["update_file_attrs"],
+        file_schema: schema
+      })
+      |> tool_named("update_file_attrs")
+    end
+
+    test "is registered with correct name and display text", %{agent_id: agent_id} do
+      tool = update_attrs_tool(agent_id)
+      assert tool.name == "update_file_attrs"
+      assert tool.display_text == "Updating file attributes"
+    end
+
+    test "updates entry-level fields (title, file_type)", %{agent_id: agent_id} do
+      FileSystemServer.write_file({:agent, agent_id}, "/doc.md", "body", title: "Old Title")
+      tool = update_attrs_tool(agent_id)
+
+      args = %{
+        "file_path" => "/doc.md",
+        "attrs" => %{"title" => "New Title", "file_type" => "json"}
+      }
+
+      assert {:ok, json} = tool.function.(args, %{state: State.new!()})
+      result = Jason.decode!(json)
+      assert result["title"] == "New Title"
+      assert result["file_type"] == "json"
+
+      {:ok, entry} = FileSystemServer.read_file({:agent, agent_id}, "/doc.md")
+      assert entry.title == "New Title"
+      assert entry.file_type == "json"
+      assert entry.content == "body"
+    end
+
+    test "updates custom metadata fields via custom schema", %{agent_id: agent_id} do
+      FileSystemServer.write_file({:agent, agent_id}, "/doc.md", "body", title: "Doc")
+      tool = update_attrs_tool(agent_id, file_schema: CustomFileSchema)
+
+      args = %{
+        "file_path" => "/doc.md",
+        "attrs" => %{"system_tag" => "draft", "tags" => ["a", "b"], "word_count" => 100}
+      }
+
+      assert {:ok, json} = tool.function.(args, %{state: State.new!()})
+      result = Jason.decode!(json)
+      assert result["system_tag"] == "draft"
+      assert result["tags"] == ["a", "b"]
+      assert result["word_count"] == 100
+
+      {:ok, entry} = FileSystemServer.read_file({:agent, agent_id}, "/doc.md")
+      # Custom fields go into metadata.custom (string keys)
+      assert entry.metadata.custom["system_tag"] == "draft"
+      assert entry.metadata.custom["tags"] == ["a", "b"]
+      assert entry.metadata.custom["word_count"] == 100
+    end
+
+    test "updates entry-level and custom fields in one call", %{agent_id: agent_id} do
+      FileSystemServer.write_file({:agent, agent_id}, "/doc.md", "body", title: "Old")
+      tool = update_attrs_tool(agent_id, file_schema: CustomFileSchema)
+
+      args = %{
+        "file_path" => "/doc.md",
+        "attrs" => %{"title" => "New", "system_tag" => "review"}
+      }
+
+      assert {:ok, _json} = tool.function.(args, %{state: State.new!()})
+
+      {:ok, entry} = FileSystemServer.read_file({:agent, agent_id}, "/doc.md")
+      assert entry.title == "New"
+      assert entry.metadata.custom["system_tag"] == "review"
+    end
+
+    test "returns formatted changeset errors when validation fails", %{agent_id: agent_id} do
+      FileSystemServer.write_file({:agent, agent_id}, "/doc.md", "body")
+      tool = update_attrs_tool(agent_id, file_schema: CustomFileSchema)
+
+      args = %{
+        "file_path" => "/doc.md",
+        "attrs" => %{"system_tag" => "garbage", "word_count" => -5}
+      }
+
+      assert {:error, message} = tool.function.(args, %{state: State.new!()})
+      assert message =~ "system_tag"
+      assert message =~ "word_count"
+    end
+
+    test "returns 'File not found' for missing file", %{agent_id: agent_id} do
+      tool = update_attrs_tool(agent_id)
+
+      args = %{"file_path" => "/missing.md", "attrs" => %{"title" => "x"}}
+
+      assert {:error, message} = tool.function.(args, %{state: State.new!()})
+      assert message =~ "not found"
+    end
+
+    test "rejects :content with redirect-to-replace-tools error", %{agent_id: agent_id} do
+      FileSystemServer.write_file({:agent, agent_id}, "/doc.md", "body")
+      tool = update_attrs_tool(agent_id, file_schema: ContentLeakingFileSchema)
+
+      args = %{
+        "file_path" => "/doc.md",
+        "attrs" => %{"content" => "rewritten"}
+      }
+
+      assert {:error, message} = tool.function.(args, %{state: State.new!()})
+      assert message =~ "cannot modify file content"
+      assert message =~ "replace_text or replace_lines"
+      assert message =~ "create_file"
+
+      # Content was not changed
+      {:ok, entry} = FileSystemServer.read_file({:agent, agent_id}, "/doc.md")
+      assert entry.content == "body"
+    end
+
+    test "default FileEntry schema silently drops :content from cast", %{agent_id: agent_id} do
+      FileSystemServer.write_file({:agent, agent_id}, "/doc.md", "body", title: "Title")
+      tool = update_attrs_tool(agent_id)
+
+      # Default FileEntry.changeset/1 doesn't cast :content, so it's dropped
+      # before the routing-layer check ever sees it.
+      args = %{
+        "file_path" => "/doc.md",
+        "attrs" => %{"content" => "rewritten", "title" => "Updated"}
+      }
+
+      assert {:ok, json} = tool.function.(args, %{state: State.new!()})
+      result = Jason.decode!(json)
+      assert result["title"] == "Updated"
+
+      {:ok, entry} = FileSystemServer.read_file({:agent, agent_id}, "/doc.md")
+      assert entry.content == "body"
+      assert entry.title == "Updated"
+    end
+
+    test "rejects invalid path", %{agent_id: agent_id} do
+      tool = update_attrs_tool(agent_id)
+
+      args = %{"file_path" => "no-slash.md", "attrs" => %{"title" => "x"}}
+
+      assert {:error, message} = tool.function.(args, %{state: State.new!()})
+      assert message =~ "must start with"
+    end
+
+    test "to_llm_map output is consistent across list_files, create_file, update_file_attrs",
+         %{agent_id: agent_id} do
+      tools =
+        FileSystem.tools(%{
+          filesystem_scope: {:agent, agent_id},
+          enabled_tools: ["list_files", "create_file", "update_file_attrs"],
+          file_schema: FileEntry
+        })
+
+      create_tool = tool_named(tools, "create_file")
+      list_tool = tool_named(tools, "list_files")
+      update_tool = tool_named(tools, "update_file_attrs")
+
+      {:ok, create_json} =
+        create_tool.function.(
+          %{"file_path" => "/doc.md", "content" => "hi"},
+          %{state: State.new!()}
+        )
+
+      {:ok, list_json} = list_tool.function.(%{}, %{state: State.new!()})
+
+      {:ok, update_json} =
+        update_tool.function.(
+          %{"file_path" => "/doc.md", "attrs" => %{"title" => "Title"}},
+          %{state: State.new!()}
+        )
+
+      create_map = Jason.decode!(create_json)
+      [list_map] = Jason.decode!(list_json)
+      update_map = Jason.decode!(update_json)
+
+      # All three should have the same shape (path, entry_type, file_type, etc.)
+      assert Map.keys(create_map) -- [:title] == Map.keys(list_map) -- [:title]
+      assert Map.keys(update_map) -- ["title"] == Map.keys(create_map) -- ["title"]
+    end
+  end
+
+  describe "FileSchema callback contract" do
+    test "FileEntry implements the FileSchema behaviour" do
+      assert function_exported?(FileEntry, :changeset, 1)
+      assert function_exported?(FileEntry, :to_llm_map, 1)
+    end
+
+    test "behaviours/0 lists FileSchema for FileEntry" do
+      assert Sagents.FileSystem.FileSchema in FileEntry.module_info(:attributes)[:behaviour]
     end
   end
 end
