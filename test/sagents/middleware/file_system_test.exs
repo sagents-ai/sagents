@@ -96,7 +96,7 @@ defmodule Sagents.Middleware.FileSystemTest do
                "replace_text",
                "replace_lines",
                "update_file_attrs",
-               "search_text",
+               "find_in_file",
                "delete_file",
                "move_file"
              ]
@@ -137,6 +137,102 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert {:ok, config} = FileSystem.init(agent_id: agent_id)
       assert config.file_schema == FileEntry
     end
+
+    test "rejects unknown tool name in enabled_tools", %{agent_id: agent_id} do
+      assert {:error, message} =
+               FileSystem.init(
+                 filesystem_scope: {:agent, agent_id},
+                 enabled_tools: ["list_files", "search_text"]
+               )
+
+      assert message =~ "Unknown tool name(s) in :enabled_tools"
+      assert message =~ "search_text"
+      # The valid tool list is included so users can spot the rename
+      assert message =~ "find_in_file"
+    end
+
+    test "reports all unknown tool names in enabled_tools", %{agent_id: agent_id} do
+      assert {:error, message} =
+               FileSystem.init(
+                 filesystem_scope: {:agent, agent_id},
+                 enabled_tools: ["list_files", "bogus_one", "bogus_two"]
+               )
+
+      assert message =~ "bogus_one"
+      assert message =~ "bogus_two"
+    end
+
+    test "rejects non-list :enabled_tools", %{agent_id: agent_id} do
+      assert {:error, message} =
+               FileSystem.init(
+                 filesystem_scope: {:agent, agent_id},
+                 enabled_tools: "list_files"
+               )
+
+      assert message =~ ":enabled_tools must be a list"
+    end
+
+    test "accepts an empty enabled_tools list", %{agent_id: agent_id} do
+      assert {:ok, config} =
+               FileSystem.init(
+                 filesystem_scope: {:agent, agent_id},
+                 enabled_tools: []
+               )
+
+      assert config.enabled_tools == []
+    end
+
+    test "rejects unknown tool name in custom_tool_descriptions", %{agent_id: agent_id} do
+      assert {:error, message} =
+               FileSystem.init(
+                 filesystem_scope: {:agent, agent_id},
+                 custom_tool_descriptions: %{"search_text" => "old name"}
+               )
+
+      assert message =~ "Unknown tool name(s) in :custom_tool_descriptions"
+      assert message =~ "search_text"
+      # The valid tool list is included so users can spot the rename
+      assert message =~ "find_in_file"
+    end
+
+    test "reports all unknown keys in custom_tool_descriptions", %{agent_id: agent_id} do
+      assert {:error, message} =
+               FileSystem.init(
+                 filesystem_scope: {:agent, agent_id},
+                 custom_tool_descriptions: %{
+                   "read_file" => "valid",
+                   "bogus_one" => "x",
+                   "bogus_two" => "y"
+                 }
+               )
+
+      assert message =~ "bogus_one"
+      assert message =~ "bogus_two"
+    end
+
+    test "allows custom_tool_descriptions for tools not in enabled_tools", %{agent_id: agent_id} do
+      # A description for a tool the user has temporarily disabled is still
+      # allowed — we're catching typos and renames, not enforcing that every
+      # described tool be enabled.
+      assert {:ok, config} =
+               FileSystem.init(
+                 filesystem_scope: {:agent, agent_id},
+                 enabled_tools: ["list_files", "read_file"],
+                 custom_tool_descriptions: %{"find_in_file" => "Custom find description"}
+               )
+
+      assert config.custom_tool_descriptions == %{"find_in_file" => "Custom find description"}
+    end
+
+    test "rejects non-map :custom_tool_descriptions", %{agent_id: agent_id} do
+      assert {:error, message} =
+               FileSystem.init(
+                 filesystem_scope: {:agent, agent_id},
+                 custom_tool_descriptions: [{"read_file", "x"}]
+               )
+
+      assert message =~ ":custom_tool_descriptions must be a map"
+    end
   end
 
   describe "system_prompt/1" do
@@ -168,7 +264,7 @@ defmodule Sagents.Middleware.FileSystemTest do
             "replace_text",
             "replace_lines",
             "update_file_attrs",
-            "search_text",
+            "find_in_file",
             "delete_file",
             "move_file"
           ]
@@ -182,7 +278,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert "replace_text" in tool_names
       assert "replace_lines" in tool_names
       assert "update_file_attrs" in tool_names
-      assert "search_text" in tool_names
+      assert "find_in_file" in tool_names
       assert "delete_file" in tool_names
       assert "move_file" in tool_names
     end
@@ -648,17 +744,17 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
   end
 
-  defp get_search_text_tool(tools) when is_list(tools) do
-    Enum.find(tools, fn tool -> tool.name == "search_text" end)
+  defp get_find_in_file_tool(tools) when is_list(tools) do
+    Enum.find(tools, fn tool -> tool.name == "find_in_file" end)
   end
 
-  describe "search_text tool - single file search" do
-    test "search_text tool is enabled in FileSystem", %{agent_id: agent_id} do
+  describe "find_in_file tool - basic search" do
+    test "find_in_file tool is enabled in FileSystem", %{agent_id: agent_id} do
       # Initialize middleware
       {:ok, config} = FileSystem.init(agent_id: agent_id)
 
-      # Find the search_text tool
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      # Find the find_in_file tool
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
       assert search_tool != nil
     end
 
@@ -675,7 +771,7 @@ defmodule Sagents.Middleware.FileSystemTest do
 
       # Initialize middleware
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
       # Execute search
       args = %{"pattern" => "TODO", "file_path" => "/test.txt"}
@@ -694,9 +790,9 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
-      args = %{"pattern" => "NOTFOUND"}
+      args = %{"pattern" => "NOTFOUND", "file_path" => "/test.txt"}
       {:ok, result} = search_tool.function.(args, %{})
 
       assert result == "No matches found"
@@ -710,7 +806,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
       args = %{"pattern" => "hello", "file_path" => "/test.txt", "case_sensitive" => false}
       {:ok, result} = search_tool.function.(args, %{})
@@ -729,7 +825,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
       args = %{"pattern" => "hello", "file_path" => "/test.txt", "case_sensitive" => true}
       {:ok, result} = search_tool.function.(args, %{})
@@ -749,7 +845,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
       # Search for lines starting with "error" followed by digits
       args = %{"pattern" => "error\\d+", "file_path" => "/test.txt"}
@@ -765,7 +861,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "content")
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
       args = %{"pattern" => "[invalid(regex", "file_path" => "/test.txt"}
       {:error, error_msg} = search_tool.function.(args, %{})
@@ -775,7 +871,7 @@ defmodule Sagents.Middleware.FileSystemTest do
 
     test "returns error for non-existent file", %{agent_id: agent_id} do
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
       args = %{"pattern" => "test", "file_path" => "/nonexistent.txt"}
       {:error, error_msg} = search_tool.function.(args, %{})
@@ -784,7 +880,7 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
   end
 
-  describe "search_text tool - context lines" do
+  describe "find_in_file tool - context lines" do
     test "includes context lines before and after matches", %{agent_id: agent_id} do
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", """
       Before context 1
@@ -795,7 +891,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
       args = %{"pattern" => "MATCH", "file_path" => "/test.txt", "context_lines" => 2}
       {:ok, result} = search_tool.function.(args, %{})
@@ -817,7 +913,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
       # Request 2 context lines, but match is at line 1 (no lines before)
       args = %{"pattern" => "MATCH", "file_path" => "/test.txt", "context_lines" => 2}
@@ -828,53 +924,7 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
   end
 
-  describe "search_text tool - multi-file search" do
-    test "searches across all files when no file_path specified", %{agent_id: agent_id} do
-      # Create multiple files
-      FileSystemServer.write_file({:agent, agent_id}, "/file1.txt", """
-      TODO in file 1
-      Normal line
-      """)
-
-      FileSystemServer.write_file({:agent, agent_id}, "/file2.txt", """
-      Normal line
-      TODO in file 2
-      """)
-
-      FileSystemServer.write_file({:agent, agent_id}, "/file3.txt", """
-      No match here
-      """)
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
-
-      # Search all files without specifying file_path
-      args = %{"pattern" => "TODO"}
-      {:ok, result} = search_tool.function.(args, %{})
-
-      # Should find matches in both file1 and file2
-      assert result =~ "File: /file1.txt"
-      assert result =~ "     1\tTODO in file 1"
-      assert result =~ "File: /file2.txt"
-      assert result =~ "     2\tTODO in file 2"
-      refute result =~ "file3.txt"
-    end
-
-    test "returns no matches when pattern not in any file", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/file1.txt", "content 1")
-      FileSystemServer.write_file({:agent, agent_id}, "/file2.txt", "content 2")
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
-
-      args = %{"pattern" => "NOTFOUND"}
-      {:ok, result} = search_tool.function.(args, %{})
-
-      assert result == "No matches found"
-    end
-  end
-
-  describe "search_text tool - max_results limiting" do
+  describe "find_in_file tool - max_results limiting" do
     test "limits results to max_results parameter", %{agent_id: agent_id} do
       # Create a file with many matches
       content =
@@ -884,7 +934,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", content)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
       # Limit to 10 results
       args = %{"pattern" => "MATCH", "file_path" => "/test.txt", "max_results" => 10}
@@ -909,7 +959,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", content)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
       # Use default max_results (50)
       args = %{"pattern" => "MATCH", "file_path" => "/test.txt"}
@@ -920,20 +970,56 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
   end
 
-  describe "search_text tool - parameter validation" do
+  describe "find_in_file tool - parameter validation" do
     test "returns error when pattern is missing", %{agent_id: agent_id} do
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
-      args = %{}
+      args = %{"file_path" => "/test.txt"}
       {:error, error_msg} = search_tool.function.(args, %{})
 
       assert error_msg =~ "pattern is required"
     end
 
+    test "returns error when file_path is missing", %{agent_id: agent_id} do
+      {:ok, config} = FileSystem.init(agent_id: agent_id)
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
+
+      args = %{"pattern" => "TODO"}
+      {:error, error_msg} = search_tool.function.(args, %{})
+
+      assert error_msg =~ "file_path is required"
+    end
+
+    test "rejects wildcard '*' in file_path", %{agent_id: agent_id} do
+      {:ok, config} = FileSystem.init(agent_id: agent_id)
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
+
+      args = %{"pattern" => "TODO", "file_path" => "/chapters/*"}
+      {:error, error_msg} = search_tool.function.(args, %{})
+
+      assert error_msg =~ "Wildcards and globs are not supported"
+      assert error_msg =~ "list_files"
+    end
+
+    test "rejects glob characters '?' and '[' in file_path", %{agent_id: agent_id} do
+      {:ok, config} = FileSystem.init(agent_id: agent_id)
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
+
+      assert {:error, msg1} =
+               search_tool.function.(%{"pattern" => "x", "file_path" => "/file?.txt"}, %{})
+
+      assert msg1 =~ "Wildcards and globs are not supported"
+
+      assert {:error, msg2} =
+               search_tool.function.(%{"pattern" => "x", "file_path" => "/file[1].txt"}, %{})
+
+      assert msg2 =~ "Wildcards and globs are not supported"
+    end
+
     test "handles invalid path", %{agent_id: agent_id} do
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
       # Path without leading slash
       args = %{"pattern" => "test", "file_path" => "invalid/path.txt"}
@@ -943,36 +1029,37 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
   end
 
-  describe "search_text tool - tool registration" do
-    test "search_text tool is included in default enabled tools", %{agent_id: agent_id} do
+  describe "find_in_file tool - tool registration" do
+    test "find_in_file tool is included in default enabled tools", %{agent_id: agent_id} do
       {:ok, config} = FileSystem.init(agent_id: agent_id)
 
-      assert "search_text" in config.enabled_tools
+      assert "find_in_file" in config.enabled_tools
     end
 
-    test "search_text tool can be disabled via config", %{agent_id: agent_id} do
+    test "find_in_file tool can be disabled via config", %{agent_id: agent_id} do
       {:ok, config} =
         FileSystem.init(
           filesystem_scope: {:agent, agent_id},
           enabled_tools: ["list_files", "read_file", "create_file"]
         )
 
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
       assert search_tool == nil
     end
 
-    test "search_text tool has correct schema", %{agent_id: agent_id} do
+    test "find_in_file tool has correct schema", %{agent_id: agent_id} do
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      search_tool = config |> FileSystem.tools() |> get_find_in_file_tool()
 
-      assert search_tool.name == "search_text"
+      assert search_tool.name == "find_in_file"
       assert is_binary(search_tool.description)
 
       # Verify parameters schema
       schema = search_tool.parameters_schema
       assert schema["type"] == "object"
       assert "pattern" in schema["required"]
+      assert "file_path" in schema["required"]
 
       properties = schema["properties"]
       assert Map.has_key?(properties, "pattern")
@@ -983,7 +1070,7 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
   end
 
-  describe "search_text tool - integration scenarios" do
+  describe "find_in_file tool - integration scenarios" do
     test "search then read workflow", %{agent_id: agent_id} do
       # Create a file with searchable content
       FileSystemServer.write_file({:agent, agent_id}, "/project.md", """
@@ -1006,7 +1093,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       tools = FileSystem.tools(config)
 
       # First, search for TODOs
-      search_tool = Enum.find(tools, fn tool -> tool.name == "search_text" end)
+      search_tool = Enum.find(tools, fn tool -> tool.name == "find_in_file" end)
       args = %{"pattern" => "TODO", "file_path" => "/project.md"}
       {:ok, search_result} = search_tool.function.(args, %{})
 
@@ -1023,7 +1110,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert read_result =~ "TODO: Complete this section"
     end
 
-    test "search across multiple files with different patterns", %{agent_id: agent_id} do
+    test "list_files then find_in_file workflow across multiple files", %{agent_id: agent_id} do
       FileSystemServer.write_file({:agent, agent_id}, "/config.json", """
       {
         "error_log": true,
@@ -1039,18 +1126,36 @@ defmodule Sagents.Middleware.FileSystemTest do
       """)
 
       {:ok, config} = FileSystem.init(agent_id: agent_id)
-      search_tool = config |> FileSystem.tools() |> get_search_text_tool()
+      tools = FileSystem.tools(config)
 
-      # Search for "error" (case-insensitive) across all files
-      args = %{"pattern" => "error", "case_sensitive" => false}
-      {:ok, result} = search_tool.function.(args, %{})
+      # An LLM searching multiple files calls list_files first, then find_in_file
+      # for each path it wants to inspect. This test verifies that compositional
+      # workflow rather than a single multi-file call.
+      list_tool = Enum.find(tools, fn tool -> tool.name == "list_files" end)
+      {:ok, _list_result} = list_tool.function.(%{}, %{})
 
-      # Should find matches in both files (with padded line numbers)
-      assert result =~ "/config.json"
-      assert result =~ "     2\t  \"error_log\": true,"
-      assert result =~ "/app.log"
-      assert result =~ "     2\t2024-01-01 10:05:00 ERROR: Connection failed"
-      assert result =~ "     4\t2024-01-01 10:15:00 ERROR: Timeout occurred"
+      search_tool = get_find_in_file_tool(tools)
+
+      # Search "/config.json" for the literal "error" substring (case-insensitive)
+      {:ok, config_result} =
+        search_tool.function.(
+          %{"pattern" => "error", "file_path" => "/config.json", "case_sensitive" => false},
+          %{}
+        )
+
+      assert config_result =~ "/config.json"
+      assert config_result =~ "     2\t  \"error_log\": true,"
+
+      # Search "/app.log" for ERROR lines (case-insensitive)
+      {:ok, log_result} =
+        search_tool.function.(
+          %{"pattern" => "error", "file_path" => "/app.log", "case_sensitive" => false},
+          %{}
+        )
+
+      assert log_result =~ "/app.log"
+      assert log_result =~ "     2\t2024-01-01 10:05:00 ERROR: Connection failed"
+      assert log_result =~ "     4\t2024-01-01 10:15:00 ERROR: Timeout occurred"
     end
   end
 
