@@ -113,7 +113,7 @@ defmodule Sagents.IntegrationTest do
                  tool_calls: [
                    ToolCall.new!(%{
                      call_id: "call_456",
-                     name: "write_file",
+                     name: "create_file",
                      arguments: %{
                        "file_path" => "/test.txt",
                        "content" => "Hello, World!"
@@ -214,7 +214,7 @@ defmodule Sagents.IntegrationTest do
                  tool_calls: [
                    ToolCall.new!(%{
                      call_id: "call_2",
-                     name: "write_file",
+                     name: "create_file",
                      arguments: %{
                        "file_path" => "/data.txt",
                        "content" => "Some data"
@@ -296,7 +296,7 @@ defmodule Sagents.IntegrationTest do
                  tool_calls: [
                    ToolCall.new!(%{
                      call_id: "call_1",
-                     name: "write_file",
+                     name: "create_file",
                      arguments: %{"file_path" => "/existing.txt", "content" => "content"}
                    })
                  ]
@@ -312,7 +312,7 @@ defmodule Sagents.IntegrationTest do
                  tool_calls: [
                    ToolCall.new!(%{
                      call_id: "call_2",
-                     name: "write_file",
+                     name: "create_file",
                      arguments: %{"file_path" => "/existing.txt", "content" => "new content"}
                    })
                  ]

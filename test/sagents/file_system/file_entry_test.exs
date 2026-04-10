@@ -224,9 +224,9 @@ defmodule Sagents.FileSystem.FileEntryTest do
     end
   end
 
-  describe "changeset/2" do
+  describe "internal_changeset/2" do
     test "validates required fields" do
-      changeset = FileEntry.changeset(%FileEntry{}, %{})
+      changeset = FileEntry.internal_changeset(%FileEntry{}, %{})
       refute changeset.valid?
       assert changeset.errors[:path]
       # persistence, loaded, and dirty_content have defaults, so they won't error
@@ -241,8 +241,53 @@ defmodule Sagents.FileSystem.FileEntryTest do
         dirty_content: false
       }
 
-      changeset = FileEntry.changeset(%FileEntry{}, attrs)
+      changeset = FileEntry.internal_changeset(%FileEntry{}, attrs)
       assert changeset.valid?
+    end
+  end
+
+  describe "changeset/1 (FileSchema callback)" do
+    test "casts title, id, and file_type" do
+      changeset = FileEntry.changeset(%{title: "Hello", id: "abc", file_type: "json"})
+      assert changeset.valid?
+      assert changeset.changes == %{title: "Hello", id: "abc", file_type: "json"}
+    end
+
+    test "ignores fields not in cast list" do
+      changeset = FileEntry.changeset(%{title: "Hello", path: "/x", content: "data"})
+      assert changeset.valid?
+      assert changeset.changes == %{title: "Hello"}
+    end
+
+    test "accepts string keys (LLM-supplied attrs)" do
+      changeset = FileEntry.changeset(%{"title" => "Hello", "file_type" => "json"})
+      assert changeset.valid?
+      assert changeset.changes.title == "Hello"
+      assert changeset.changes.file_type == "json"
+    end
+  end
+
+  describe "to_llm_map/1 (FileSchema callback)" do
+    test "returns expected fields" do
+      {:ok, entry} = FileEntry.new_persisted_file("/Characters/Hero", "data", title: "Hero")
+      result = FileEntry.to_llm_map(entry)
+
+      assert result.path == "/Characters/Hero"
+      assert result.title == "Hero"
+      assert result.entry_type == :file
+      assert result.file_type == "markdown"
+      assert result.persistence == :persisted
+      assert is_integer(result.size)
+    end
+
+    test "excludes id when nil" do
+      {:ok, entry} = FileEntry.new_memory_file("/x.txt", "data")
+      refute Map.has_key?(FileEntry.to_llm_map(entry), :id)
+    end
+
+    test "includes id when present" do
+      {:ok, entry} = FileEntry.new_memory_file("/x.txt", "data", id: "doc-1")
+      assert FileEntry.to_llm_map(entry).id == "doc-1"
     end
   end
 
