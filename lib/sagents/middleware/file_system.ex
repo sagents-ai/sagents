@@ -1,14 +1,15 @@
 defmodule Sagents.Middleware.FileSystem do
   @moduledoc """
-  Middleware that adds mock filesystem capabilities to agents.
+  Middleware that adds virtual filesystem capabilities to agents.
 
-  Provides tools for file operations in an isolated, in-memory filesystem:
-  - `ls`: List all files (with optional pattern filtering)
+  Provides tools for file operations in an isolated, persistable filesystem:
+  - `list_files`: List all files (with optional pattern filtering)
   - `read_file`: Read file contents with line numbers and pagination
-  - `write_file`: Create or overwrite files
-  - `edit_file`: Make targeted edits with string replacement
+  - `create_file`: Create new files (errors if file exists)
+  - `replace_text`: Make targeted edits with string replacement
+  - `replace_lines`: Replace a range of lines by line number
+  - `update_file_attrs`: Update file attributes (title, tags, etc.) — no content changes
   - `search_text`: Search for text patterns within files or across all files
-  - `edit_lines`: Replace a range of lines by line number
   - `delete_file`: Delete files from the filesystem
   - `move_file`: Move or rename files and directories
 
@@ -25,12 +26,14 @@ defmodule Sagents.Middleware.FileSystem do
 
   ### Basic Configuration
 
-  - `:long_term_memory` - Enable persistence (default: false)
-  - `:memories_prefix` - Path prefix for long-term persisted files (default: "memories")
+  - `:filesystem_scope` - Scope tuple identifying the filesystem (e.g. `{:agent, id}`,
+    `{:user, id}`, `{:project, id}`)
   - `:enabled_tools` - List of tool names to enable (default: all tools)
   - `:custom_tool_descriptions` - Map of custom descriptions per tool
-  - `:entry_to_map` - Function that converts a `FileEntry` to a JSON-friendly map for LLM
-    tool results (default: `&Sagents.Middleware.FileSystem.default_entry_to_map/1`)
+  - `:file_schema` - Module implementing `Sagents.FileSystem.FileSchema`. Defaults to
+    `Sagents.FileSystem.FileEntry`, which provides basic file attributes
+    (`:title`, `:id`, `:file_type`). Applications override with their own module to
+    add custom attributes with validation.
 
   ### Selective Tool Enabling
 
@@ -39,11 +42,13 @@ defmodule Sagents.Middleware.FileSystem do
       {:ok, agent} = Agent.new(
         model: model,
         filesystem_opts: [
-          enabled_tools: ["ls", "read_file"]  # Read-only, no write/edit
+          enabled_tools: ["list_files", "read_file"]  # Read-only
         ]
       )
 
-  Available tools: `"ls"`, `"read_file"`, `"write_file"`, `"edit_file"`, `"search_text"`, `"edit_lines"`, `"delete_file"`, `"move_file"`
+  Available tools: `"list_files"`, `"read_file"`, `"create_file"`, `"replace_text"`,
+  `"replace_lines"`, `"update_file_attrs"`, `"search_text"`, `"delete_file"`,
+  `"move_file"`
 
   ### Custom Tool Descriptions
 
@@ -54,83 +59,65 @@ defmodule Sagents.Middleware.FileSystem do
         filesystem_opts: [
           custom_tool_descriptions: %{
             "read_file" => "Custom description for reading files...",
-            "write_file" => "Custom description for writing files..."
+            "create_file" => "Custom description for creating files..."
           }
         ]
       )
 
-  ### Custom Entry-to-Map Function
+  ### Custom File Schema
 
-  The `entry_to_map` option controls how `FileEntry` structs are serialized to
-  JSON maps in LLM tool results (used by `ls`, `write_file`, etc.). The default
-  implementation returns path, title, entry_type, file_type, persistence, size,
-  and id (when present). Override it to include application-specific fields:
+  The `:file_schema` option controls both how `FileEntry` structs are serialized
+  to JSON for LLM tool results AND how LLM-supplied attribute updates are
+  validated. The default `Sagents.FileSystem.FileEntry` provides basic file
+  attributes. Provide your own module to add validated custom fields:
+
+      defmodule MyApp.DocumentFileSchema do
+        @behaviour Sagents.FileSystem.FileSchema
+
+        use Ecto.Schema
+        import Ecto.Changeset
+
+        @primary_key false
+        embedded_schema do
+          field :title, :string
+          field :system_tag, :string
+          field :tags, {:array, :string}, default: []
+        end
+
+        @impl true
+        def changeset(attrs) do
+          %__MODULE__{}
+          |> cast(attrs, [:title, :system_tag, :tags])
+          |> validate_inclusion(:system_tag, ~w(draft review approved published))
+        end
+
+        @impl true
+        def to_llm_map(entry), do: # ... build map from entry ...
+      end
 
       {Sagents.Middleware.FileSystem, [
         filesystem_scope: {:project, project_id},
-        entry_to_map: fn %FileEntry{} = entry ->
-          Sagents.Middleware.FileSystem.default_entry_to_map(entry)
-          |> Map.put(:genre, entry.metadata && entry.metadata.custom["genre"])
-          |> Sagents.Middleware.FileSystem.maybe_add_field(:tags, entry.metadata && entry.metadata.custom["tags"])
-        end
+        file_schema: MyApp.DocumentFileSchema
       ]}
-
-  ### Persistence Configuration
-
-  Provide persistence callbacks to save/load files from external storage:
-
-      # Module-based (implement Sagents.FilesystemCallbacks)
-      {:ok, agent} = Agent.new(
-        model: model,
-        filesystem_opts: [
-          persistence: MyApp.FilesystemPersistence,
-          context: %{user_id: user_id}
-        ]
-      )
-
-      # Function-based (inline callbacks)
-      {:ok, agent} = Agent.new(
-        model: model,
-        filesystem_opts: [
-          on_write: fn file_path, content, ctx ->
-            MyApp.Files.save(ctx.user_id, file_path, content)
-          end,
-          on_read: fn file_path, ctx ->
-            MyApp.Files.get(ctx.user_id, file_path)
-          end,
-          context: %{user_id: user_id}
-        ]
-      )
-
-  ### Persistence Options
-
-  - `:persistence` - Module implementing FilesystemCallbacks behavior
-  - `:on_write` - Function for write operations `fn(path, content, ctx) -> result`
-  - `:on_read` - Function for read operations `fn(path, ctx) -> {:ok, content} | {:error, reason}`
-  - `:on_delete` - Function for delete operations `fn(path, ctx) -> result`
-  - `:on_list` - Function for list operations `fn(ctx) -> {:ok, [paths]} | {:error, reason}`
-  - `:context` - Map passed to all callbacks (user_id, session_id, etc.)
-  - `:cache_reads` - Cache reads in memory (default: true)
-  - `:fail_on_persistence_error` - Fail operations if persistence fails (default: false)
 
   ## File Organization
 
   Use hierarchical paths to organize files:
 
-      write_file(file_path: "Chapter 1/summary.md", content: "...")
-      write_file(file_path: "images/diagram.png", content: "...")
-      ls(pattern: "Chapter 1/*")
+      create_file(file_path: "/reports/q1-summary.md", content: "...")
+      create_file(file_path: "/images/diagram.png", content: "...")
+      list_files(pattern: "/reports/*")
 
   ## Pattern Filtering
 
-  The `ls` tool supports wildcard patterns:
+  The `list_files` tool supports wildcard patterns:
   - `*` matches any characters
-  - Examples: `*summary*`, `*.md`, `Chapter 1/*`
+  - Examples: `*summary*`, `*.md`, `reports/*`
 
   ## Path Security
 
   Paths are validated to prevent security issues:
-  - Paths starting with "/" are rejected (system path protection)
+  - Paths must start with "/"
   - Path traversal attempts ("..") are rejected
   - Home directory shortcuts ("~") are rejected
   """
@@ -139,46 +126,65 @@ defmodule Sagents.Middleware.FileSystem do
 
   require Logger
   alias LangChain.Function
+  alias LangChain.Utils
   alias Sagents.FileSystem.FileEntry
   alias Sagents.FileSystemServer
+
+  # Fields that live directly on the FileEntry struct. Anything else in a
+  # validated changeset is routed to metadata.custom.
+  @entry_fields [:title, :id, :file_type]
+
+  @default_enabled_tools [
+    "list_files",
+    "read_file",
+    "create_file",
+    "replace_text",
+    "replace_lines",
+    "update_file_attrs",
+    "search_text",
+    "delete_file",
+    "move_file"
+  ]
 
   @system_prompt """
   ## Filesystem Tools
 
   You have access to a virtual filesystem with these tools:
-  - `ls`: List files — returns a JSON array of file entries with metadata (path, title, file_type, size, etc.)
-  - `read_file`: Read file contents with line numbers and pagination
-  - `write_file`: Create new files — returns JSON metadata of the created file
-  - `edit_file`: Modify existing files with string replacement
-  - `search_text`: Search for text patterns in specific files or across all files
-  - `edit_lines`: Replace a block of lines by line number range
-  - `delete_file`: Delete files from the filesystem
-  - `move_file`: Move or rename files and directories
+  - `list_files`: List files — returns a JSON array of file entries with metadata (path, title, file_type, size, etc.). Optionally filter by wildcard pattern.
+  - `read_file`: Read file contents with line numbers and pagination.
+  - `create_file`: Create a new file with content. Errors if the file already exists.
+  - `replace_text`: Replace a string with another string in an existing file. The old_string must appear exactly once unless replace_all is set.
+  - `replace_lines`: Replace a range of lines (by line number) with new content. More token-efficient than replace_text for large block replacements.
+  - `update_file_attrs`: Update file attributes (title, tags, etc.) without modifying file content. Validated against the file schema.
+  - `search_text`: Search for text patterns within or across files.
+  - `delete_file`: Delete a file from the filesystem.
+  - `move_file`: Move or rename a file or directory.
 
   ## File Organization
 
   Use hierarchical paths to organize files logically:
   - All paths must start with a forward slash "/"
-  - Examples: "/notes.txt", "/Chapter1/summary.md", "/data/results.csv"
+  - Examples: "/notes.txt", "/reports/q1-summary.md", "/data/results.csv"
   - No path traversal ("..") or home directory ("~") allowed
 
   ## Pattern Filtering
 
-  The `ls` tool supports wildcard patterns:
+  The `list_files` tool supports wildcard patterns:
   - `*` matches any characters
-  - Examples: `*summary*`, `*.md`, `/Chapter1/*`
+  - Examples: `*summary*`, `*.md`, `/reports/*`
 
   ## Best Practices
 
-  - Always use `ls` first to see available files
+  - Always use `list_files` first to see available files
   - Read files before editing to understand content
-  - Use `edit_file` for small, targeted edits with string replacement
-  - Use `edit_lines` for large block replacements (more efficient with tokens)
-  - Use `write_file` only for new files
-  - Provide sufficient context in `old_string` to ensure unique matches
+  - Use `replace_text` for small, targeted edits where you have the exact text
+  - Use `replace_lines` for large block replacements (more token-efficient)
+  - Use `create_file` only for new files (errors if file exists)
+  - Use `update_file_attrs` to change metadata like title or tags — never to change content
+  - Provide sufficient context in `old_string` for `replace_text` to ensure unique matches
   - Group related files in the same directory
   - Use `move_file` to rename files or move them to a different directory
-  - Never `delete_file` without first using `ls` to locate it
+  - Never `delete_file` without first using `list_files` to locate it
 
   ## Persistence Behavior
 
@@ -205,19 +211,9 @@ defmodule Sagents.Middleware.FileSystem do
     config = %{
       filesystem_scope: filesystem_scope,
       # Tool configuration
-      enabled_tools:
-        Keyword.get(opts, :enabled_tools, [
-          "ls",
-          "read_file",
-          "write_file",
-          "edit_file",
-          "search_text",
-          "edit_lines",
-          "delete_file",
-          "move_file"
-        ]),
+      enabled_tools: Keyword.get(opts, :enabled_tools, @default_enabled_tools),
       custom_tool_descriptions: Keyword.get(opts, :custom_tool_descriptions, %{}),
-      entry_to_map: Keyword.get(opts, :entry_to_map, &__MODULE__.default_entry_to_map/1)
+      file_schema: Keyword.get(opts, :file_schema, FileEntry)
     }
 
     {:ok, config}
@@ -231,27 +227,18 @@ defmodule Sagents.Middleware.FileSystem do
   @impl true
   def tools(config) do
     all_tools = %{
-      "ls" => build_ls_tool(config),
+      "list_files" => build_list_files_tool(config),
       "read_file" => build_read_file_tool(config),
-      "write_file" => build_write_file_tool(config),
-      "edit_file" => build_edit_file_tool(config),
+      "create_file" => build_create_file_tool(config),
+      "replace_text" => build_replace_text_tool(config),
+      "replace_lines" => build_replace_lines_tool(config),
+      "update_file_attrs" => build_update_file_attrs_tool(config),
       "search_text" => build_search_text_tool(config),
-      "edit_lines" => build_edit_lines_tool(config),
       "delete_file" => build_delete_file_tool(config),
       "move_file" => build_move_file_tool(config)
     }
 
-    enabled_tools =
-      Map.get(config, :enabled_tools, [
-        "ls",
-        "read_file",
-        "write_file",
-        "edit_file",
-        "search_text",
-        "edit_lines",
-        "delete_file",
-        "move_file"
-      ])
+    enabled_tools = Map.get(config, :enabled_tools, @default_enabled_tools)
 
     enabled_tools
     |> Enum.map(fn tool_name -> Map.get(all_tools, tool_name) end)
@@ -264,71 +251,25 @@ defmodule Sagents.Middleware.FileSystem do
     []
   end
 
-  @doc """
-  Converts a FileEntry to a JSON-friendly map for LLM tool results.
-
-  Does not include content (which could be very large). Includes size
-  from metadata when available. Only includes `id` if it has a value.
-
-  This is the default implementation used by the `entry_to_map` config
-  option. Override it by providing a custom function in middleware config:
-
-      {Sagents.Middleware.FileSystem, [
-        filesystem_scope: {:project, project_id},
-        entry_to_map: &MyApp.custom_entry_to_map/1
-      ]}
-  """
-  @spec default_entry_to_map(FileEntry.t()) :: map()
-  def default_entry_to_map(%FileEntry{} = entry) do
-    %{
-      path: entry.path,
-      title: entry.title,
-      entry_type: entry.entry_type,
-      file_type: entry.file_type,
-      persistence: entry.persistence,
-      size: entry.metadata && entry.metadata.size
-    }
-    |> maybe_add_field(:id, entry.id)
-  end
-
-  @doc """
-  Conditionally adds a key-value pair to a map. If the value is nil, the map
-  is returned unchanged. Useful as a helper when building custom `entry_to_map`
-  functions.
-
-  ## Example
-
-      Sagents.Middleware.FileSystem.default_entry_to_map(entry)
-      |> Sagents.Middleware.FileSystem.maybe_add_field(:tags, custom["tags"])
-  """
-  @spec maybe_add_field(map(), atom(), any()) :: map()
-  def maybe_add_field(map, _key, nil), do: map
-  def maybe_add_field(map, key, value), do: Map.put(map, key, value)
-
   # Tool builders
 
-  defp build_ls_tool(config) do
+  defp build_list_files_tool(config) do
     default_description = """
-    Lists files in the filesystem, optionally filtering by pattern or directory.
+    Lists files in the filesystem, optionally filtering by wildcard pattern.
 
-    Usage:
-    - The list_files tool will return a list of the files in the filesystem.
-    - You can optionally provide a path parameter to list files in a specific directory.
-    - You can optionally provide a pattern parameter to filter the files by pattern.
-    - This is very useful for exploring the file system and finding the right file to read or edit.
-    - You should almost ALWAYS use this tool before using the read or edit tools.
+    Returns a JSON array of file entries with metadata (path, title, file_type, size, etc.).
 
-    Optionally filter by pattern using wildcards:
+    Wildcard patterns:
     - Use '*' to match any characters
-    - Examples: '*summary*', '*.md', '/Chapter 1/*'
+    - Examples: '*summary*', '*.md', '/reports/*'
 
-    Without a pattern, lists all files.
+    You should almost ALWAYS use this tool before using the read or replace tools.
     """
 
-    description = get_custom_description(config, "ls", default_description)
+    description = get_custom_description(config, "list_files", default_description)
 
     Function.new!(%{
-      name: "ls",
+      name: "list_files",
       description: description,
       display_text: "Listing files",
       parameters_schema: %{
@@ -337,11 +278,11 @@ defmodule Sagents.Middleware.FileSystem do
           pattern: %{
             type: "string",
             description:
-              "Optional wildcard pattern to filter files (e.g., '*summary*', '*.md', '/Chapter 1/*')"
+              "Optional wildcard pattern to filter files (e.g., '*summary*', '*.md', '/reports/*')"
           }
         }
       },
-      function: fn args, context -> execute_ls_tool(args, context, config) end
+      function: fn args, context -> execute_list_files_tool(args, context, config) end
     })
   end
 
@@ -383,26 +324,26 @@ defmodule Sagents.Middleware.FileSystem do
     })
   end
 
-  defp build_write_file_tool(config) do
+  defp build_create_file_tool(config) do
     default_description = """
-    Write content to a file (creates new files only).
+    Create a new file with content.
 
-    This tool creates new files. If the file already exists, an error will be returned.
-    Use edit_file to modify existing files.
+    This tool only creates new files. If the file already exists, an error will be
+    returned — use replace_text or replace_lines to modify existing files instead.
     """
 
-    description = get_custom_description(config, "write_file", default_description)
+    description = get_custom_description(config, "create_file", default_description)
 
     Function.new!(%{
-      name: "write_file",
+      name: "create_file",
       description: description,
-      display_text: "Writing file",
+      display_text: "Creating file",
       parameters_schema: %{
         type: "object",
         properties: %{
           file_path: %{
             type: "string",
-            description: "Path where the file should be written"
+            description: "Path where the file should be created"
           },
           content: %{
             type: "string",
@@ -411,25 +352,27 @@ defmodule Sagents.Middleware.FileSystem do
         },
         required: ["file_path", "content"]
       },
-      function: fn args, context -> execute_write_file_tool(args, context, config) end
+      function: fn args, context -> execute_create_file_tool(args, context, config) end
     })
   end
 
-  defp build_edit_file_tool(config) do
+  defp build_replace_text_tool(config) do
     default_description = """
-    Edit a file by replacing old_string with new_string.
+    Replace a string with another string in an existing file.
 
-    Performs string replacement within the file. By default, requires
-    old_string to appear exactly once (for safety). Use replace_all: true
-    to replace multiple occurrences.
+    By default, the old_string must appear exactly once in the file (for safety).
+    Use replace_all: true to replace every occurrence.
+
+    For large block replacements where you have line numbers, prefer replace_lines —
+    it is significantly more token-efficient.
     """
 
-    description = get_custom_description(config, "edit_file", default_description)
+    description = get_custom_description(config, "replace_text", default_description)
 
     Function.new!(%{
-      name: "edit_file",
+      name: "replace_text",
       description: description,
-      display_text: "Editing file",
+      display_text: "Replacing text",
       parameters_schema: %{
         type: "object",
         properties: %{
@@ -453,7 +396,7 @@ defmodule Sagents.Middleware.FileSystem do
         },
         required: ["file_path", "old_string", "new_string"]
       },
-      function: fn args, context -> execute_edit_file_tool(args, context, config) end
+      function: fn args, context -> execute_replace_text_tool(args, context, config) end
     })
   end
 
@@ -495,10 +438,10 @@ defmodule Sagents.Middleware.FileSystem do
     - Use this to rename files or reorganize the directory structure
     - The target path must not already exist
 
-    Examples:
-    - Rename: move_file(old_path: "/draft.txt", new_path: "/final.txt")
-    - Move to directory: move_file(old_path: "/notes.txt", new_path: "/archive/notes.txt")
-    - Rename directory: move_file(old_path: "/Chapter 1", new_path: "/Part 1")
+    Examples (call with a JSON object matching the schema):
+    - Rename a file: {"old_path": "/draft.txt", "new_path": "/final.txt"}
+    - Move to a directory: {"old_path": "/notes.txt", "new_path": "/archive/notes.txt"}
+    - Rename a directory: {"old_path": "/drafts", "new_path": "/published"}
     """
 
     description = get_custom_description(config, "move_file", default_description)
@@ -539,10 +482,10 @@ defmodule Sagents.Middleware.FileSystem do
     - Set context_lines (optional, default: 0) - lines before/after to show
     - Set max_results (optional, default: 50) - limit number of results
 
-    Examples:
-    - Search single file: search_text(pattern: "TODO", file_path: "/notes.txt")
-    - Search all files: search_text(pattern: "important", case_sensitive: false)
-    - With context: search_text(pattern: "error", context_lines: 2)
+    Examples (call with a JSON object matching the schema):
+    - Search a single file: {"pattern": "TODO", "file_path": "/notes.txt"}
+    - Search all files: {"pattern": "important", "case_sensitive": false}
+    - With surrounding context: {"pattern": "error", "context_lines": 2}
     """
 
     description = get_custom_description(config, "search_text", default_description)
@@ -585,40 +528,45 @@ defmodule Sagents.Middleware.FileSystem do
     })
   end
 
-  defp build_edit_lines_tool(config) do
+  defp build_replace_lines_tool(config) do
     default_description = """
-    Edit a file by replacing a range of lines with new content.
+    Replace a range of lines (by line number) with new content. Line numbers are
+    1-based and the range is inclusive (both start_line and end_line are replaced).
 
-    This tool is more efficient than edit_file for replacing large blocks of text,
-    such as rewriting multiple paragraphs or sections. It uses line numbers instead
-    of string matching, making it more reliable for large edits.
+    This tool is significantly more token-efficient than replace_text for large
+    block replacements — you don't need to send the original content character-
+    for-character, just the line range.
 
-    Line numbers are 1-based (matching read_file output) and the range is inclusive
-    (both start_line and end_line are replaced).
+    ## Best Practices
 
-    Usage:
-    - First use read_file to see the file with line numbers
-    - Identify the start_line and end_line you want to replace
-    - Provide new_content to replace those lines
-    - The tool will replace lines [start_line, end_line] inclusive
+    - ALWAYS use read_file first to see the current line numbers. Line numbers
+      shift after every edit, so re-read between edits if you're making multiple
+      changes to the same file.
+    - Carefully verify start_line and end_line before calling. Wrong line numbers
+      will destructively replace the wrong content with no way to undo.
+    - For small, targeted edits where you know the exact text, use replace_text
+      instead — it has a built-in safety check (the old_string must match).
+    - For multi-line replacements where you have line numbers from a recent
+      read_file, this tool is the right choice.
 
-    Examples:
-    - Replace lines 10-15: edit_lines(file_path: "/doc.txt", start_line: 10, end_line: 15, new_content: "new text")
-    - Replace single line: edit_lines(file_path: "/doc.txt", start_line: 42, end_line: 42, new_content: "new line")
-    - Replace large block: edit_lines(file_path: "/story.txt", start_line: 120, end_line: 135, new_content: "...")
+    ## Examples
 
-    Best practices:
-    - Use read_file first to verify line numbers
-    - For small, targeted edits, use edit_file instead
-    - For large block replacements, this tool is more efficient
+    Call with a JSON object matching the schema:
+
+    - Replace lines 10-15:
+      {"file_path": "/doc.txt", "start_line": 10, "end_line": 15, "new_content": "new text"}
+    - Replace a single line:
+      {"file_path": "/doc.txt", "start_line": 42, "end_line": 42, "new_content": "new line"}
+    - Replace a large block:
+      {"file_path": "/notes/research.md", "start_line": 120, "end_line": 135, "new_content": "..."}
     """
 
-    description = get_custom_description(config, "edit_lines", default_description)
+    description = get_custom_description(config, "replace_lines", default_description)
 
     Function.new!(%{
-      name: "edit_lines",
+      name: "replace_lines",
       description: description,
-      display_text: "Editing file lines",
+      display_text: "Replacing lines",
       parameters_schema: %{
         type: "object",
         properties: %{
@@ -641,13 +589,49 @@ defmodule Sagents.Middleware.FileSystem do
         },
         required: ["file_path", "start_line", "end_line", "new_content"]
       },
-      function: fn args, context -> execute_edit_lines_tool(args, context, config) end
+      function: fn args, context -> execute_replace_lines_tool(args, context, config) end
+    })
+  end
+
+  defp build_update_file_attrs_tool(config) do
+    default_description = """
+    Update file attributes (title, tags, etc.) without modifying file content.
+
+    Validated against the configured file schema. Pass only the attributes you
+    want to change. Returns the updated file's JSON metadata.
+
+    To change file content use replace_text, replace_lines, or create_file —
+    never this tool.
+    """
+
+    description = get_custom_description(config, "update_file_attrs", default_description)
+
+    Function.new!(%{
+      name: "update_file_attrs",
+      description: description,
+      display_text: "Updating file attributes",
+      parameters_schema: %{
+        type: "object",
+        properties: %{
+          file_path: %{
+            type: "string",
+            description: "Path to the file to update"
+          },
+          attrs: %{
+            type: "object",
+            description: "Attributes to update. Only include fields you want to change.",
+            properties: %{}
+          }
+        },
+        required: ["file_path", "attrs"]
+      },
+      function: fn args, context -> execute_update_file_attrs_tool(args, context, config) end
     })
   end
 
   # Tool execution functions
 
-  defp execute_ls_tool(args, _context, config) do
+  defp execute_list_files_tool(args, _context, config) do
     pattern = get_arg(args, "pattern")
 
     # List all entries using FileSystemServer (returns FileEntry structs with metadata)
@@ -663,7 +647,7 @@ defmodule Sagents.Middleware.FileSystem do
         {:ok, "No files in filesystem"}
       end
     else
-      entry_maps = Enum.map(filtered_entries, &config.entry_to_map.(&1))
+      entry_maps = Enum.map(filtered_entries, &config.file_schema.to_llm_map(&1))
       {:ok, Jason.encode!(entry_maps)}
     end
   rescue
@@ -738,7 +722,7 @@ defmodule Sagents.Middleware.FileSystem do
     {:ok, result}
   end
 
-  defp execute_write_file_tool(args, _context, config) do
+  defp execute_create_file_tool(args, _context, config) do
     file_path = get_arg(args, "file_path")
     content = get_arg(args, "content")
 
@@ -752,7 +736,7 @@ defmodule Sagents.Middleware.FileSystem do
           # Check if file already exists (overwrite protection)
           if FileSystemServer.file_exists?(config.filesystem_scope, normalized_path) do
             {:error,
-             "File already exists: #{normalized_path}. Use edit_file to modify existing files."}
+             "File already exists: #{normalized_path}. Use replace_text or replace_lines to modify existing files."}
           else
             # Write file using FileSystemServer
             case FileSystemServer.write_file(
@@ -761,7 +745,7 @@ defmodule Sagents.Middleware.FileSystem do
                    content
                  ) do
               {:ok, entry} ->
-                {:ok, Jason.encode!(config.entry_to_map.(entry))}
+                {:ok, Jason.encode!(config.file_schema.to_llm_map(entry))}
 
               {:error, reason} ->
                 {:error, "Failed to create file: #{inspect(reason)}"}
@@ -776,7 +760,7 @@ defmodule Sagents.Middleware.FileSystem do
       {:error, "Filesystem not available: #{Exception.message(e)}"}
   end
 
-  defp execute_edit_file_tool(args, _context, config) do
+  defp execute_replace_text_tool(args, _context, config) do
     file_path = get_arg(args, "file_path")
     old_string = get_arg(args, "old_string")
     new_string = get_arg(args, "new_string")
@@ -792,7 +776,7 @@ defmodule Sagents.Middleware.FileSystem do
           # Read current content using FileSystemServer
           case FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
             {:ok, entry} ->
-              perform_edit(
+              perform_text_replacement(
                 config.filesystem_scope,
                 normalized_path,
                 entry.content || "",
@@ -919,7 +903,7 @@ defmodule Sagents.Middleware.FileSystem do
       {:error, "Search failed: #{Exception.message(e)}"}
   end
 
-  defp execute_edit_lines_tool(args, _context, config) do
+  defp execute_replace_lines_tool(args, _context, config) do
     file_path = get_arg(args, "file_path")
     start_line = get_integer_arg(args, "start_line", nil)
     end_line = get_integer_arg(args, "end_line", nil)
@@ -945,7 +929,7 @@ defmodule Sagents.Middleware.FileSystem do
         with {:ok, normalized_path} <- validate_path(file_path),
              {:ok, entry} <-
                FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
-          perform_line_edit(
+          perform_line_replacement(
             config.filesystem_scope,
             normalized_path,
             entry.content || "",
@@ -964,6 +948,96 @@ defmodule Sagents.Middleware.FileSystem do
   rescue
     e ->
       {:error, "Edit failed: #{Exception.message(e)}"}
+  end
+
+  defp execute_update_file_attrs_tool(args, _context, config) do
+    file_path = get_arg(args, "file_path")
+    raw_attrs = get_arg(args, "attrs") || %{}
+    schema = config.file_schema
+
+    with {:ok, normalized_path} <- validate_path(file_path),
+         {:ok, _entry} <-
+           FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
+      changeset = schema.changeset(raw_attrs)
+
+      if changeset.valid? do
+        # Use only the cast-and-validated changes. Fields the LLM supplied that
+        # weren't in the schema's cast list are silently dropped here, which is
+        # the correct behaviour: the schema defines the surface area.
+        changes = changeset.changes
+
+        case apply_validated_changes(config.filesystem_scope, normalized_path, changes) do
+          :ok ->
+            {:ok, updated_entry} =
+              FileSystemServer.read_file(config.filesystem_scope, normalized_path)
+
+            {:ok, Jason.encode!(schema.to_llm_map(updated_entry))}
+
+          {:error, reason} when is_binary(reason) ->
+            {:error, reason}
+
+          {:error, reason} ->
+            {:error, "Failed to update: #{inspect(reason)}"}
+        end
+      else
+        {:error, Utils.changeset_error_to_string(changeset)}
+      end
+    else
+      {:error, :enoent} ->
+        {:error, "File not found: #{file_path}"}
+
+      {:error, reason} when is_binary(reason) ->
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, inspect(reason)}
+    end
+  rescue
+    e ->
+      {:error, "Filesystem not available: #{Exception.message(e)}"}
+  end
+
+  # Splits a validated change map into entry-level fields and custom metadata,
+  # routing each group to the appropriate FileSystemServer call. Refuses content
+  # changes outright — `update_file_attrs` is metadata-only.
+  defp apply_validated_changes(scope, path, changes) do
+    cond do
+      Map.has_key?(changes, :content) ->
+        {:error,
+         "update_file_attrs cannot modify file content. " <>
+           "Use replace_text or replace_lines to change content, " <>
+           "or create_file for new files."}
+
+      true ->
+        {entry_changes, custom_changes} = Map.split(changes, @entry_fields)
+
+        with :ok <- maybe_update_entry(scope, path, entry_changes),
+             :ok <- maybe_update_custom(scope, path, stringify_keys(custom_changes)) do
+          :ok
+        end
+    end
+  end
+
+  defp maybe_update_entry(_scope, _path, changes) when map_size(changes) == 0, do: :ok
+
+  defp maybe_update_entry(scope, path, changes) do
+    case FileSystemServer.update_entry(scope, path, changes) do
+      {:ok, _entry} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp maybe_update_custom(_scope, _path, changes) when map_size(changes) == 0, do: :ok
+
+  defp maybe_update_custom(scope, path, changes) do
+    case FileSystemServer.update_custom_metadata(scope, path, changes) do
+      {:ok, _entry} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp stringify_keys(map) do
+    Map.new(map, fn {k, v} -> {to_string(k), v} end)
   end
 
   defp search_single_file(filesystem_scope, file_path, regex, context_lines, max_results) do
@@ -1139,7 +1213,14 @@ defmodule Sagents.Middleware.FileSystem do
     lines
   end
 
-  defp perform_edit(filesystem_scope, file_path, content, old_string, new_string, replace_all) do
+  defp perform_text_replacement(
+         filesystem_scope,
+         file_path,
+         content,
+         old_string,
+         new_string,
+         replace_all
+       ) do
     # Split to count occurrences
     parts = String.split(content, old_string, parts: :infinity)
     occurrence_count = length(parts) - 1
@@ -1186,7 +1267,14 @@ defmodule Sagents.Middleware.FileSystem do
     end
   end
 
-  defp perform_line_edit(filesystem_scope, file_path, content, start_line, end_line, new_content) do
+  defp perform_line_replacement(
+         filesystem_scope,
+         file_path,
+         content,
+         start_line,
+         end_line,
+         new_content
+       ) do
     lines = String.split(content, "\n")
     total_lines = length(lines)
 

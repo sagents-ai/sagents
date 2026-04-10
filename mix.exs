@@ -113,6 +113,7 @@ defmodule Sagents.MixProject do
           Sagents.FileSystem,
           Sagents.FileSystemServer,
           Sagents.FileSystem.FileEntry,
+          Sagents.FileSystem.FileSchema,
           Sagents.FileSystem.FileMetadata,
           Sagents.FileSystem.FileSystemConfig,
           Sagents.FileSystem.FileSystemState,
