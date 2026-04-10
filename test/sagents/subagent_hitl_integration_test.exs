@@ -23,6 +23,8 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
   use ExUnit.Case, async: false
   use Mimic
 
+  import Sagents.TestingHelpers, only: [wait_until: 1]
+
   alias Sagents.{Agent, State}
   alias Sagents.SubAgent
   alias Sagents.SubAgentServer
@@ -195,7 +197,11 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
       refute has_remaining_interrupt
 
       # SubAgentServer should be stopped (D.1)
-      assert SubAgentServer.whereis(interrupt_data.sub_agent_id) == nil
+      # The Registry processes its :DOWN message asynchronously after
+      # GenServer.stop returns, so poll briefly until the entry clears.
+      assert wait_until(fn ->
+               SubAgentServer.whereis(interrupt_data.sub_agent_id) == nil
+             end)
 
       # Final state should have the parent's completion message
       last_msg = List.last(final_state.messages)
@@ -387,10 +393,12 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
       # Kill the SubAgentServer process manually
       pid = SubAgentServer.whereis(sub_agent_id)
       assert pid != nil
+      ref = Process.monitor(pid)
       Process.exit(pid, :kill)
-      # Wait for process to die
-      Process.sleep(50)
-      assert SubAgentServer.whereis(sub_agent_id) == nil
+      # Wait for the process to actually die, then for the Registry to
+      # process its :DOWN message and clear the entry.
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000
+      assert wait_until(fn -> SubAgentServer.whereis(sub_agent_id) == nil end)
 
       # Resume → should handle the dead process gracefully
       assert {:ok, final_state} = Agent.resume(agent, interrupted_state, [%{type: :approve}])
