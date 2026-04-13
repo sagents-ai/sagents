@@ -719,6 +719,10 @@ defmodule Sagents.SubAgent do
       field :name, :string
       field :description, :string
       field :system_prompt, :string
+      field :instructions, :string
+      field :system_prompt_override, :string
+      field :use_instructions, :string
+      field :display_text, :string
       field :tools, {:array, :any}, default: [], virtual: true
       field :model, :any, virtual: true
       field :middleware, {:array, :any}, default: [], virtual: true
@@ -729,7 +733,11 @@ defmodule Sagents.SubAgent do
     @type t :: %Config{
             name: String.t(),
             description: String.t(),
-            system_prompt: String.t(),
+            system_prompt: String.t() | nil,
+            instructions: String.t() | nil,
+            system_prompt_override: String.t() | nil,
+            use_instructions: String.t() | nil,
+            display_text: String.t() | nil,
             tools: [LangChain.Function.t()],
             model: term() | nil,
             middleware: list(),
@@ -743,18 +751,27 @@ defmodule Sagents.SubAgent do
         :name,
         :description,
         :system_prompt,
+        :instructions,
+        :system_prompt_override,
+        :use_instructions,
+        :display_text,
         :tools,
         :model,
         :middleware,
         :interrupt_on,
         :until_tool
       ])
-      |> validate_required([:name, :description, :system_prompt, :tools])
+      |> validate_required([:name, :description, :tools])
       |> validate_length(:name, min: 1, max: 100)
       |> validate_length(:description, min: 1, max: 500)
       |> validate_length(:system_prompt, min: 1, max: 10_000)
+      |> validate_length(:instructions, min: 1, max: 10_000)
+      |> validate_length(:system_prompt_override, min: 1, max: 10_000)
+      |> validate_length(:use_instructions, min: 1, max: 10_000)
+      |> validate_length(:display_text, min: 1, max: 200)
       |> validate_tools()
       |> validate_until_tool()
+      |> validate_prompt_source()
       |> apply_action(:insert)
     end
 
@@ -822,6 +839,29 @@ defmodule Sagents.SubAgent do
     end
 
     defp validate_tool_names_exist(changeset, _names, _tools), do: changeset
+
+    # At least one of system_prompt, instructions, or system_prompt_override
+    # must be present so the sub-agent has *some* task framing beyond the
+    # boilerplate.
+    defp validate_prompt_source(changeset) do
+      sources = [:system_prompt, :instructions, :system_prompt_override]
+      any_present? = Enum.any?(sources, &present?(get_field(changeset, &1)))
+
+      if any_present? do
+        changeset
+      else
+        add_error(
+          changeset,
+          :system_prompt,
+          "at least one of :system_prompt, :instructions, or :system_prompt_override must be set"
+        )
+      end
+    end
+
+    defp present?(nil), do: false
+    defp present?(""), do: false
+    defp present?(str) when is_binary(str), do: true
+    defp present?(_), do: false
   end
 
   defmodule Compiled do
@@ -837,6 +877,8 @@ defmodule Sagents.SubAgent do
     embedded_schema do
       field :name, :string
       field :description, :string
+      field :use_instructions, :string
+      field :display_text, :string
       field :agent, :any, virtual: true
       field :extract_result, :any, virtual: true
       field :initial_messages, {:array, :any}, default: [], virtual: true
@@ -845,6 +887,8 @@ defmodule Sagents.SubAgent do
     @type t :: %Compiled{
             name: String.t(),
             description: String.t(),
+            use_instructions: String.t() | nil,
+            display_text: String.t() | nil,
             agent: Sagents.Agent.t(),
             extract_result: (State.t() -> any()) | nil,
             initial_messages: [LangChain.Message.t()]
@@ -852,10 +896,20 @@ defmodule Sagents.SubAgent do
 
     def new(attrs) do
       %Compiled{}
-      |> cast(attrs, [:name, :description, :agent, :extract_result, :initial_messages])
+      |> cast(attrs, [
+        :name,
+        :description,
+        :use_instructions,
+        :display_text,
+        :agent,
+        :extract_result,
+        :initial_messages
+      ])
       |> validate_required([:name, :description, :agent])
       |> validate_length(:name, min: 1, max: 100)
       |> validate_length(:description, min: 1, max: 500)
+      |> validate_length(:use_instructions, min: 1, max: 10_000)
+      |> validate_length(:display_text, min: 1, max: 200)
       |> validate_agent()
       |> validate_extract_result()
       |> validate_initial_messages()
@@ -1033,6 +1087,42 @@ defmodule Sagents.SubAgent do
 
   ## Private Functions
 
+  # Universal framing for task-style sub-agents. Prepended to every Config-path
+  # sub-agent's system prompt so authors can focus on task specifics in
+  # `instructions`. Overridable via `system_prompt_override`.
+  @task_subagent_boilerplate """
+  You are a sub-agent invoked by to perform a specific, bounded task. You have access to tools. Focus on completing the task you've been given.
+
+  - You must complete the task and return a result, or fail and return a clear error. Do not stall.
+  - You cannot ask the user questions. There is no user in this conversation — only the instructions you've been given.
+  - Do not request clarification. Make the best decision with the information you have and report what you did.
+  - When finished, return a clear, concise result suitable for the parent agent to use.
+  """
+
+  @doc false
+  def task_subagent_boilerplate, do: @task_subagent_boilerplate
+
+  @doc """
+  Compose the child agent's `base_system_prompt` from a Config.
+
+  Composition rule:
+  - Header = `system_prompt_override` (if set) else the built-in boilerplate.
+  - Body = `instructions` (if set) else `system_prompt` (legacy) else "".
+
+  The header and body are joined with a blank line. Middleware-contributed
+  prompt fragments are appended later by the normal `Sagents.Agent` compile
+  path — this function does not handle those.
+  """
+  def compose_child_system_prompt(%Config{} = cfg) do
+    header = cfg.system_prompt_override || @task_subagent_boilerplate
+    body = cfg.instructions || cfg.system_prompt || ""
+
+    [header, body]
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n\n")
+  end
+
   defp configure_new_subagent(%Config{} = config, default_model, default_middleware) do
     # Use config's model or fall back to default
     model = config.model || default_model
@@ -1046,11 +1136,13 @@ defmodule Sagents.SubAgent do
     middleware =
       Sagents.Middleware.HumanInTheLoop.maybe_append(middleware, config.interrupt_on)
 
+    base_system_prompt = compose_child_system_prompt(config)
+
     # Create the agent with explicit middleware (replace defaults to avoid duplication)
     Sagents.Agent.new!(
       %{
         model: model,
-        base_system_prompt: config.system_prompt,
+        base_system_prompt: base_system_prompt,
         tools: config.tools,
         middleware: middleware
       },

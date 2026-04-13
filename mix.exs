@@ -106,6 +106,7 @@ defmodule Sagents.MixProject do
         ],
         SubAgents: [
           Sagents.SubAgent,
+          Sagents.SubAgent.Task,
           Sagents.SubAgentServer,
           Sagents.SubAgentsDynamicSupervisor
         ],
