@@ -74,9 +74,10 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       entry = Map.get(new_state.files, path)
       assert entry.path == path
       assert entry.content == content
-      assert entry.persistence == :memory
       assert entry.loaded == true
-      assert entry.dirty_content == false
+      # No persistence config matched, so dirty flag is irrelevant; the
+      # state machine never tries to flush a memory-only file.
+      refute Map.has_key?(new_state.debounce_timers, path)
     end
 
     test "writes a new persisted file and persists immediately", %{state: state} do
@@ -99,7 +100,6 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       # Verify file is in state
       assert Map.has_key?(new_state.files, path)
       entry = Map.get(new_state.files, path)
-      assert entry.persistence == :persisted
       # New files are persisted immediately, so dirty is false
       assert entry.dirty_content == false
       assert entry.loaded == true
@@ -131,7 +131,6 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
                FileSystemState.write_file(state, path, "updated content", [])
 
       entry = Map.get(new_state.files, path)
-      assert entry.persistence == :persisted
       assert entry.dirty_content == true
       assert entry.loaded == true
 
@@ -184,19 +183,19 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       assert Map.has_key?(state.files, "/new")
     end
 
-    test "moves a directory and its children", %{state: state} do
-      {:ok, _dir, state} = FileSystemState.create_directory(state, "/parent")
-      {:ok, _file, state} = FileSystemState.write_file(state, "/parent/child", "child content")
+    test "moves all files under a path prefix", %{state: state} do
+      {:ok, _file1, state} = FileSystemState.write_file(state, "/parent/child", "child content")
+      {:ok, _file2, state} = FileSystemState.write_file(state, "/parent/other", "other content")
 
       {:ok, moved, state} = FileSystemState.move_file(state, "/parent", "/renamed")
 
       paths = Enum.map(moved, & &1.path)
-      assert "/renamed" in paths
       assert "/renamed/child" in paths
-      refute Map.has_key?(state.files, "/parent")
+      assert "/renamed/other" in paths
       refute Map.has_key?(state.files, "/parent/child")
-      assert Map.has_key?(state.files, "/renamed")
+      refute Map.has_key?(state.files, "/parent/other")
       assert Map.has_key?(state.files, "/renamed/child")
+      assert Map.has_key?(state.files, "/renamed/other")
     end
 
     test "returns error for non-existent path", %{state: state} do
@@ -439,12 +438,13 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
 
       # Files at any path should be persisted via the default config
       assert {:ok, _entry, state} = FileSystemState.write_file(state, "/notes.txt", "notes", [])
-      assert state.files["/notes.txt"].persistence == :persisted
+      # Default config matched, so write was persisted (dirty cleared)
+      assert state.files["/notes.txt"].dirty_content == false
 
       assert {:ok, _entry, state} =
                FileSystemState.write_file(state, "/deep/nested/file.md", "deep", [])
 
-      assert state.files["/deep/nested/file.md"].persistence == :persisted
+      assert state.files["/deep/nested/file.md"].dirty_content == false
     end
 
     test "mixed: specific config + default without base_directory", %{state: state} do
@@ -479,13 +479,13 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
       assert {:ok, _entry, state} =
                FileSystemState.write_file(state, "/Memories/note.txt", "memory", [])
 
-      assert state.files["/Memories/note.txt"].persistence == :persisted
+      assert state.files["/Memories/note.txt"].dirty_content == false
 
       # Files elsewhere go to default config (persisted)
       assert {:ok, _entry, state} =
                FileSystemState.write_file(state, "/other/file.txt", "other", [])
 
-      assert state.files["/other/file.txt"].persistence == :persisted
+      assert state.files["/other/file.txt"].dirty_content == false
     end
 
     test "default + readonly override", %{state: state} do
@@ -519,7 +519,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
 
       # Writing to default path succeeds
       assert {:ok, _entry, state} = FileSystemState.write_file(state, "/notes.txt", "notes", [])
-      assert state.files["/notes.txt"].persistence == :persisted
+      assert state.files["/notes.txt"].dirty_content == false
 
       # Writing to readonly path is rejected
       assert {:error, reason, _state} =
@@ -567,13 +567,13 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
 
       stats = FileSystemState.stats(state)
 
-      # 4 files + 2 auto-created ancestor directories (/scratch, /Memories)
-      assert stats.total_files == 6
-      # 2 scratch files + auto-created /scratch directory
-      assert stats.memory_files == 3
-      # 2 Memories files + auto-created /Memories directory
-      assert stats.persisted_files == 3
-      # New files and directories are persisted immediately, so no dirty files
+      # 4 files total (directories are no longer stored as entries)
+      assert stats.total_files == 4
+      # 2 scratch files (no matching config)
+      assert stats.memory_files == 2
+      # 2 Memories files (matching config)
+      assert stats.persisted_files == 2
+      # New files are persisted immediately, so no dirty files
       assert stats.dirty_files == 0
     end
   end
@@ -753,20 +753,18 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
 
       state = add_persistence_config(state, TestPersistenceMetadata)
 
-      # Create file with custom metadata
+      # Create file with a specific mime_type
       {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "initial",
-          custom: %{"tags" => ["draft"]}
-        )
+        FileSystemState.write_file(state, "/Memories/doc.txt", "initial", mime_type: "text/plain")
 
-      assert state.files["/Memories/doc.txt"].metadata.custom == %{"tags" => ["draft"]}
+      assert state.files["/Memories/doc.txt"].metadata.mime_type == "text/plain"
 
-      # Update content — custom metadata should be preserved
+      # Update content — mime_type should be preserved
       {:ok, entry, _state} =
         FileSystemState.write_file(state, "/Memories/doc.txt", "updated content", [])
 
       assert entry.content == "updated content"
-      assert entry.metadata.custom == %{"tags" => ["draft"]}
+      assert entry.metadata.mime_type == "text/plain"
     end
 
     test "returns the entry in the result", %{state: state} do
@@ -775,7 +773,6 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
 
       assert entry.path == "/scratch/test.txt"
       assert entry.content == "hello"
-      assert entry.entry_type == :file
     end
   end
 
@@ -802,455 +799,6 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
     end
   end
 
-  describe "update_custom_metadata/4" do
-    setup do
-      agent_id = "test_agent_#{System.unique_integer([:positive])}"
-      {:ok, state} = FileSystemState.new(scope_key: {:agent, agent_id})
-      %{state: state}
-    end
-
-    test "updates custom metadata on existing file", %{state: state} do
-      {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
-
-      {:ok, updated, _state} =
-        FileSystemState.update_custom_metadata(state, "/test.txt", %{"tags" => ["important"]})
-
-      assert updated.metadata.custom == %{"tags" => ["important"]}
-    end
-
-    test "merges with existing custom metadata", %{state: state} do
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/test.txt", "data", custom: %{"author" => "Alice"})
-
-      {:ok, updated, _state} =
-        FileSystemState.update_custom_metadata(state, "/test.txt", %{"tags" => ["draft"]})
-
-      assert updated.metadata.custom == %{"author" => "Alice", "tags" => ["draft"]}
-    end
-
-    test "returns error for nonexistent file", %{state: state} do
-      assert {:error, :enoent, _state} =
-               FileSystemState.update_custom_metadata(state, "/nope.txt", %{})
-    end
-
-    test "persists immediately by default", %{state: state} do
-      state = add_persistence_config(state, TestPersistMetaRouting)
-
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
-
-      # File is clean after immediate persist
-      assert state.files["/Memories/doc.txt"].dirty_content == false
-
-      # Update metadata — persists immediately by default
-      {:ok, updated, state} =
-        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]})
-
-      # Entry should be clean (persisted immediately), no debounce timer
-      assert updated.dirty_content == false
-      assert updated.dirty_non_content == false
-      refute Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
-    end
-
-    test "sets dirty_non_content before persist on persisted file", %{state: state} do
-      state = add_persistence_config(state, TestPersistNoMetaCallback)
-
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
-
-      # File is clean after immediate persist
-      assert state.files["/Memories/doc.txt"].dirty_non_content == false
-
-      # With debounce, we can observe the dirty flags before persist fires
-      {:ok, _updated, state} =
-        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]},
-          persist: :debounce
-        )
-
-      entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty_content == true
-      assert entry.dirty_non_content == true
-    end
-
-    test "write_file does not set dirty_non_content", %{state: state} do
-      state = add_persistence_config(state, TestPersistNoMetaCallback)
-
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "initial", [])
-
-      # Clean after immediate persist
-      entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty_non_content == false
-
-      # Content write sets dirty but not dirty_non_content
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "updated", [])
-
-      entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty_content == true
-      assert entry.dirty_non_content == false
-    end
-
-    test "persist: :debounce schedules timer instead of persisting immediately", %{state: state} do
-      state = add_persistence_config(state, TestPersistMetaRouting)
-
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
-
-      # Update metadata with debounce
-      {:ok, _updated, state} =
-        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]},
-          persist: :debounce
-        )
-
-      # Entry should still be dirty — debounce timer pending
-      entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty_content == true
-      assert entry.dirty_non_content == true
-      assert Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
-    end
-
-    test "memory-only file is unaffected by persist option", %{state: state} do
-      # No persistence config — file lives in memory only
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/scratch/tmp.txt", "data", [])
-
-      {:ok, updated, state} =
-        FileSystemState.update_custom_metadata(state, "/scratch/tmp.txt", %{"key" => "val"})
-
-      # Metadata was applied but entry stays in memory (no persist, no timers)
-      assert updated.metadata.custom == %{"key" => "val"}
-      assert state.debounce_timers == %{}
-    end
-
-    test "immediate persist clears pending debounce timer",
-         %{state: state} do
-      state = add_persistence_config(state, TestPersistMetaRouting)
-
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
-
-      # First update with debounce — schedules timer
-      {:ok, _updated, state} =
-        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"a" => 1},
-          persist: :debounce
-        )
-
-      assert Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
-
-      # Second update with default (immediate) — should persist and clear timer
-      {:ok, _updated, state} =
-        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"b" => 2})
-
-      entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty_content == false
-      refute Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
-    end
-  end
-
-  describe "update_entry/4" do
-    setup do
-      agent_id = "test_agent_#{System.unique_integer([:positive])}"
-      {:ok, state} = FileSystemState.new(scope_key: {:agent, agent_id})
-      %{state: state}
-    end
-
-    test "updates title", %{state: state} do
-      {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
-
-      {:ok, updated, _state} =
-        FileSystemState.update_entry(state, "/test.txt", %{title: "New Title"})
-
-      assert updated.title == "New Title"
-    end
-
-    test "updates id", %{state: state} do
-      {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
-
-      {:ok, updated, _state} =
-        FileSystemState.update_entry(state, "/test.txt", %{id: "abc-123"})
-
-      assert updated.id == "abc-123"
-    end
-
-    test "updates file_type", %{state: state} do
-      {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
-
-      {:ok, updated, _state} =
-        FileSystemState.update_entry(state, "/test.txt", %{file_type: "json"})
-
-      assert updated.file_type == "json"
-    end
-
-    test "updates multiple attrs at once", %{state: state} do
-      {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
-
-      {:ok, updated, _state} =
-        FileSystemState.update_entry(state, "/test.txt", %{
-          title: "Doc",
-          id: "x",
-          file_type: "pdf"
-        })
-
-      assert updated.title == "Doc"
-      assert updated.id == "x"
-      assert updated.file_type == "pdf"
-    end
-
-    test "no-op when attrs match current values", %{state: state} do
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/test.txt", "data", title: "Same")
-
-      {:ok, updated, new_state} =
-        FileSystemState.update_entry(state, "/test.txt", %{title: "Same"})
-
-      assert updated.title == "Same"
-      # No dirty marking since nothing changed
-      assert updated.dirty_content == false
-      assert new_state.debounce_timers == %{}
-    end
-
-    test "returns error for nonexistent file", %{state: state} do
-      assert {:error, :enoent, _state} =
-               FileSystemState.update_entry(state, "/nope.txt", %{title: "X"})
-    end
-
-    test "returns error for readonly directory", %{state: state} do
-      {:ok, config} =
-        FileSystemConfig.new(%{
-          base_directory: "readonly",
-          persistence_module: TestPersistMetaRouting,
-          readonly: true
-        })
-
-      {:ok, state} = FileSystemState.register_persistence(state, config)
-
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/scratch/test.txt", "data", [])
-
-      # Write a file outside readonly, then try to update one inside
-      # Need to have a file in readonly first — but can't write to readonly.
-      # So test the error path directly:
-      assert {:error, msg, _state} =
-               FileSystemState.update_entry(state, "/readonly/file.txt", %{title: "X"})
-
-      # File doesn't exist in readonly, so we get enoent
-      assert msg == :enoent
-    end
-
-    test "persists immediately by default", %{state: state} do
-      state = add_persistence_config(state, TestPersistMetaRouting)
-
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
-
-      {:ok, updated, state} =
-        FileSystemState.update_entry(state, "/Memories/doc.txt", %{title: "Renamed"})
-
-      assert updated.title == "Renamed"
-      assert updated.dirty_content == false
-      assert updated.dirty_non_content == false
-      refute Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
-    end
-
-    test "persist: :debounce schedules timer", %{state: state} do
-      state = add_persistence_config(state, TestPersistMetaRouting)
-
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
-
-      {:ok, _updated, state} =
-        FileSystemState.update_entry(state, "/Memories/doc.txt", %{title: "Renamed"},
-          persist: :debounce
-        )
-
-      entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty_content == true
-      assert entry.dirty_non_content == true
-      assert Map.has_key?(state.debounce_timers, "/Memories/doc.txt")
-    end
-
-    test "memory-only file: no persist, no timers", %{state: state} do
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/scratch/tmp.txt", "data", [])
-
-      {:ok, updated, state} =
-        FileSystemState.update_entry(state, "/scratch/tmp.txt", %{title: "Temp"})
-
-      assert updated.title == "Temp"
-      assert state.debounce_timers == %{}
-    end
-
-    test "ignores unknown keys in attrs", %{state: state} do
-      {:ok, _entry, state} = FileSystemState.write_file(state, "/test.txt", "data", [])
-
-      {:ok, updated, _state} =
-        FileSystemState.update_entry(state, "/test.txt", %{
-          title: "New",
-          content: "hack",
-          path: "/bad"
-        })
-
-      assert updated.title == "New"
-      # content and path should be unchanged
-      assert updated.content == "data"
-      assert updated.path == "/test.txt"
-    end
-  end
-
-  describe "persist_file/2" do
-    setup do
-      agent_id = "test_agent_#{System.unique_integer([:positive])}"
-      {:ok, state} = FileSystemState.new(scope_key: {:agent, agent_id})
-      %{state: state}
-    end
-
-    test "calls update_metadata_in_storage when dirty_non_content is true", %{state: state} do
-      state = add_persistence_config(state, TestPersistMetaRouting)
-
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
-
-      # Update metadata only (debounce so we can manually persist)
-      {:ok, _updated, state} =
-        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]},
-          persist: :debounce
-        )
-
-      # Verify entry has dirty_non_content before persist
-      assert state.files["/Memories/doc.txt"].dirty_non_content == true
-
-      # Manually persist (simulating debounce fire)
-      state = FileSystemState.persist_file(state, "/Memories/doc.txt")
-
-      # After persist, entry should be clean
-      entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty_content == false
-      assert entry.dirty_non_content == false
-    end
-
-    test "calls write_to_storage when dirty_non_content is false", %{state: state} do
-      state = add_persistence_config(state, TestPersistMetaRouting)
-
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "initial", [])
-
-      # Content write (not metadata-only)
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "updated", [])
-
-      # dirty but NOT dirty_non_content
-      assert state.files["/Memories/doc.txt"].dirty_content == true
-      assert state.files["/Memories/doc.txt"].dirty_non_content == false
-
-      state = FileSystemState.persist_file(state, "/Memories/doc.txt")
-
-      entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty_content == false
-    end
-
-    test "content write after metadata update resets dirty_non_content and uses write_to_storage",
-         %{state: state} do
-      state = add_persistence_config(state, TestPersistMetaRouting)
-
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "initial", [])
-
-      # Metadata-only update sets dirty_non_content (debounce so it stays dirty)
-      {:ok, _updated, state} =
-        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]},
-          persist: :debounce
-        )
-
-      assert state.files["/Memories/doc.txt"].dirty_non_content == true
-
-      # Content write should reset dirty_non_content
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "new content", [])
-
-      assert state.files["/Memories/doc.txt"].dirty_content == true
-      assert state.files["/Memories/doc.txt"].dirty_non_content == false
-
-      # Persist should use write_to_storage (full write), not update_metadata_in_storage
-      state = FileSystemState.persist_file(state, "/Memories/doc.txt")
-
-      entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty_content == false
-      assert entry.content == "new content"
-    end
-
-    test "falls back to write_to_storage when module lacks update_metadata_in_storage",
-         %{state: state} do
-      state = add_persistence_config(state, TestPersistNoMetaCallback)
-
-      {:ok, _entry, state} =
-        FileSystemState.write_file(state, "/Memories/doc.txt", "data", [])
-
-      # Metadata update — but module doesn't implement the callback (debounce so it stays dirty)
-      {:ok, _updated, state} =
-        FileSystemState.update_custom_metadata(state, "/Memories/doc.txt", %{"tags" => ["a"]},
-          persist: :debounce
-        )
-
-      assert state.files["/Memories/doc.txt"].dirty_non_content == true
-
-      # Should still succeed — falls back to write_to_storage
-      state = FileSystemState.persist_file(state, "/Memories/doc.txt")
-
-      entry = state.files["/Memories/doc.txt"]
-      assert entry.dirty_content == false
-    end
-  end
-
-  describe "create_directory/3" do
-    setup do
-      agent_id = "test_agent_#{System.unique_integer([:positive])}"
-      {:ok, state} = FileSystemState.new(scope_key: {:agent, agent_id})
-      %{state: state}
-    end
-
-    test "creates a directory entry", %{state: state} do
-      {:ok, entry, state} =
-        FileSystemState.create_directory(state, "/Characters", title: "Characters")
-
-      assert entry.entry_type == :directory
-      assert entry.title == "Characters"
-      assert entry.content == nil
-      assert Map.has_key?(state.files, "/Characters")
-    end
-
-    test "rejects duplicate paths", %{state: state} do
-      {:ok, _entry, state} = FileSystemState.create_directory(state, "/Characters")
-
-      assert {:error, :already_exists, _state} =
-               FileSystemState.create_directory(state, "/Characters")
-    end
-
-    test "creates memory directory without persistence config", %{state: state} do
-      {:ok, entry, _state} = FileSystemState.create_directory(state, "/temp")
-      assert entry.persistence == :memory
-    end
-
-    test "creates persisted directory with persistence config", %{state: state} do
-      defmodule TestPersistenceDir do
-        @behaviour Sagents.FileSystem.Persistence
-
-        def write_to_storage(entry, _opts), do: {:ok, %{entry | dirty_content: false}}
-        def load_from_storage(_entry, _opts), do: {:error, :enoent}
-        def delete_from_storage(_entry, _opts), do: :ok
-        def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
-      end
-
-      state = add_persistence_config(state, TestPersistenceDir)
-
-      {:ok, entry, _state} =
-        FileSystemState.create_directory(state, "/Memories/Chapters", title: "Chapters")
-
-      assert entry.persistence == :persisted
-      assert entry.dirty_content == false
-    end
-  end
-
   describe "index with list_persisted_entries" do
     setup do
       agent_id = "test_agent_#{System.unique_integer([:positive])}"
@@ -1267,272 +815,18 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
         def delete_from_storage(_entry, _opts), do: :ok
 
         def list_persisted_entries(_agent_id, _opts) do
-          {:ok, dir} =
-            Sagents.FileSystem.FileEntry.new_indexed_file("/Memories/Characters",
-              title: "Characters",
-              entry_type: :directory
-            )
-
           {:ok, file} =
-            Sagents.FileSystem.FileEntry.new_indexed_file("/Memories/Characters/Hero",
-              title: "Hero"
-            )
+            Sagents.FileSystem.FileEntry.new_indexed_file("/Memories/Characters/Hero")
 
-          {:ok, [dir, file]}
+          {:ok, [file]}
         end
       end
 
       state = add_persistence_config(state, TestPersistenceRichIndex)
 
-      # Files should be indexed with metadata from list_persisted_entries
-      dir = state.files["/Memories/Characters"]
-      assert dir != nil
-      assert dir.title == "Characters"
-      assert dir.entry_type == :directory
-
       file = state.files["/Memories/Characters/Hero"]
       assert file != nil
-      assert file.title == "Hero"
-      assert file.entry_type == :file
-    end
-  end
-
-  describe "ancestor_paths/1" do
-    test "returns empty list for root-level files" do
-      assert FileSystemState.ancestor_paths("/notes.txt") == []
-    end
-
-    test "returns single ancestor for one-level nesting" do
-      assert FileSystemState.ancestor_paths("/Characters/Hero") == ["/Characters"]
-    end
-
-    test "returns ancestors shallowest to deepest" do
-      assert FileSystemState.ancestor_paths("/Characters/Hero/Backstory") == [
-               "/Characters",
-               "/Characters/Hero"
-             ]
-    end
-
-    test "handles deep nesting" do
-      assert FileSystemState.ancestor_paths("/a/b/c/d/file") == [
-               "/a",
-               "/a/b",
-               "/a/b/c",
-               "/a/b/c/d"
-             ]
-    end
-  end
-
-  describe "ensure_ancestor_directories/2" do
-    setup do
-      agent_id = "test_agent_#{System.unique_integer([:positive])}"
-      {:ok, state} = FileSystemState.new(scope_key: {:agent, agent_id})
-      %{state: state}
-    end
-
-    test "creates missing ancestor directories for nested path", %{state: state} do
-      state = FileSystemState.ensure_ancestor_directories(state, "/Characters/Hero/Backstory")
-
-      # Both /Characters and /Characters/Hero should be created
-      assert Map.has_key?(state.files, "/Characters")
-      assert Map.has_key?(state.files, "/Characters/Hero")
-
-      char_dir = state.files["/Characters"]
-      assert char_dir.entry_type == :directory
-      assert char_dir.title == "Characters"
-
-      hero_dir = state.files["/Characters/Hero"]
-      assert hero_dir.entry_type == :directory
-      assert hero_dir.title == "Hero"
-    end
-
-    test "does nothing for root-level files", %{state: state} do
-      new_state = FileSystemState.ensure_ancestor_directories(state, "/notes.txt")
-      assert new_state.files == state.files
-    end
-
-    test "skips directories that already exist", %{state: state} do
-      # Pre-create /Characters with custom metadata
-      {:ok, existing_dir} =
-        Sagents.FileSystem.FileEntry.new_directory("/Characters",
-          title: "My Characters",
-          custom: %{"position" => 1}
-        )
-
-      {:ok, state} = FileSystemState.register_files(state, [existing_dir])
-
-      state =
-        FileSystemState.ensure_ancestor_directories(state, "/Characters/Hero/Backstory")
-
-      # Original directory should be preserved, not overwritten
-      char_dir = state.files["/Characters"]
-      assert char_dir.title == "My Characters"
-      assert char_dir.metadata.custom == %{"position" => 1}
-
-      # But the missing /Characters/Hero should be created
-      assert Map.has_key?(state.files, "/Characters/Hero")
-      assert state.files["/Characters/Hero"].title == "Hero"
-    end
-
-    test "auto-created directories are memory by default", %{state: state} do
-      state = FileSystemState.ensure_ancestor_directories(state, "/Docs/Chapter1/Section1")
-
-      assert state.files["/Docs"].persistence == :memory
-      assert state.files["/Docs/Chapter1"].persistence == :memory
-    end
-
-    test "auto-created directories are persisted when under persistence config", %{state: state} do
-      defmodule EnsureTestPersistence do
-        @behaviour Sagents.FileSystem.Persistence
-
-        def write_to_storage(entry, _opts), do: {:ok, entry}
-        def load_from_storage(_entry, _opts), do: {:error, :enoent}
-        def delete_from_storage(_entry, _opts), do: :ok
-        def list_persisted_entries(_agent_id, _opts), do: {:ok, []}
-      end
-
-      state = add_persistence_config(state, EnsureTestPersistence)
-
-      state =
-        FileSystemState.ensure_ancestor_directories(state, "/Memories/Characters/Hero")
-
-      assert state.files["/Memories/Characters"].persistence == :persisted
-    end
-  end
-
-  describe "write_file auto-creates ancestor directories" do
-    setup do
-      agent_id = "test_agent_#{System.unique_integer([:positive])}"
-      {:ok, state} = FileSystemState.new(scope_key: {:agent, agent_id})
-      %{state: state}
-    end
-
-    test "creates missing parent directories when writing a nested file", %{state: state} do
-      assert {:ok, _entry, new_state} =
-               FileSystemState.write_file(
-                 state,
-                 "/Audience/TargetAudience",
-                 "Young adults 18-25"
-               )
-
-      # The file should exist
-      assert Map.has_key?(new_state.files, "/Audience/TargetAudience")
-
-      # The parent directory should have been auto-created
-      assert Map.has_key?(new_state.files, "/Audience")
-      dir = new_state.files["/Audience"]
-      assert dir.entry_type == :directory
-      assert dir.title == "Audience"
-    end
-
-    test "creates deeply nested ancestor directories", %{state: state} do
-      assert {:ok, _entry, new_state} =
-               FileSystemState.write_file(
-                 state,
-                 "/World/Geography/Countries/Eldoria",
-                 "A vast kingdom"
-               )
-
-      assert Map.has_key?(new_state.files, "/World")
-      assert Map.has_key?(new_state.files, "/World/Geography")
-      assert Map.has_key?(new_state.files, "/World/Geography/Countries")
-
-      assert new_state.files["/World"].title == "World"
-      assert new_state.files["/World/Geography"].title == "Geography"
-      assert new_state.files["/World/Geography/Countries"].title == "Countries"
-    end
-
-    test "does not overwrite existing directories when writing files", %{state: state} do
-      # Create a directory with custom metadata first
-      {:ok, _dir, state} =
-        FileSystemState.create_directory(state, "/Characters",
-          title: "My Characters",
-          custom: %{"position" => 5}
-        )
-
-      # Now write a file under it — should not touch the existing directory
-      {:ok, _entry, new_state} =
-        FileSystemState.write_file(state, "/Characters/Hero", "The hero")
-
-      dir = new_state.files["/Characters"]
-      assert dir.title == "My Characters"
-      assert dir.metadata.custom == %{"position" => 5}
-    end
-  end
-
-  describe "list_entries synthesizes missing directories" do
-    setup do
-      agent_id = "test_agent_#{System.unique_integer([:positive])}"
-      {:ok, state} = FileSystemState.new(scope_key: {:agent, agent_id})
-      %{state: state}
-    end
-
-    test "synthesizes parent directory for orphaned file", %{state: state} do
-      # Manually register a file without its parent directory
-      # (simulating data loaded from a DB that predates ensure_ancestor_directories)
-      {:ok, entry} =
-        Sagents.FileSystem.FileEntry.new_memory_file("/Orphaned/Document", "content")
-
-      {:ok, state} = FileSystemState.register_files(state, [entry])
-
-      # list_entries should synthesize the missing /Orphaned directory
-      entries = FileSystemState.list_entries(state)
-      paths = Enum.map(entries, & &1.path)
-
-      assert "/Orphaned" in paths
-      assert "/Orphaned/Document" in paths
-
-      orphaned_dir = Enum.find(entries, &(&1.path == "/Orphaned"))
-      assert orphaned_dir.entry_type == :directory
-      assert orphaned_dir.title == "Orphaned"
-    end
-
-    test "does not synthesize directories that already exist", %{state: state} do
-      {:ok, dir} =
-        Sagents.FileSystem.FileEntry.new_directory("/Existing", title: "My Folder")
-
-      {:ok, file} =
-        Sagents.FileSystem.FileEntry.new_memory_file("/Existing/Doc", "content")
-
-      {:ok, state} = FileSystemState.register_files(state, [dir, file])
-
-      entries = FileSystemState.list_entries(state)
-      existing_dirs = Enum.filter(entries, &(&1.path == "/Existing"))
-
-      # Should be exactly one entry, the explicit one
-      assert length(existing_dirs) == 1
-      assert hd(existing_dirs).title == "My Folder"
-    end
-
-    test "synthesizes multiple levels of missing directories", %{state: state} do
-      {:ok, entry} =
-        Sagents.FileSystem.FileEntry.new_memory_file("/A/B/C/deep_file", "content")
-
-      {:ok, state} = FileSystemState.register_files(state, [entry])
-
-      entries = FileSystemState.list_entries(state)
-      paths = Enum.map(entries, & &1.path)
-
-      assert "/A" in paths
-      assert "/A/B" in paths
-      assert "/A/B/C" in paths
-      assert "/A/B/C/deep_file" in paths
-    end
-
-    test "synthesized directories are memory-only and not in state.files", %{state: state} do
-      {:ok, entry} =
-        Sagents.FileSystem.FileEntry.new_memory_file("/Ghost/file", "content")
-
-      {:ok, state} = FileSystemState.register_files(state, [entry])
-
-      # Synthesized directories should NOT be in state.files
-      refute Map.has_key?(state.files, "/Ghost")
-
-      # But should appear in list_entries
-      entries = FileSystemState.list_entries(state)
-      ghost_dir = Enum.find(entries, &(&1.path == "/Ghost"))
-      assert ghost_dir != nil
-      assert ghost_dir.persistence == :memory
+      assert file.loaded == false
     end
   end
 end

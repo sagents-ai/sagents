@@ -19,7 +19,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
 
   describe "write_to_storage/2" do
     test "writes file to disk", %{opts: opts, tmp_dir: tmp_dir} do
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/test.txt", "test content")
+      {:ok, entry} = FileEntry.new_file("/Memories/test.txt", "test content")
 
       assert {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
 
@@ -31,7 +31,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
 
     test "creates nested directories", %{opts: opts, tmp_dir: tmp_dir} do
       {:ok, entry} =
-        FileEntry.new_persisted_file("/Memories/deep/nested/file.txt", "nested content")
+        FileEntry.new_file("/Memories/deep/nested/file.txt", "nested content")
 
       assert {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
 
@@ -41,12 +41,12 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
     end
 
     test "overwrites existing file", %{opts: opts} do
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/test.txt", "original")
+      {:ok, entry} = FileEntry.new_file("/Memories/test.txt", "original")
 
       assert {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
 
       # Overwrite with new content
-      {:ok, updated_entry} = FileEntry.new_persisted_file("/Memories/test.txt", "updated")
+      {:ok, updated_entry} = FileEntry.new_file("/Memories/test.txt", "updated")
 
       assert {:ok, _written_entry2} = Disk.write_to_storage(updated_entry, opts)
 
@@ -57,7 +57,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
 
     test "handles unicode content", %{opts: opts} do
       unicode_content = "Hello 世界 🌍"
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/unicode.txt", unicode_content)
+      {:ok, entry} = FileEntry.new_file("/Memories/unicode.txt", unicode_content)
 
       assert {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
 
@@ -68,7 +68,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
     test "handles large content", %{opts: opts} do
       # Generate 1MB of content
       large_content = String.duplicate("a", 1_000_000)
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/large.txt", large_content)
+      {:ok, entry} = FileEntry.new_file("/Memories/large.txt", large_content)
 
       assert {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
 
@@ -80,7 +80,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
   describe "load_from_storage/2" do
     test "loads existing file", %{opts: opts} do
       content = "file content"
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/load.txt", content)
+      {:ok, entry} = FileEntry.new_file("/Memories/load.txt", content)
 
       # Write first
       {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
@@ -98,7 +98,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
 
     test "loads file from nested directory", %{opts: opts} do
       content = "nested file content"
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/a/b/c/file.txt", content)
+      {:ok, entry} = FileEntry.new_file("/Memories/a/b/c/file.txt", content)
 
       {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
 
@@ -109,7 +109,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
 
   describe "delete_from_storage/2" do
     test "deletes existing file", %{opts: opts, tmp_dir: tmp_dir} do
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/delete.txt", "content")
+      {:ok, entry} = FileEntry.new_file("/Memories/delete.txt", "content")
 
       # Write file
       {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
@@ -130,7 +130,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
     end
 
     test "deletes file from nested directory", %{opts: opts, tmp_dir: tmp_dir} do
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/a/b/file.txt", "content")
+      {:ok, entry} = FileEntry.new_file("/Memories/a/b/file.txt", "content")
 
       {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
 
@@ -150,14 +150,13 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
     end
 
     test "lists single file as FileEntry", %{agent_id: agent_id, opts: opts} do
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/file1.txt", "content")
+      {:ok, entry} = FileEntry.new_file("/Memories/file1.txt", "content")
       {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
 
       {:ok, [result]} = Disk.list_persisted_entries(agent_id, opts)
       assert %FileEntry{} = result
       assert result.path == "/Memories/file1.txt"
       assert result.loaded == false
-      assert result.persistence == :persisted
     end
 
     test "lists multiple files", %{agent_id: agent_id, opts: opts} do
@@ -168,7 +167,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
       ]
 
       for {path, content} <- files do
-        {:ok, entry} = FileEntry.new_persisted_file(path, content)
+        {:ok, entry} = FileEntry.new_file(path, content)
         {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
       end
 
@@ -189,7 +188,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
       ]
 
       for {path, content} <- files do
-        {:ok, entry} = FileEntry.new_persisted_file(path, content)
+        {:ok, entry} = FileEntry.new_file(path, content)
         {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
       end
 
@@ -210,7 +209,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
     end
 
     test "returns entries with correct path format", %{agent_id: agent_id, opts: opts} do
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/test.txt", "content")
+      {:ok, entry} = FileEntry.new_file("/Memories/test.txt", "content")
       {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
 
       {:ok, [result]} = Disk.list_persisted_entries(agent_id, opts)
@@ -224,7 +223,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
 
   describe "move_in_storage/3" do
     test "moves a file on disk", %{opts: opts, tmp_dir: tmp_dir} do
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/original.txt", "content")
+      {:ok, entry} = FileEntry.new_file("/Memories/original.txt", "content")
       {:ok, written_entry} = Disk.write_to_storage(entry, opts)
 
       assert {:ok, moved_entry} =
@@ -238,7 +237,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
     end
 
     test "creates target parent directories", %{opts: opts, tmp_dir: tmp_dir} do
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/file.txt", "content")
+      {:ok, entry} = FileEntry.new_file("/Memories/file.txt", "content")
       {:ok, written_entry} = Disk.write_to_storage(entry, opts)
 
       assert {:ok, moved_entry} =
@@ -247,26 +246,6 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
       assert moved_entry.path == "/Memories/new_dir/file.txt"
       assert File.read!(Path.join([tmp_dir, "new_dir", "file.txt"])) == "content"
       refute File.exists?(Path.join(tmp_dir, "file.txt"))
-    end
-
-    test "moves a directory on disk", %{opts: opts, tmp_dir: tmp_dir} do
-      # Create a directory with a file inside
-      {:ok, dir_entry} =
-        FileEntry.new_persisted_file("/Memories/mydir/child.txt", "child content")
-
-      {:ok, _} = Disk.write_to_storage(dir_entry, opts)
-
-      # Create directory entry
-      {:ok, entry} = FileEntry.new_indexed_file("/Memories/mydir")
-      entry = %{entry | entry_type: :directory}
-
-      assert {:ok, moved} = Disk.move_in_storage(entry, "/Memories/renamed_dir", opts)
-      assert moved.path == "/Memories/renamed_dir"
-
-      # The directory and its contents should be at the new path
-      assert File.exists?(Path.join([tmp_dir, "renamed_dir", "child.txt"]))
-      assert File.read!(Path.join([tmp_dir, "renamed_dir", "child.txt"])) == "child content"
-      refute File.exists?(Path.join(tmp_dir, "mydir"))
     end
 
     test "returns error for non-existent source", %{opts: opts} do
@@ -281,7 +260,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
       # This test verifies that path is required
       opts = []
 
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/temp.txt", "content")
+      {:ok, entry} = FileEntry.new_file("/Memories/temp.txt", "content")
 
       # Should raise KeyError because path is required
       assert_raise KeyError, fn ->
@@ -297,7 +276,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
         base_directory: "persistent"
       ]
 
-      {:ok, entry} = FileEntry.new_persisted_file("/persistent/data.txt", "data")
+      {:ok, entry} = FileEntry.new_file("/persistent/data.txt", "data")
       assert {:ok, _written_entry} = Disk.write_to_storage(entry, opts)
 
       expected_path = Path.join(tmp_dir, "data.txt")
@@ -331,7 +310,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
 
       opts = [agent_id: "test", path: readonly_dir]
 
-      {:ok, entry} = FileEntry.new_persisted_file("/Memories/test.txt", "content")
+      {:ok, entry} = FileEntry.new_file("/Memories/test.txt", "content")
 
       # Should return error (not raise)
       assert {:error, _reason} = Disk.write_to_storage(entry, opts)
@@ -348,7 +327,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
         for i <- 1..10 do
           Task.async(fn ->
             {:ok, entry} =
-              FileEntry.new_persisted_file("/Memories/file#{i}.txt", "content#{i}")
+              FileEntry.new_file("/Memories/file#{i}.txt", "content#{i}")
 
             Disk.write_to_storage(entry, opts)
           end)
@@ -368,7 +347,7 @@ defmodule Sagents.FileSystem.Persistence.DiskTest do
       tasks =
         for i <- 1..5 do
           Task.async(fn ->
-            {:ok, entry} = FileEntry.new_persisted_file(path, "content#{i}")
+            {:ok, entry} = FileEntry.new_file(path, "content#{i}")
             Disk.write_to_storage(entry, opts)
           end)
         end

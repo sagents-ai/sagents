@@ -122,10 +122,9 @@ defmodule Sagents.FileSystem.Persistence do
   List all persisted file entries for an agent.
 
   Used during initialization to index existing files with their metadata
-  (title, entry_type, custom metadata, etc.) without loading content.
+  (size, mime_type, etc.) without loading content.
 
-  Returns FileEntry structs with `content: nil, loaded: false` (for files)
-  or `loaded: true` (for directories, which have no content to load).
+  Returns FileEntry structs with `content: nil, loaded: false`.
 
   ## Parameters
 
