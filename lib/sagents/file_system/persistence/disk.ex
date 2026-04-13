@@ -75,19 +75,6 @@ defmodule Sagents.FileSystem.Persistence.Disk do
   alias Sagents.FileSystem.FileMetadata
 
   @impl true
-  def write_to_storage(%FileEntry{entry_type: :directory, path: path} = entry, opts) do
-    # Directories are persisted as actual directories on disk
-    full_path = build_file_path(path, opts)
-
-    case File.mkdir_p(full_path) do
-      :ok ->
-        {:ok, FileEntry.mark_clean(entry)}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
   def write_to_storage(%FileEntry{path: path, content: content} = entry, opts) do
     full_path = build_file_path(path, opts)
 
@@ -96,10 +83,7 @@ defmodule Sagents.FileSystem.Persistence.Disk do
          {:ok, stat} <- File.stat(full_path) do
       # Create updated metadata with actual file system information
       {:ok, metadata} =
-        FileMetadata.new(content,
-          mime_type: entry.metadata.mime_type,
-          custom: entry.metadata.custom
-        )
+        FileMetadata.new(content, mime_type: entry.metadata.mime_type)
 
       # Update metadata with actual file system timestamps
       metadata = %{metadata | created_at: stat.ctime, modified_at: stat.mtime}
@@ -120,11 +104,7 @@ defmodule Sagents.FileSystem.Persistence.Disk do
       mime_type = MIME.from_path(path)
 
       # Create metadata from the loaded content
-      {:ok, metadata} =
-        FileMetadata.new(content,
-          mime_type: mime_type,
-          custom: %{}
-        )
+      {:ok, metadata} = FileMetadata.new(content, mime_type: mime_type)
 
       # Update metadata with actual file system timestamps
       metadata = %{metadata | created_at: stat.ctime, modified_at: stat.mtime}

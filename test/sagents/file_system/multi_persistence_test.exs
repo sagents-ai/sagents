@@ -78,7 +78,6 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
                )
 
       entry = get_entry(agent_id, "/user_files/data.txt")
-      assert entry.persistence == :persisted
       # New files are persisted immediately
       assert entry.dirty_content == false
 
@@ -102,7 +101,7 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
                FileSystemServer.write_file({:agent, agent_id}, "/scratch/temp.txt", "temp data")
 
       temp_entry = get_entry(agent_id, "/scratch/temp.txt")
-      assert temp_entry.persistence == :memory
+      assert temp_entry.dirty_content == false
     end
 
     test "prevents registering same base_directory twice", %{agent_id: agent_id, tmp_dir: tmp_dir} do
@@ -296,7 +295,6 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
 
       # File should be indexed but NOT loaded
       entry = get_entry(agent_id, "/data/existing.txt")
-      assert entry.persistence == :persisted
       assert entry.loaded == false
       assert entry.content == nil
 

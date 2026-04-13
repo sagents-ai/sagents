@@ -156,14 +156,8 @@ defmodule Sagents.FileSystem.FileSystemState do
   @spec write_file(t(), String.t(), String.t(), keyword()) ::
           {:ok, FileEntry.t(), t()} | {:error, term(), t()}
   def write_file(%FileSystemState{} = state, path, content, opts \\ []) do
-    # Ensure all ancestor directories exist (like mkdir -p)
-    state = ensure_ancestor_directories(state, path)
-
-    # Build metadata opts
-    mime_type = Keyword.get(opts, :mime_type, "text/plain")
-    custom = Keyword.get(opts, :custom, %{})
-    title = Keyword.get(opts, :title)
-    metadata_opts = [mime_type: mime_type, custom: custom]
+    # Build metadata opts (mime_type only — pass through if provided)
+    metadata_opts = Keyword.take(opts, [:mime_type])
 
     # Find matching persistence config
     config = find_config_for_path(state, path)
@@ -178,28 +172,18 @@ defmodule Sagents.FileSystem.FileSystemState do
       # For existing files, update content preserving metadata.
       # For new files, create a fresh entry.
       entry_result =
-        if existing_entry && existing_entry.entry_type == :file do
-          # Update existing entry, preserving metadata.
-          # Only pass opts that were explicitly provided (not defaults)
-          # to avoid overwriting existing metadata with empty values.
-          update_opts =
-            Keyword.take(opts, [:mime_type, :custom]) |> Enum.reject(fn {_k, v} -> v == %{} end)
-
-          updated = if title, do: %{existing_entry | title: title}, else: existing_entry
-          FileEntry.update_content(updated, content, update_opts)
+        if existing_entry do
+          FileEntry.update_content(existing_entry, content, metadata_opts)
         else
-          # New file
-          create_opts = metadata_opts ++ if(title, do: [title: title], else: [])
-
-          if config do
-            FileEntry.new_persisted_file(path, content, create_opts)
-          else
-            FileEntry.new_memory_file(path, content, create_opts)
-          end
+          FileEntry.new_file(path, content, metadata_opts)
         end
 
       case entry_result do
         {:ok, entry} ->
+          # Memory-only files (no matching config) have nothing to flush;
+          # mark them clean so the dirty flag stays meaningful.
+          entry = if config, do: entry, else: FileEntry.mark_clean(entry)
+
           # Add to files map
           new_files = Map.put(state.files, path, entry)
           new_state = %{state | files: new_files}
@@ -251,182 +235,13 @@ defmodule Sagents.FileSystem.FileSystemState do
   Lists all file entries in the filesystem (without loading content).
 
   Returns entries with metadata but content NOT loaded — suitable for building
-  sidebar trees, directory listings, or LLM `ls` tool responses.
-
-  As a safety net, synthesizes directory entries for any parent paths that
-  don't have explicit entries. This prevents orphaned files from becoming
-  invisible in tree-based UIs when their parent directory was never created.
+  sidebar trees or LLM `list_files` tool responses.
   """
   @spec list_entries(t()) :: [FileEntry.t()]
   def list_entries(%FileSystemState{} = state) do
-    explicit_entries = state.files
-    synthesized = synthesize_missing_directories(explicit_entries)
-
-    Map.merge(synthesized, explicit_entries)
+    state.files
     |> Map.values()
     |> Enum.sort_by(& &1.path)
-  end
-
-  @doc """
-  Updates only the `metadata.custom` map for a file entry.
-
-  Merges the given `custom` map into the entry's existing `metadata.custom`.
-  Does not touch content or entry-level fields (use `update_entry/4` for those).
-
-  Persists immediately by default. Pass `persist: :debounce` to opt into
-  debounced persistence instead.
-
-  ## Options
-
-    * `:persist` - `:debounce` to schedule a debounced persist instead of
-      persisting immediately. Default is immediate.
-
-  Returns `{:ok, entry, new_state}` or `{:error, reason, state}`.
-  """
-  @spec update_custom_metadata(t(), String.t(), map(), keyword()) ::
-          {:ok, FileEntry.t(), t()} | {:error, term(), t()}
-  def update_custom_metadata(%FileSystemState{} = state, path, custom, opts \\ []) do
-    case Map.get(state.files, path) do
-      nil ->
-        {:error, :enoent, state}
-
-      %FileEntry{} = entry ->
-        config = find_config_for_path(state, path)
-
-        if config && config.readonly do
-          {:error, "Cannot update metadata in read-only directory: #{config.base_directory}",
-           state}
-        else
-          # Update custom metadata on the entry
-          updated_metadata =
-            if entry.metadata do
-              %{entry.metadata | custom: Map.merge(entry.metadata.custom, custom)}
-            else
-              case Sagents.FileSystem.FileMetadata.new("", custom: custom) do
-                {:ok, m} -> m
-                _ -> nil
-              end
-            end
-
-          updated_entry = %{entry | metadata: updated_metadata}
-
-          # Mark dirty if persisted (non-content change)
-          updated_entry = mark_non_content_dirty(updated_entry)
-
-          new_files = Map.put(state.files, path, updated_entry)
-          new_state = %{state | files: new_files}
-
-          # Persist (immediate by default)
-          new_state = persist_entry(new_state, path, config, entry, opts)
-
-          final_entry = Map.get(new_state.files, path)
-          {:ok, final_entry, new_state}
-        end
-    end
-  end
-
-  @doc """
-  Updates entry-level fields on a file entry via changeset.
-
-  Accepts a map of attrs with keys `:title`, `:id`, and/or `:file_type`.
-  Uses `FileEntry.update_entry_changeset/2` for validation.
-
-  Persists immediately by default. Pass `persist: :debounce` to opt into
-  debounced persistence instead.
-
-  ## Options
-
-    * `:persist` - `:debounce` to schedule a debounced persist instead of
-      persisting immediately. Default is immediate.
-
-  Returns `{:ok, entry, new_state}` or `{:error, reason, state}`.
-  """
-  @spec update_entry(t(), String.t(), map(), keyword()) ::
-          {:ok, FileEntry.t(), t()} | {:error, term(), t()}
-  def update_entry(%FileSystemState{} = state, path, attrs, opts \\ []) do
-    case Map.get(state.files, path) do
-      nil ->
-        {:error, :enoent, state}
-
-      %FileEntry{} = entry ->
-        config = find_config_for_path(state, path)
-
-        if config && config.readonly do
-          {:error, "Cannot update entry in read-only directory: #{config.base_directory}", state}
-        else
-          changeset = FileEntry.update_entry_changeset(entry, attrs)
-
-          if changeset.valid? do
-            if changeset.changes == %{} do
-              # No actual changes — return as-is without dirtying or persisting
-              {:ok, entry, state}
-            else
-              updated_entry = Ecto.Changeset.apply_changes(changeset)
-
-              # Mark dirty if persisted (non-content change)
-              updated_entry = mark_non_content_dirty(updated_entry)
-
-              new_files = Map.put(state.files, path, updated_entry)
-              new_state = %{state | files: new_files}
-
-              # Persist (immediate by default)
-              new_state = persist_entry(new_state, path, config, entry, opts)
-
-              final_entry = Map.get(new_state.files, path)
-              {:ok, final_entry, new_state}
-            end
-          else
-            {:error, changeset, state}
-          end
-        end
-    end
-  end
-
-  @doc """
-  Creates a directory entry in the filesystem.
-
-  Directories have no content and are always "loaded". They are persisted
-  immediately (like new files).
-
-  Returns `{:ok, entry, new_state}` or `{:error, reason, state}`.
-  """
-  @spec create_directory(t(), String.t(), keyword()) ::
-          {:ok, FileEntry.t(), t()} | {:error, term(), t()}
-  def create_directory(%FileSystemState{} = state, path, opts \\ []) do
-    config = find_config_for_path(state, path)
-
-    if config && config.readonly do
-      {:error, "Cannot create directory in read-only directory: #{config.base_directory}", state}
-    else
-      if Map.has_key?(state.files, path) do
-        {:error, :already_exists, state}
-      else
-        title = Keyword.get(opts, :title)
-        custom = Keyword.get(opts, :custom, %{})
-
-        persistence = if config, do: :persisted, else: :memory
-
-        case FileEntry.new_directory(path, title: title, custom: custom, persistence: persistence) do
-          {:ok, entry} ->
-            new_files = Map.put(state.files, path, entry)
-            new_state = %{state | files: new_files}
-
-            # Persist immediately for persisted directories
-            new_state =
-              if config do
-                persist_file_now(new_state, path, config)
-              else
-                new_state
-              end
-
-            final_entry = Map.get(new_state.files, path)
-            {:ok, final_entry, new_state}
-
-          {:error, reason} ->
-            {:error, reason, state}
-        end
-      end
-    end
   end
 
   @doc """
@@ -448,7 +263,7 @@ defmodule Sagents.FileSystem.FileSystemState do
           # File doesn't exist
           {:error, "File not found", state}
 
-        %FileEntry{persistence: :persisted} = entry ->
+        %FileEntry{} = entry ->
           # Cancel any pending timer
           new_state = cancel_timer(state, path)
 
@@ -469,11 +284,6 @@ defmodule Sagents.FileSystem.FileSystemState do
             new_files = Map.delete(new_state.files, path)
             {:ok, %{new_state | files: new_files}}
           end
-
-        _entry ->
-          # Memory-only file, just delete from map
-          new_files = Map.delete(state.files, path)
-          {:ok, %{state | files: new_files}}
       end
     end
   end
@@ -522,19 +332,22 @@ defmodule Sagents.FileSystem.FileSystemState do
            "The file can only be moved within #{base_dir}.", state}
 
       true ->
-        case Map.get(state.files, old_path) do
-          nil ->
+        # Collect the entry at old_path (if any) and all children under the prefix.
+        # This supports both single-file moves and bulk renames of a path prefix
+        # (the latter is what "rename a directory" reduces to once directory
+        # entries are gone).
+        affected =
+          state.files
+          |> Enum.filter(fn {path, _} ->
+            path == old_path or String.starts_with?(path, old_path <> "/")
+          end)
+          |> Enum.sort_by(fn {path, _} -> String.length(path) end)
+
+        case affected do
+          [] ->
             {:error, :enoent, state}
 
-          _root_entry ->
-            # Collect the root entry and all children
-            affected =
-              state.files
-              |> Enum.filter(fn {path, _} ->
-                path == old_path or String.starts_with?(path, old_path <> "/")
-              end)
-              |> Enum.sort_by(fn {path, _} -> String.length(path) end)
-
+          _ ->
             # Check target doesn't conflict (except with entries we're moving)
             moving_paths = MapSet.new(affected, fn {path, _} -> path end)
 
@@ -573,14 +386,10 @@ defmodule Sagents.FileSystem.FileSystemState do
           if has_move_callback do
             case config.persistence_module.move_in_storage(entry, target_path, opts) do
               {:ok, updated} -> updated
-              {:error, _reason} -> mark_non_content_dirty(moved_entry)
+              {:error, _reason} -> mark_dirty_for_persist(moved_entry)
             end
           else
-            if entry.persistence == :persisted do
-              mark_non_content_dirty(moved_entry)
-            else
-              moved_entry
-            end
+            mark_dirty_for_persist(moved_entry)
           end
 
         # Re-key in files map
@@ -598,18 +407,11 @@ defmodule Sagents.FileSystem.FileSystemState do
 
     new_state = %{state | files: new_files, debounce_timers: new_timers}
 
-    # Ensure ancestor directories for new path exist
-    new_state = ensure_ancestor_directories(new_state, new_path)
-
     # If no move callback, persist dirty entries immediately by default
     new_state =
       if not has_move_callback and config do
         Enum.reduce(moved_entries, new_state, fn entry, acc ->
-          if entry.persistence == :persisted do
-            persist_file(acc, entry.path)
-          else
-            acc
-          end
+          persist_file(acc, entry.path)
         end)
       else
         new_state
@@ -620,10 +422,6 @@ defmodule Sagents.FileSystem.FileSystemState do
 
   @doc """
   Persists a file to storage (called when debounce timer fires).
-
-  When only non-content fields changed (`dirty_non_content: true`) and the
-  persistence module implements `update_metadata_in_storage/2`, uses that
-  optimized callback. Otherwise falls back to `write_to_storage`.
 
   Returns updated state.
   """
@@ -637,17 +435,11 @@ defmodule Sagents.FileSystem.FileSystemState do
 
     # Persist the file
     case Map.get(state.files, path) do
-      %FileEntry{dirty_content: true, persistence: :persisted} = entry ->
+      %FileEntry{dirty_content: true} = entry ->
         if config do
           opts = FileSystemConfig.build_storage_opts(config, state.scope_key)
 
-          result =
-            if entry.dirty_non_content and
-                 function_exported?(config.persistence_module, :update_metadata_in_storage, 2) do
-              config.persistence_module.update_metadata_in_storage(entry, opts)
-            else
-              config.persistence_module.write_to_storage(entry, opts)
-            end
+          result = config.persistence_module.write_to_storage(entry, opts)
 
           case result do
             {:ok, updated_entry} ->
@@ -751,7 +543,7 @@ defmodule Sagents.FileSystem.FileSystemState do
         # Already loaded
         {:ok, state}
 
-      %FileEntry{loaded: false, persistence: :persisted} = entry ->
+      %FileEntry{loaded: false} = entry ->
         # File exists but not loaded, load from persistence
         config = find_config_for_path(state, path)
 
@@ -770,13 +562,9 @@ defmodule Sagents.FileSystem.FileSystemState do
               {:error, reason, state}
           end
         else
-          # No persistence config for this path - shouldn't happen for persisted files
+          # No persistence config for this path - shouldn't happen if file was indexed
           {:error, :no_persistence_config, state}
         end
-
-      %FileEntry{persistence: :memory} ->
-        # Memory-only file should always be loaded
-        {:ok, state}
     end
   end
 
@@ -797,8 +585,7 @@ defmodule Sagents.FileSystem.FileSystemState do
   @spec list_files(t()) :: [String.t()]
   def list_files(%FileSystemState{} = state) do
     state.files
-    |> Enum.reject(fn {_path, entry} -> entry.entry_type == :directory end)
-    |> Enum.map(fn {path, _entry} -> path end)
+    |> Map.keys()
     |> Enum.sort()
   end
 
@@ -827,11 +614,10 @@ defmodule Sagents.FileSystem.FileSystemState do
 
     total_files = length(all_entries)
 
-    memory_files =
-      Enum.count(all_entries, fn entry -> entry.persistence == :memory end)
-
-    persisted_files =
-      Enum.count(all_entries, fn entry -> entry.persistence == :persisted end)
+    {persisted_files, memory_files} =
+      Enum.reduce(all_entries, {0, 0}, fn entry, {p, m} ->
+        if find_config_for_path(state, entry.path), do: {p + 1, m}, else: {p, m + 1}
+      end)
 
     loaded_files = Enum.count(all_entries, fn entry -> entry.loaded end)
     not_loaded_files = Enum.count(all_entries, fn entry -> not entry.loaded end)
@@ -853,88 +639,6 @@ defmodule Sagents.FileSystem.FileSystemState do
       dirty_files: dirty_files,
       total_size: total_size
     }
-  end
-
-  @doc """
-  Ensures all ancestor directories exist for a given path.
-
-  Works like `mkdir -p`: walks the path segments and creates any missing
-  directory entries. Each auto-created directory gets its title inferred
-  from the path segment name. Directories that already exist are left
-  untouched.
-
-  Auto-created directories use the same persistence strategy as the file
-  being written (determined by `find_config_for_path`), and are persisted
-  immediately so the persistence callback can return enriched entries
-  (e.g. with a database-assigned ID).
-
-  Returns the updated state.
-  """
-  @spec ensure_ancestor_directories(t(), String.t()) :: t()
-  def ensure_ancestor_directories(%FileSystemState{} = state, path) do
-    ancestor_paths = ancestor_paths(path)
-
-    Enum.reduce(ancestor_paths, state, fn dir_path, acc_state ->
-      if Map.has_key?(acc_state.files, dir_path) do
-        # Directory already exists, skip
-        acc_state
-      else
-        # Infer title from the last segment of the path
-        title = Path.basename(dir_path)
-        config = find_config_for_path(acc_state, dir_path)
-        persistence = if config, do: :persisted, else: :memory
-
-        case FileEntry.new_directory(dir_path, title: title, persistence: persistence) do
-          {:ok, entry} ->
-            new_files = Map.put(acc_state.files, dir_path, entry)
-            new_state = %{acc_state | files: new_files}
-
-            # Persist immediately so callback can return enriched entry (with ID, etc.)
-            if config do
-              persist_file_now(new_state, dir_path, config)
-            else
-              new_state
-            end
-
-          {:error, reason} ->
-            Logger.warning("Failed to auto-create directory #{dir_path}: #{inspect(reason)}")
-
-            acc_state
-        end
-      end
-    end)
-  end
-
-  @doc """
-  Computes the ancestor directory paths for a given file path.
-
-  Returns paths from shallowest to deepest, excluding the root `/`.
-
-  ## Examples
-
-      iex> FileSystemState.ancestor_paths("/Characters/Hero/Backstory")
-      ["/Characters", "/Characters/Hero"]
-
-      iex> FileSystemState.ancestor_paths("/notes.txt")
-      []
-  """
-  @spec ancestor_paths(String.t()) :: [String.t()]
-  def ancestor_paths(path) when is_binary(path) do
-    segments =
-      path
-      |> String.split("/", trim: true)
-      # Drop the last segment (the file/leaf itself)
-      |> Enum.drop(-1)
-
-    # Build cumulative paths: ["Characters"] -> ["/Characters"]
-    # ["Characters", "Hero"] -> ["/Characters", "/Characters/Hero"]
-    {paths, _} =
-      Enum.reduce(segments, {[], ""}, fn segment, {acc, prefix} ->
-        dir_path = prefix <> "/" <> segment
-        {[dir_path | acc], dir_path}
-      end)
-
-    Enum.reverse(paths)
   end
 
   # Private helpers
@@ -1018,7 +722,7 @@ defmodule Sagents.FileSystem.FileSystemState do
   # Persist a file to storage immediately (used for new file creation).
   defp persist_file_now(%FileSystemState{} = state, path, config) do
     case Map.get(state.files, path) do
-      %FileEntry{dirty_content: true, persistence: :persisted} = entry ->
+      %FileEntry{dirty_content: true} = entry ->
         opts = FileSystemConfig.build_storage_opts(config, state.scope_key)
 
         case config.persistence_module.write_to_storage(entry, opts) do
@@ -1042,25 +746,11 @@ defmodule Sagents.FileSystem.FileSystemState do
     end
   end
 
-  # Mark an entry as dirty for non-content changes (metadata, title, etc.)
-  defp mark_non_content_dirty(%FileEntry{persistence: :persisted} = entry) do
-    %{entry | dirty_content: true, dirty_non_content: true}
-  end
-
-  defp mark_non_content_dirty(entry), do: entry
-
-  # Persist a non-content change: immediate by default, debounced if opted in.
-  # Only acts on persisted entries with a matching config.
-  defp persist_entry(state, path, config, entry, opts) do
-    if config && entry.persistence == :persisted do
-      if Keyword.get(opts, :persist) == :debounce do
-        schedule_persist(state, path, config)
-      else
-        persist_file(state, path)
-      end
-    else
-      state
-    end
+  # Mark an entry as dirty (e.g. after a path change from move). The state
+  # machine only persists dirty entries that have a matching config, so it
+  # is safe to mark all entries dirty here regardless of their backing.
+  defp mark_dirty_for_persist(%FileEntry{} = entry) do
+    %{entry | dirty_content: true}
   end
 
   defp schedule_persist(%FileSystemState{} = state, path, config) do
@@ -1083,27 +773,6 @@ defmodule Sagents.FileSystem.FileSystemState do
         Process.cancel_timer(timer_ref)
         %{state | debounce_timers: Map.delete(state.debounce_timers, path)}
     end
-  end
-
-  # Synthesize directory entries for parent paths that don't have explicit entries.
-  # This is a read-only safety net: the synthesized entries exist only in the
-  # returned list, NOT in the state.files map. They prevent orphaned files from
-  # being invisible in tree-based UIs.
-  defp synthesize_missing_directories(files_map) do
-    all_paths = Map.keys(files_map)
-
-    all_paths
-    |> Enum.flat_map(&ancestor_paths/1)
-    |> Enum.uniq()
-    |> Enum.reject(&Map.has_key?(files_map, &1))
-    |> Enum.reduce(%{}, fn dir_path, acc ->
-      title = Path.basename(dir_path)
-
-      case FileEntry.new_directory(dir_path, title: title, persistence: :memory) do
-        {:ok, entry} -> Map.put(acc, dir_path, entry)
-        {:error, _} -> acc
-      end
-    end)
   end
 
   # Index files from all registered persistence backends

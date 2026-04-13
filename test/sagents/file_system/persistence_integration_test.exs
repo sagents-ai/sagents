@@ -64,7 +64,6 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       # New file should be persisted immediately (dirty == false)
       entry = get_entry(agent_id, path)
       assert entry.content == content
-      assert entry.persistence == :persisted
       assert entry.dirty_content == false
 
       # Verify file exists on disk immediately (no debounce needed)
@@ -179,9 +178,8 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       content = "temporary content"
       assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, content)
 
-      # File should be in ETS
+      # File should be in ETS, memory-only (dirty cleared since no backend)
       entry = get_entry(agent_id, path)
-      assert entry.persistence == :memory
       assert entry.dirty_content == false
 
       # Wait longer than debounce
@@ -347,7 +345,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       FileSystemServer.write_file({:agent, agent_id}, "/persistent/data.txt", "persisted")
 
       entry = get_entry(agent_id, "/persistent/data.txt")
-      assert entry.persistence == :persisted
+      assert entry.dirty_content == false
 
       Process.sleep(150)
 
@@ -359,7 +357,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       FileSystemServer.write_file({:agent, agent_id}, "/Memories/temp.txt", "not persisted")
 
       entry2 = get_entry(agent_id, "/Memories/temp.txt")
-      assert entry2.persistence == :memory
+      assert entry2.dirty_content == false
 
       Process.sleep(150)
 
@@ -490,13 +488,13 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       FileSystemServer.write_file({:agent, agent_id}, "/Memories/persist2.txt", "data2")
 
       # New files are persisted immediately, so dirty_files == 0
-      # 3 files + 2 auto-created ancestor dirs (/scratch, /Memories)
+      # 3 files (directories are no longer stored as entries)
       {:ok, stats_after_create} = FileSystemServer.stats({:agent, agent_id})
-      assert stats_after_create.total_files == 5
-      # 1 scratch file + /scratch directory
-      assert stats_after_create.memory_files == 2
-      # 2 Memories files + /Memories directory
-      assert stats_after_create.persisted_files == 3
+      assert stats_after_create.total_files == 3
+      # 1 scratch file (no matching config)
+      assert stats_after_create.memory_files == 1
+      # 2 Memories files (matching config)
+      assert stats_after_create.persisted_files == 2
       assert stats_after_create.dirty_files == 0
 
       # Update persisted files to make them dirty
@@ -505,7 +503,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
 
       # Check stats before debounce persist
       {:ok, stats_before} = FileSystemServer.stats({:agent, agent_id})
-      assert stats_before.total_files == 5
+      assert stats_before.total_files == 3
       assert stats_before.dirty_files == 2
 
       # Wait for persist
@@ -513,7 +511,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
 
       # Check stats after persist
       {:ok, stats_after} = FileSystemServer.stats({:agent, agent_id})
-      assert stats_after.total_files == 5
+      assert stats_after.total_files == 3
       assert stats_after.dirty_files == 0
     end
   end

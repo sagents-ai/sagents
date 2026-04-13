@@ -123,8 +123,8 @@ defmodule Sagents.FileSystemServerTest do
       entry = Map.get(state.files, path)
       assert entry.path == path
       assert entry.content == content
-      assert entry.persistence == :memory
       assert entry.loaded == true
+      # Memory-only — nothing to flush
       assert entry.dirty_content == false
     end
 
@@ -139,10 +139,11 @@ defmodule Sagents.FileSystemServerTest do
       # No persistence config for /Memories/, so should be memory-only
       assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, content)
 
-      # File should be memory-only
+      # No persistence config matched, so the file lives in memory only
+      # (the state machine has nothing to persist it to)
       state = :sys.get_state(pid)
       entry = Map.get(state.files, path)
-      assert entry.persistence == :memory
+      assert entry.dirty_content == false
     end
 
     test "writes new persisted file and persists immediately", %{agent_id: agent_id} do
@@ -171,7 +172,6 @@ defmodule Sagents.FileSystemServerTest do
       # New file should be persisted immediately (dirty == false)
       state = :sys.get_state(pid)
       entry = Map.get(state.files, path)
-      assert entry.persistence == :persisted
       assert entry.dirty_content == false
       assert entry.loaded == true
     end
@@ -249,8 +249,7 @@ defmodule Sagents.FileSystemServerTest do
 
       # Create file first (persists immediately)
       FileSystemServer.write_file({:agent, agent_id}, path, "v1")
-      # Consume the immediate persist messages (auto-created /Memories dir + new file)
-      assert_received {:persisted, _time}
+      # Consume the immediate persist message for the new file
       assert_received {:persisted, _time}
 
       # Now update multiple times rapidly (these should debounce)
@@ -267,22 +266,18 @@ defmodule Sagents.FileSystemServerTest do
       refute_received {:persisted, _time}
     end
 
-    test "writes with custom metadata", %{agent_id: agent_id} do
+    test "writes with custom mime_type", %{agent_id: agent_id} do
       {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
       path = "/data.json"
       content = ~s({"key": "value"})
 
-      opts = [
-        mime_type: "application/json",
-        custom: %{"author" => "test"}
-      ]
+      opts = [mime_type: "application/json"]
 
       assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, content, opts)
 
       entry = get_entry(agent_id, path)
       assert entry.metadata.mime_type == "application/json"
-      assert entry.metadata.custom == %{"author" => "test"}
     end
   end
 
@@ -477,13 +472,13 @@ defmodule Sagents.FileSystemServerTest do
 
       {:ok, stats} = FileSystemServer.stats({:agent, agent_id})
 
-      # 4 files + 2 auto-created ancestor directories (/scratch, /Memories)
-      assert stats.total_files == 6
-      # 2 scratch files + /scratch directory
-      assert stats.memory_files == 3
-      # 2 Memories files + /Memories directory
-      assert stats.persisted_files == 3
-      assert stats.loaded_files == 6
+      # 4 files (directories are no longer stored as entries)
+      assert stats.total_files == 4
+      # 2 scratch files (no matching config)
+      assert stats.memory_files == 2
+      # 2 Memories files (matching config)
+      assert stats.persisted_files == 2
+      assert stats.loaded_files == 4
       assert stats.not_loaded_files == 0
       # New files are persisted immediately, so no dirty files
       assert stats.dirty_files == 0
@@ -584,15 +579,15 @@ defmodule Sagents.FileSystemServerTest do
           configs: [config]
         )
 
-      # Files under /persistent/ should be persisted
+      # Files under /persistent/ should be persisted (dirty cleared after write)
       FileSystemServer.write_file({:agent, agent_id}, "/persistent/file.txt", "data")
       entry = get_entry(agent_id, "/persistent/file.txt")
-      assert entry.persistence == :persisted
+      assert entry.dirty_content == false
 
       # Files under /Memories/ should be memory-only with this config
       FileSystemServer.write_file({:agent, agent_id}, "/Memories/file.txt", "data")
       entry2 = get_entry(agent_id, "/Memories/file.txt")
-      assert entry2.persistence == :memory
+      assert entry2.dirty_content == false
     end
   end
 
@@ -601,7 +596,7 @@ defmodule Sagents.FileSystemServerTest do
       {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
       # Create a file entry
-      {:ok, entry} = FileEntry.new_memory_file("/test/data.txt", "test content")
+      {:ok, entry} = FileEntry.new_file("/test/data.txt", "test content")
 
       # Register it
       assert :ok = FileSystemServer.register_files({:agent, agent_id}, entry)
@@ -615,9 +610,9 @@ defmodule Sagents.FileSystemServerTest do
       {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
       # Create multiple file entries
-      {:ok, entry1} = FileEntry.new_memory_file("/test/file1.txt", "content1")
-      {:ok, entry2} = FileEntry.new_memory_file("/test/file2.txt", "content2")
-      {:ok, entry3} = FileEntry.new_memory_file("/test/file3.txt", "content3")
+      {:ok, entry1} = FileEntry.new_file("/test/file1.txt", "content1")
+      {:ok, entry2} = FileEntry.new_file("/test/file2.txt", "content2")
+      {:ok, entry3} = FileEntry.new_file("/test/file3.txt", "content3")
 
       # Register them all at once
       assert :ok = FileSystemServer.register_files({:agent, agent_id}, [entry1, entry2, entry3])
@@ -932,7 +927,6 @@ defmodule Sagents.FileSystemServerTest do
 
       # File should be indexed but NOT loaded
       entry = get_entry(agent_id, "/Memories/data.txt")
-      assert entry.persistence == :persisted
       assert entry.loaded == false
       assert entry.content == nil
 
@@ -1026,99 +1020,15 @@ defmodule Sagents.FileSystemServerTest do
     end
   end
 
-  describe "create_directory/3" do
-    test "creates a directory entry", %{agent_id: agent_id} do
-      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
-
-      assert {:ok, entry} =
-               FileSystemServer.create_directory({:agent, agent_id}, "/Characters",
-                 title: "Characters"
-               )
-
-      assert entry.entry_type == :directory
-      assert entry.title == "Characters"
-      assert entry.content == nil
-      assert FileSystemServer.file_exists?({:agent, agent_id}, "/Characters")
-    end
-
-    test "rejects duplicate paths", %{agent_id: agent_id} do
-      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
-
-      assert {:ok, _entry} = FileSystemServer.create_directory({:agent, agent_id}, "/Dir")
-
-      assert {:error, :already_exists} =
-               FileSystemServer.create_directory({:agent, agent_id}, "/Dir")
-    end
-  end
-
-  describe "update_custom_metadata/4" do
-    test "updates custom metadata on a file", %{agent_id: agent_id} do
-      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
-
-      FileSystemServer.write_file({:agent, agent_id}, "/doc.txt", "content")
-
-      assert {:ok, entry} =
-               FileSystemServer.update_custom_metadata({:agent, agent_id}, "/doc.txt", %{
-                 "tags" => ["important"]
-               })
-
-      assert entry.metadata.custom == %{"tags" => ["important"]}
-    end
-
-    test "returns error for nonexistent file", %{agent_id: agent_id} do
-      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
-
-      assert {:error, :enoent} =
-               FileSystemServer.update_custom_metadata({:agent, agent_id}, "/nope.txt", %{})
-    end
-  end
-
-  describe "update_entry/4" do
-    test "updates title on a file", %{agent_id: agent_id} do
-      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
-
-      FileSystemServer.write_file({:agent, agent_id}, "/doc.txt", "content")
-
-      assert {:ok, entry} =
-               FileSystemServer.update_entry({:agent, agent_id}, "/doc.txt", %{title: "New Title"})
-
-      assert entry.title == "New Title"
-    end
-
-    test "updates multiple attrs", %{agent_id: agent_id} do
-      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
-
-      FileSystemServer.write_file({:agent, agent_id}, "/doc.txt", "content")
-
-      assert {:ok, entry} =
-               FileSystemServer.update_entry({:agent, agent_id}, "/doc.txt", %{
-                 title: "Doc",
-                 file_type: "json"
-               })
-
-      assert entry.title == "Doc"
-      assert entry.file_type == "json"
-    end
-
-    test "returns error for nonexistent file", %{agent_id: agent_id} do
-      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
-
-      assert {:error, :enoent} =
-               FileSystemServer.update_entry({:agent, agent_id}, "/nope.txt", %{title: "X"})
-    end
-  end
-
   describe "read_file returns FileEntry" do
     test "returns full FileEntry with content", %{agent_id: agent_id} do
       {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
-      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "hello", title: "Test")
+      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "hello")
 
       assert {:ok, entry} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
       assert %FileEntry{} = entry
       assert entry.content == "hello"
-      assert entry.title == "Test"
-      assert entry.entry_type == :file
       assert entry.loaded == true
     end
   end
@@ -1128,13 +1038,10 @@ defmodule Sagents.FileSystemServerTest do
       {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
       assert {:ok, entry} =
-               FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "data",
-                 title: "My Doc"
-               )
+               FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "data")
 
       assert %FileEntry{} = entry
       assert entry.content == "data"
-      assert entry.title == "My Doc"
       assert entry.path == "/test.txt"
     end
   end
