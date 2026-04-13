@@ -430,6 +430,12 @@ defmodule Sagents.Middleware.SubAgent do
         until_tool_map = Map.get(config, :until_tool_map, %{})
         until_tool = Map.get(until_tool_map, subagent_type)
 
+        # Extract parent's tool_context and metadata so SubAgent tools see the
+        # same context as parent tools. Agent.build_chain stores the original
+        # tool_context map as an explicit :tool_context key in custom_context.
+        # Metadata is nested in state and copied into the SubAgent's fresh State.
+        {parent_tool_context, parent_metadata} = extract_parent_context(context)
+
         # Create SubAgent struct from pre-configured agent
         # Check if it's a Compiled struct (with initial_messages) or just an Agent
         subagent =
@@ -441,7 +447,9 @@ defmodule Sagents.Middleware.SubAgent do
                 instructions: instructions,
                 compiled_agent: compiled.agent,
                 initial_messages: compiled.initial_messages || [],
-                until_tool: until_tool
+                until_tool: until_tool,
+                parent_tool_context: parent_tool_context,
+                parent_metadata: parent_metadata
               )
 
             agent ->
@@ -450,7 +458,9 @@ defmodule Sagents.Middleware.SubAgent do
                 parent_agent_id: config.agent_id,
                 instructions: instructions,
                 agent_config: agent,
-                until_tool: until_tool
+                until_tool: until_tool,
+                parent_tool_context: parent_tool_context,
+                parent_metadata: parent_metadata
               )
           end
 
@@ -527,12 +537,17 @@ defmodule Sagents.Middleware.SubAgent do
             interrupt_on: nil
           )
 
-        # Create SubAgent struct
+        # Extract parent's tool_context and metadata for SubAgent inheritance
+        {parent_tool_context, parent_metadata} = extract_parent_context(context)
+
+        # Create SubAgent struct with parent context
         subagent =
           SubAgent.new_from_config(
             parent_agent_id: config.agent_id,
             instructions: instructions,
-            agent_config: agent_config
+            agent_config: agent_config,
+            parent_tool_context: parent_tool_context,
+            parent_metadata: parent_metadata
           )
 
         # Get supervisor and start SubAgent (same as pre-configured)
@@ -560,6 +575,20 @@ defmodule Sagents.Middleware.SubAgent do
       {:error, reason} ->
         {:error, "Invalid system_prompt: #{reason}"}
     end
+  end
+
+  # Extract parent's tool_context and state.metadata from the runtime context.
+  #
+  # Agent.build_chain stores the original tool_context map as an explicit
+  # :tool_context key in custom_context, so we read it directly rather than
+  # trying to reconstruct it by removing internal keys.
+  # Metadata lives nested inside context.state.metadata.
+  #
+  # Returns {tool_context_map, metadata_map}.
+  defp extract_parent_context(context) do
+    parent_tool_context = Map.get(context, :tool_context, %{})
+    parent_metadata = get_in(context, [:state, Access.key(:metadata)]) || %{}
+    {parent_tool_context, parent_metadata}
   end
 
   defp default_general_purpose_prompt() do

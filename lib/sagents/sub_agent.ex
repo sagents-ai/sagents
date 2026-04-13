@@ -160,14 +160,18 @@ defmodule Sagents.SubAgent do
   The main agent configures a subagent through the task tool by providing:
   - Instructions (becomes user message)
   - Agent configuration (Agent struct)
-  - Parent state (for inheritance)
 
   ## Options
 
   - `:parent_agent_id` - Parent's agent ID (required)
   - `:instructions` - Task description (required)
   - `:agent_config` - Agent struct with tools, model, middleware (required)
-  - `:parent_state` - Parent agent's current state (required)
+  - `:parent_tool_context` - Parent's tool_context map to inherit (optional).
+    Static, caller-supplied data (e.g., `user_id`, `current_scope`) that tools
+    access as flat top-level keys on context. Defaults to `%{}`.
+  - `:parent_metadata` - Parent's state metadata map to inherit (optional).
+    Dynamic, middleware-managed data (e.g., `conversation_title`) that tools
+    access via `context.state.metadata`. Defaults to `%{}`.
 
   ## Examples
 
@@ -175,54 +179,17 @@ defmodule Sagents.SubAgent do
         parent_agent_id: "main-agent",
         instructions: "Research renewable energy impacts",
         agent_config: agent_struct,
-        parent_state: parent_state
+        parent_tool_context: %{user_id: 42, tenant: "acme"},
+        parent_metadata: %{"conversation_title" => "Research"}
       )
   """
   def new_from_config(opts) do
-    parent_agent_id = Keyword.fetch!(opts, :parent_agent_id)
-    instructions = Keyword.fetch!(opts, :instructions)
     agent_config = Keyword.fetch!(opts, :agent_config)
+    instructions = Keyword.fetch!(opts, :instructions)
 
-    # Generate unique ID
-    sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
-
-    # Build the chain with system prompt + user message
     messages = build_initial_messages(agent_config.assembled_system_prompt, instructions)
 
-    # Create SubAgent's OWN state - fresh and independent from parent
-    # This ensures true isolation
-    subagent_state = State.new!(%{agent_id: sub_agent_id})
-
-    # Build custom_context with SubAgent's OWN state (not parent's!)
-    # Tools in SubAgent will access/modify SubAgent's state, not parent's
-    custom_context = %{
-      state: subagent_state,
-      parent_middleware: agent_config.middleware
-    }
-
-    chain =
-      LLMChain.new!(%{
-        llm: agent_config.model,
-        custom_context: custom_context
-      })
-      |> LLMChain.add_tools(agent_config.tools)
-      |> LLMChain.add_messages(messages)
-
-    # Extract interrupt_on configuration from agent_config middleware
-    interrupt_on = extract_interrupt_on_from_middleware(agent_config.middleware)
-
-    # Optional until_tool termination
-    until_tool = Keyword.get(opts, :until_tool)
-
-    %SubAgent{
-      id: sub_agent_id,
-      parent_agent_id: parent_agent_id,
-      chain: chain,
-      interrupt_on: interrupt_on,
-      until_tool: until_tool,
-      status: :idle,
-      created_at: DateTime.utc_now()
-    }
+    build_subagent(agent_config, messages, opts)
   end
 
   @doc """
@@ -236,8 +203,13 @@ defmodule Sagents.SubAgent do
   - `:parent_agent_id` - Parent's agent ID (required)
   - `:instructions` - Task description (required)
   - `:compiled_agent` - Pre-built Agent struct (required)
-  - `:parent_state` - Parent agent's current state (required)
   - `:initial_messages` - Optional initial message sequence (default: [])
+  - `:parent_tool_context` - Parent's tool_context map to inherit (optional).
+    Static, caller-supplied data (e.g., `user_id`, `current_scope`) that tools
+    access as flat top-level keys on context. Defaults to `%{}`.
+  - `:parent_metadata` - Parent's state metadata map to inherit (optional).
+    Dynamic, middleware-managed data (e.g., `conversation_title`) that tools
+    access via `context.state.metadata`. Defaults to `%{}`.
 
   ## Examples
 
@@ -245,48 +217,76 @@ defmodule Sagents.SubAgent do
         parent_agent_id: "main-agent",
         instructions: "Extract structured data",
         compiled_agent: data_extractor_agent,
-        parent_state: parent_state,
-        initial_messages: [prep_message]
+        initial_messages: [prep_message],
+        parent_tool_context: %{user_id: 42},
+        parent_metadata: %{"conversation_title" => "Extraction"}
       )
   """
   def new_from_compiled(opts) do
-    parent_agent_id = Keyword.fetch!(opts, :parent_agent_id)
-    instructions = Keyword.fetch!(opts, :instructions)
     compiled_agent = Keyword.fetch!(opts, :compiled_agent)
+    instructions = Keyword.fetch!(opts, :instructions)
     initial_messages = Keyword.get(opts, :initial_messages, [])
 
-    # Generate unique ID
-    sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
-
-    # Build chain with optional initial messages + instructions
     system_messages = build_initial_messages(compiled_agent.assembled_system_prompt, nil)
     user_message = Message.new_user!(instructions)
-    all_messages = system_messages ++ initial_messages ++ [user_message]
+    messages = system_messages ++ initial_messages ++ [user_message]
 
-    # Create SubAgent's OWN state - fresh and independent from parent
-    # This ensures true isolation and prevents memory waste from parent's message history
-    subagent_state = State.new!(%{agent_id: sub_agent_id})
+    build_subagent(compiled_agent, messages, opts)
+  end
 
-    # Build custom_context with SubAgent's OWN state (not parent's!)
-    # Tools in SubAgent will access/modify SubAgent's state, not parent's
-    custom_context = %{
-      state: subagent_state,
-      parent_middleware: compiled_agent.middleware
-    }
+  # Shared construction logic for all SubAgent creation paths.
+  #
+  # Given an Agent struct (from either Config or Compiled), the initial messages,
+  # and the caller's opts, builds the complete SubAgent with:
+  # - Fresh state inheriting parent's metadata snapshot
+  # - tool_context merged into custom_context (flat for tool access, preserved
+  #   as :tool_context key for nested SubAgent extraction)
+  # - Chain wired up with model, tools, and messages
+  #
+  # ## Context propagation
+  #
+  # Two context channels flow from parent to SubAgent:
+  # - `parent_tool_context`: static, caller-supplied data merged flat into
+  #   custom_context (e.g., user_id, current_scope). This is the sole source
+  #   of tool_context for SubAgents -- the Agent struct's own tool_context is
+  #   not used because pre-configured SubAgent Agents are built at init time
+  #   without access to the parent's runtime tool_context.
+  # - `parent_metadata`: dynamic, middleware-managed data copied into the
+  #   SubAgent's State.metadata (e.g., conversation_title)
+  #
+  # See docs/tool_context_and_state.md for full details.
+  defp build_subagent(agent, messages, opts) do
+    parent_agent_id = Keyword.fetch!(opts, :parent_agent_id)
+    parent_tool_context = Keyword.get(opts, :parent_tool_context, %{})
+    parent_metadata = Keyword.get(opts, :parent_metadata, %{})
+    until_tool = Keyword.get(opts, :until_tool)
+
+    sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
+
+    # SubAgent gets its own state but inherits parent's metadata snapshot.
+    subagent_state = State.new!(%{agent_id: sub_agent_id, metadata: parent_metadata})
+
+    # Merge parent_tool_context into custom_context (same pattern as
+    # Agent.build_chain). Internal keys always take precedence on collision.
+    custom_context =
+      parent_tool_context
+      |> Map.merge(%{
+        state: subagent_state,
+        parent_middleware: agent.middleware,
+        # Preserve the tool_context as an explicit key so nested SubAgents
+        # can extract it cleanly (same as Agent.build_chain).
+        tool_context: parent_tool_context
+      })
 
     chain =
       LLMChain.new!(%{
-        llm: compiled_agent.model,
+        llm: agent.model,
         custom_context: custom_context
       })
-      |> LLMChain.add_tools(compiled_agent.tools)
-      |> LLMChain.add_messages(all_messages)
+      |> LLMChain.add_tools(agent.tools)
+      |> LLMChain.add_messages(messages)
 
-    # Extract interrupt_on configuration from compiled_agent middleware
-    interrupt_on = extract_interrupt_on_from_middleware(compiled_agent.middleware)
-
-    # Optional until_tool termination
-    until_tool = Keyword.get(opts, :until_tool)
+    interrupt_on = extract_interrupt_on_from_middleware(agent.middleware)
 
     %SubAgent{
       id: sub_agent_id,
