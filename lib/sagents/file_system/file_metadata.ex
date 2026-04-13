@@ -2,8 +2,10 @@ defmodule Sagents.FileSystem.FileMetadata do
   @moduledoc """
   Metadata for a file entry in the virtual filesystem.
 
-  Since all content is text (for LLM work), mime_type typically indicates
-  the format: text/plain, text/markdown, application/json, etc.
+  Tracks size, timestamps, checksum, and mime_type. The mime_type field
+  exists so multi-modal LLMs and downstream tools can route binary content
+  (PDFs, images) correctly even when the path extension is ambiguous or
+  absent.
   """
   use Ecto.Schema
   import Ecto.Changeset
@@ -14,11 +16,8 @@ defmodule Sagents.FileSystem.FileMetadata do
     field :size, :integer
     field :created_at, :utc_datetime_usec
     field :modified_at, :utc_datetime_usec
-    field :mime_type, :string, default: "text/plain"
-    field :encoding, :string, default: "utf-8"
+    field :mime_type, :string, default: "text/markdown"
     field :checksum, :string
-    # Custom metadata as map
-    field :custom, :map, default: %{}
   end
 
   @type t :: %FileMetadata{
@@ -26,9 +25,7 @@ defmodule Sagents.FileSystem.FileMetadata do
           created_at: DateTime.t() | nil,
           modified_at: DateTime.t() | nil,
           mime_type: String.t(),
-          encoding: String.t(),
-          checksum: String.t() | nil,
-          custom: map()
+          checksum: String.t() | nil
         }
 
   @doc """
@@ -36,28 +33,27 @@ defmodule Sagents.FileSystem.FileMetadata do
   """
   def changeset(metadata \\ %FileMetadata{}, attrs) do
     metadata
-    |> cast(attrs, [:size, :created_at, :modified_at, :mime_type, :encoding, :checksum, :custom])
-    |> validate_required([:size, :mime_type, :encoding])
+    |> cast(attrs, [:size, :created_at, :modified_at, :mime_type, :checksum])
+    |> validate_required([:size, :mime_type])
     |> validate_number(:size, greater_than_or_equal_to: 0)
   end
 
   @doc """
-  Creates new metadata for file content with optional custom attributes.
+  Creates new metadata for file content.
+
+  Accepts optional `:mime_type` to override the default `"text/markdown"`.
   """
   def new(content, opts \\ []) do
     now = DateTime.utc_now()
     size = byte_size(content)
     mime_type = Keyword.get(opts, :mime_type, "text/markdown")
-    custom = Keyword.get(opts, :custom, %{})
 
     attrs = %{
       size: size,
       created_at: now,
       modified_at: now,
       mime_type: mime_type,
-      encoding: "utf-8",
-      checksum: compute_checksum(content),
-      custom: custom
+      checksum: compute_checksum(content)
     }
 
     case changeset(%FileMetadata{}, attrs) do
@@ -69,9 +65,9 @@ defmodule Sagents.FileSystem.FileMetadata do
   @doc """
   Updates metadata timestamps and checksum for modified content.
 
-  Preserves existing metadata fields (custom, created_at, mime_type, encoding)
-  and only updates content-related fields. Accepts optional opts to override
-  specific fields (e.g. `:custom`, `:mime_type`).
+  Preserves existing metadata fields (created_at, mime_type) and only
+  updates content-related fields. Accepts an optional `:mime_type` opt
+  to override that field.
 
   Returns `{:ok, metadata}` or `{:error, changeset}`.
   """
@@ -85,10 +81,6 @@ defmodule Sagents.FileSystem.FileMetadata do
       modified_at: now,
       checksum: checksum
     }
-
-    # Allow opts to override specific fields
-    attrs =
-      if custom = Keyword.get(opts, :custom), do: Map.put(attrs, :custom, custom), else: attrs
 
     attrs =
       if mime = Keyword.get(opts, :mime_type), do: Map.put(attrs, :mime_type, mime), else: attrs

@@ -10,11 +10,9 @@ defmodule Sagents.FileSystem.FileMetadataTest do
 
       assert metadata.size == byte_size(content)
       assert metadata.mime_type == "text/markdown"
-      assert metadata.encoding == "utf-8"
       assert is_binary(metadata.checksum)
       assert %DateTime{} = metadata.created_at
       assert %DateTime{} = metadata.modified_at
-      assert metadata.custom == %{}
     end
 
     test "creates metadata with custom mime_type" do
@@ -22,14 +20,6 @@ defmodule Sagents.FileSystem.FileMetadataTest do
       assert {:ok, metadata} = FileMetadata.new(content, mime_type: "text/plain")
 
       assert metadata.mime_type == "text/plain"
-    end
-
-    test "creates metadata with custom fields" do
-      content = "data"
-      custom = %{"tags" => ["important"], "source" => "user"}
-      assert {:ok, metadata} = FileMetadata.new(content, custom: custom)
-
-      assert metadata.custom == custom
     end
 
     test "computes checksum correctly" do
@@ -87,14 +77,13 @@ defmodule Sagents.FileSystem.FileMetadataTest do
       changeset = FileMetadata.changeset(%FileMetadata{}, %{})
       refute changeset.valid?
       assert changeset.errors[:size]
-      # mime_type and encoding have defaults, so they won't error
+      # mime_type has a default, so it won't error
     end
 
     test "validates size is non-negative" do
       attrs = %{
         size: -1,
         mime_type: "text/plain",
-        encoding: "utf-8",
         created_at: DateTime.utc_now(),
         modified_at: DateTime.utc_now()
       }
@@ -112,9 +101,7 @@ defmodule Sagents.FileSystem.FileMetadataTest do
         created_at: now,
         modified_at: now,
         mime_type: "application/json",
-        encoding: "utf-8",
-        checksum: "abc123",
-        custom: %{"key" => "value"}
+        checksum: "abc123"
       }
 
       changeset = FileMetadata.changeset(%FileMetadata{}, attrs)
@@ -123,7 +110,6 @@ defmodule Sagents.FileSystem.FileMetadataTest do
       metadata = Ecto.Changeset.apply_changes(changeset)
       assert metadata.size == 100
       assert metadata.mime_type == "application/json"
-      assert metadata.custom == %{"key" => "value"}
     end
   end
 end

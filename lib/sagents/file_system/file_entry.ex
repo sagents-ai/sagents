@@ -1,51 +1,22 @@
 defmodule Sagents.FileSystem.FileEntry do
   @moduledoc """
-  Represents a file or directory in the virtual filesystem.
+  Represents a file in the virtual filesystem.
 
   ## Field Semantics
-
-  - `:entry_type` - Whether this is a file or directory
-    - `:file` - A regular file with content
-    - `:directory` - A directory entry (no content, never dirty)
-
-  - `:title` - Human-readable display name (e.g. "Hero Character Sheet")
-    Promoted to a first-class field so both application code and LLM tools
-    can reference entries by their user-visible name.
-
-  - `:persistence` - Storage strategy
-    - `:memory` - Ephemeral, exists only in ETS (e.g., /scratch files)
-    - `:persisted` - Durable, backed by storage (e.g., /Memories files)
 
   - `:loaded` - Content availability
     - `true` - Content is in ETS, ready to use
     - `false` - Content exists in storage but not loaded (lazy load on read)
 
-  - `:dirty_content` - Content sync status (only meaningful when persistence: :persisted)
-    - `false` - In-memory content matches storage
-    - `true` - In-memory content differs from storage (needs persist)
+  - `:dirty_content` - Content sync status
+    - `false` - In-memory content matches storage (or no storage attached)
+    - `true` - In-memory content needs to be flushed to storage
 
-  - `:dirty_non_content` - Non-content change tracking
-    - `false` - Entry-level fields and metadata match storage
-    - `true` - Only non-content fields changed (enables metadata-only persist optimization)
-
-  ## State Examples
-
-  Memory file (always loaded, never dirty):
-    %FileEntry{entry_type: :file, persistence: :memory, loaded: true, dirty_content: false, content: "data"}
-
-  Persisted file, clean, loaded:
-    %FileEntry{entry_type: :file, persistence: :persisted, loaded: true, dirty_content: false, content: "data"}
-
-  Persisted file, not yet loaded (lazy):
-    %FileEntry{entry_type: :file, persistence: :persisted, loaded: false, dirty_content: false, content: nil}
-
-  Persisted file, modified since last save:
-    %FileEntry{entry_type: :file, persistence: :persisted, loaded: true, dirty_content: true, content: "new data"}
-
-  Directory entry:
-    %FileEntry{entry_type: :directory, persistence: :persisted, loaded: true, dirty_content: false, content: nil}
+  Whether a given entry is actually backed by storage is determined by
+  the `Sagents.FileSystem.FileSystemConfig` registered for its path —
+  not by the entry itself. Entries that don't match any config live only
+  in memory; their `dirty_content` flag is irrelevant.
   """
-  @behaviour Sagents.FileSystem.FileSchema
 
   use Ecto.Schema
   import Ecto.Changeset
@@ -57,119 +28,60 @@ defmodule Sagents.FileSystem.FileEntry do
   @primary_key false
   embedded_schema do
     field :path, :string
-    # Human-readable display name
-    field :title, :string
-    # Optional stable identifier for referencing files by ID
-    field :id, :string
-    # LLM-readable file type: "markdown", "image", "pdf", "json", etc.
-    field :file_type, :string, default: "markdown"
-    # Whether this is a file or directory
-    field :entry_type, Ecto.Enum, values: [:file, :directory], default: :file
     # Content is always string for LLM text-based work
     field :content, :string
-    # Where the file lives: memory-only or persisted to storage
-    field :persistence, Ecto.Enum, values: [:memory, :persisted], default: :memory
     # Is content currently loaded in ETS? (false = lazy load needed)
     field :loaded, :boolean, default: true
-    # Has content been modified since last storage write? (only relevant for :persisted files)
+    # Has content been modified since last storage write? (caller decides relevance)
     field :dirty_content, :boolean, default: false
-    # Only non-content fields changed; enables metadata-only persist optimization
-    field :dirty_non_content, :boolean, default: false
     embeds_one :metadata, FileMetadata
   end
 
   @type t :: %FileEntry{
           path: String.t(),
-          title: String.t() | nil,
-          id: String.t() | nil,
-          file_type: String.t() | nil,
-          entry_type: :file | :directory,
           content: String.t() | nil,
-          persistence: :memory | :persisted,
           loaded: boolean(),
           dirty_content: boolean(),
-          dirty_non_content: boolean(),
           metadata: FileMetadata.t() | nil
         }
 
   @doc """
   Creates a changeset for a file entry from internal attrs.
 
-  This is the full internal changeset used by `new_memory_file/3`,
-  `new_persisted_file/3`, etc. It casts all schema fields including
-  `:path`, `:content`, and persistence-related state.
-
-  This is **not** the changeset used for LLM-supplied attribute updates —
-  that is `changeset/1` (the `Sagents.FileSystem.FileSchema` callback),
-  which only allows `:title`, `:id`, and `:file_type`.
+  This is the full internal changeset used by `new_file/3` and friends.
+  It casts all schema fields including `:path`, `:content`, and
+  `:dirty_content`.
   """
   def internal_changeset(entry \\ %FileEntry{}, attrs) do
     entry
     |> cast(attrs, [
       :path,
-      :title,
-      :id,
-      :file_type,
-      :entry_type,
       :content,
-      :persistence,
       :loaded,
       :dirty_content
     ])
     |> cast_embed(:metadata, with: &FileMetadata.changeset/2)
     |> validate_path()
-    |> validate_required([:persistence, :loaded, :dirty_content])
+    |> validate_required([:loaded, :dirty_content])
   end
 
   @doc """
-  Changeset for updating entry-level fields (not content or internal state).
+  Returns the canonical LLM-facing JSON map for a file entry.
 
-  Only allows `:title`, `:id`, and `:file_type` to be changed.
+  This is the single source of truth for what a `FileEntry` looks like
+  to the LLM. Tools that render entries to the model (e.g. `list_files`,
+  `create_file`) call this directly.
   """
-  def update_entry_changeset(%FileEntry{} = entry, attrs) do
-    entry
-    |> cast(attrs, [:title, :id, :file_type])
-  end
-
-  # --- Sagents.FileSystem.FileSchema callbacks ---
-
-  @doc """
-  Default `Sagents.FileSystem.FileSchema` changeset.
-
-  Casts only entry-level fields safe for LLM updates: `:title`, `:id`,
-  and `:file_type`. `:content` is intentionally **not** in the cast list —
-  content is changed via `replace_text`, `replace_lines`, or `create_file`,
-  never `update_file_attrs`.
-  """
-  @impl Sagents.FileSystem.FileSchema
-  def changeset(attrs) do
-    %__MODULE__{}
-    |> cast(attrs, [:title, :id, :file_type])
-  end
-
-  @doc """
-  Default `Sagents.FileSystem.FileSchema` representation of a file entry
-  for the LLM. Includes path, title, entry_type, file_type, persistence,
-  size, and (when present) id.
-  """
-  @impl Sagents.FileSystem.FileSchema
   def to_llm_map(%__MODULE__{} = entry) do
     %{
       path: entry.path,
-      title: entry.title,
-      entry_type: entry.entry_type,
-      file_type: entry.file_type,
-      persistence: entry.persistence,
+      mime_type: entry.metadata && entry.metadata.mime_type,
       size: entry.metadata && entry.metadata.size
     }
-    |> maybe_put_field(:id, entry.id)
   end
 
-  defp maybe_put_field(map, _key, nil), do: map
-  defp maybe_put_field(map, key, value), do: Map.put(map, key, value)
-
   @doc """
-  Validates that a name (title or path segment) is safe for use in paths.
+  Validates that a path segment is safe for use in paths.
 
   The library enforces minimal restrictions — only characters that would break
   path resolution are disallowed:
@@ -188,63 +100,26 @@ defmodule Sagents.FileSystem.FileEntry do
   def valid_name?(_), do: false
 
   @doc """
-  Creates a new file entry for memory storage.
+  Creates a new file entry.
+
+  The returned entry is marked `dirty_content: true` so any registered
+  persistence backend picks it up on the next persist cycle. If no
+  backend is registered for the path, the state machine simply ignores
+  the dirty flag — memory-only files never have anywhere to be flushed
+  to.
+
+  ## Options
+
+  - `:mime_type` - Override the metadata mime type (default `"text/markdown"`).
   """
-  def new_memory_file(path, content, opts \\ []) do
-    title = Keyword.get(opts, :title)
-    id = Keyword.get(opts, :id)
-    file_type = Keyword.get(opts, :file_type)
-
+  def new_file(path, content, opts \\ []) do
     with {:ok, metadata} <- FileMetadata.new(content, opts) do
-      attrs =
-        %{
-          path: path,
-          title: title,
-          id: id,
-          entry_type: :file,
-          content: content,
-          persistence: :memory,
-          loaded: true,
-          dirty_content: false
-        }
-        |> maybe_put(:file_type, file_type)
-
-      %FileEntry{}
-      |> internal_changeset(attrs)
-      |> put_embed(:metadata, metadata)
-      |> apply_action(:insert)
-      |> case do
-        {:ok, entry} -> {:ok, entry}
-        {:error, changeset} -> {:error, Utils.changeset_error_to_string(changeset)}
-      end
-    else
-      {:error, _changeset} = error -> error
-    end
-  end
-
-  @doc """
-  Creates a new file entry for persisted storage. Intended for situations when
-  the LLM instructs a new file to be created that will need to be persisted to
-  storage.
-  """
-  def new_persisted_file(path, content, opts \\ []) do
-    title = Keyword.get(opts, :title)
-    id = Keyword.get(opts, :id)
-    file_type = Keyword.get(opts, :file_type)
-
-    with {:ok, metadata} <- FileMetadata.new(content, opts) do
-      attrs =
-        %{
-          path: path,
-          title: title,
-          id: id,
-          entry_type: :file,
-          content: content,
-          persistence: :persisted,
-          loaded: true,
-          dirty_content: true
-        }
-        |> maybe_put(:file_type, file_type)
+      attrs = %{
+        path: path,
+        content: content,
+        loaded: true,
+        dirty_content: true
+      }
 
       %FileEntry{}
       |> internal_changeset(attrs)
@@ -262,27 +137,17 @@ defmodule Sagents.FileSystem.FileEntry do
   @doc """
   Creates a file entry for an indexed persisted file (not yet loaded).
 
-  Accepts optional keyword opts to set `:title`, `:entry_type`, and `:metadata`.
+  Accepts an optional `:metadata` keyword to attach pre-built metadata.
   """
   def new_indexed_file(path, opts \\ []) do
-    title = Keyword.get(opts, :title)
-    id = Keyword.get(opts, :id)
-    file_type = Keyword.get(opts, :file_type)
-    entry_type = Keyword.get(opts, :entry_type, :file)
     metadata = Keyword.get(opts, :metadata)
 
-    attrs =
-      %{
-        path: path,
-        title: title,
-        id: id,
-        entry_type: entry_type,
-        content: nil,
-        persistence: :persisted,
-        loaded: entry_type == :directory,
-        dirty_content: false
-      }
-      |> maybe_put(:file_type, file_type)
+    attrs = %{
+      path: path,
+      content: nil,
+      loaded: false,
+      dirty_content: false
+    }
 
     result =
       %FileEntry{}
@@ -293,53 +158,6 @@ defmodule Sagents.FileSystem.FileEntry do
     case result do
       {:ok, entry} -> {:ok, entry}
       {:error, changeset} -> {:error, Utils.changeset_error_to_string(changeset)}
-    end
-  end
-
-  @doc """
-  Creates a new directory entry.
-
-  Directories have no content, are always "loaded", and are never dirty on creation.
-
-  ## Options
-
-  - `:title` - Human-readable name for the directory
-  - `:custom` - Custom metadata map
-  - `:persistence` - `:memory` or `:persisted` (default: `:persisted`)
-  """
-  def new_directory(path, opts \\ []) do
-    title = Keyword.get(opts, :title)
-    id = Keyword.get(opts, :id)
-    custom = Keyword.get(opts, :custom, %{})
-    persistence = Keyword.get(opts, :persistence, :persisted)
-
-    metadata_result = FileMetadata.new("", custom: custom)
-
-    case metadata_result do
-      {:ok, metadata} ->
-        attrs = %{
-          path: path,
-          title: title,
-          id: id,
-          file_type: nil,
-          entry_type: :directory,
-          content: nil,
-          persistence: persistence,
-          loaded: true,
-          dirty_content: persistence == :persisted
-        }
-
-        %FileEntry{}
-        |> internal_changeset(attrs)
-        |> put_embed(:metadata, metadata)
-        |> apply_action(:insert)
-        |> case do
-          {:ok, entry} -> {:ok, entry}
-          {:error, changeset} -> {:error, Utils.changeset_error_to_string(changeset)}
-        end
-
-      error ->
-        error
     end
   end
 
@@ -372,26 +190,18 @@ defmodule Sagents.FileSystem.FileEntry do
   Marks a persisted file as clean (synced with storage).
   """
   def mark_clean(entry) do
-    %{entry | dirty_content: false, dirty_non_content: false}
+    %{entry | dirty_content: false}
   end
 
   @doc """
-  Updates file content and marks as dirty if persisted.
+  Updates file content and marks as dirty.
 
-  Preserves existing metadata (custom, created_at, mime_type, etc.) and only
+  Preserves existing metadata (created_at, mime_type, etc.) and only
   updates content-related fields (size, modified_at, checksum).
-
-  Returns `{:error, :directory_has_no_content}` if called on a directory entry.
   """
   def update_content(entry, new_content, opts \\ [])
 
-  def update_content(%FileEntry{entry_type: :directory}, _new_content, _opts) do
-    {:error, :directory_has_no_content}
-  end
-
   def update_content(%FileEntry{} = entry, new_content, opts) do
-    dirty_content = entry.persistence == :persisted
-
     metadata_result =
       if entry.metadata do
         FileMetadata.update_for_modification(entry.metadata, new_content, opts)
@@ -406,8 +216,7 @@ defmodule Sagents.FileSystem.FileEntry do
            entry
            | content: new_content,
              loaded: true,
-             dirty_content: dirty_content,
-             dirty_non_content: false,
+             dirty_content: true,
              metadata: new_metadata
          }}
 
@@ -415,13 +224,6 @@ defmodule Sagents.FileSystem.FileEntry do
         error
     end
   end
-
-  @doc """
-  Returns true if the entry is a directory.
-  """
-  @spec directory?(t()) :: boolean()
-  def directory?(%FileEntry{entry_type: :directory}), do: true
-  def directory?(_), do: false
 
   # Private validation helpers
 
@@ -471,8 +273,4 @@ defmodule Sagents.FileSystem.FileEntry do
 
   defp maybe_put_embed_metadata(changeset, %FileMetadata{} = metadata),
     do: put_embed(changeset, :metadata, metadata)
-
-  # Only include key in attrs map if value is non-nil (lets schema default apply)
-  defp maybe_put(attrs, _key, nil), do: attrs
-  defp maybe_put(attrs, key, value), do: Map.put(attrs, key, value)
 end
