@@ -1099,7 +1099,16 @@ defmodule Sagents.SubAgent do
   - When finished, return a clear, concise result suitable for the parent agent to use.
   """
 
-  @doc false
+  @doc """
+  Returns the universal framing prompt prepended to every task-style sub-agent's
+  system prompt.
+
+  Encodes the "no user, complete-or-fail, no clarifying questions" contract so
+  that `Sagents.SubAgent.Task` authors can focus their `instructions/0` on the
+  substantive procedure. Host compilers combine this with the task's
+  `instructions/0` to form the child agent's system prompt; it can be replaced
+  per-sub-agent via `Sagents.SubAgent.Config`'s `system_prompt_override`.
+  """
   def task_subagent_boilerplate, do: @task_subagent_boilerplate
 
   @doc """
