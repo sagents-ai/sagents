@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.6.0
+
+Brings task-style sub-agents with dramatically improved cancellation handling, parent→sub-agent context propagation, a trimmer and more focused FileSystem middleware, and a handful of middleware configurability improvements. Also hardens CI against supply-chain risks.
+
+**Breaking changes** — see Upgrading section below.
+
+### Upgrading from v0.5.1
+
+**FileSystem tool renames:** Three tools on the `FileSystem` middleware were renamed to namespace them away from app-/domain-specific tools and to clarify their scope. If you list tools explicitly via `:enabled_tools`, or reference these names elsewhere, update them:
+
+- `replace_text` → `replace_file_text`
+- `replace_lines` → `replace_file_lines`
+- `search_text` → `find_in_file` (also now searches a single file, not across the whole filesystem)
+
+**FileSystem tool config is now validated:** `:enabled_tools` and `:custom_tool_descriptions` now reject unknown tool names at `init/1` instead of silently ignoring them. Any lingering typos or references to retired tool names will now raise at agent startup. This is the most likely place you'll hit the renames above.
+
+**Display-message persistence adds `:cancelled` tool status:** If you have generated display-message persistence templates (via `mix sagents.gen.persistence`), re-run the generator (after committing your current code) and merge the new `update_tool_status(:cancelled, ...)` clause and `cancel_tool_call/1` context function. Existing persistence modules without these will crash when the new AgentServer cancel path fires.
+
+### Added
+- Task-style sub-agent interface — new `instructions`, `system_prompt_override`, `use_instructions`, and `display_text` fields on `SubAgent.Config`, composed into the child's system prompt by `compose_child_system_prompt/1`. The built-in `task_subagent_boilerplate/0` encodes the "no user, complete-or-fail, no clarifying questions" framing universally so authors can focus on task specifics [#60](https://github.com/sagents-ai/sagents/pull/60)
+- `Sagents.SubAgent.Task` behaviour — formal contract for task modules (`task_name/0`, `description/0`, `instructions/0`, plus optional `use_instructions/0`, `display_text/0`, `model_override/0`) that host applications compile into `SubAgent.Compiled` entries [#60](https://github.com/sagents-ai/sagents/pull/60)
+- `get_task_instructions(subagent_type)` tool on the SubAgent middleware — surfaced automatically when any configured sub-agent declares `use_instructions`. Lets the parent LLM lazy-load full usage docs on demand so the parent's context window stays light [#60](https://github.com/sagents-ai/sagents/pull/60)
+- Dynamic `display_text` for SubAgent tool calls — when a sub-agent config declares `display_text`, the middleware re-fires the `on_tool_call_identified` event once `subagent_type` is known so the UI shows something meaningful (e.g. "Drafting KB article") instead of the generic "Running task" [#60](https://github.com/sagents-ai/sagents/pull/60)
+- Parent-agent context propagation to SubAgents — `tool_context` and `state.metadata` from the parent now flow automatically into spawned sub-agents, so data like `user_id`, `current_scope`, tenant identifiers, and `conversation_title` is visible to tools running inside a SubAgent without manual wiring. New `:parent_tool_context` and `:parent_metadata` options on both `SubAgent.new_from_config` and `new_from_compiled` make the inheritance explicit and testable [#59](https://github.com/sagents-ai/sagents/pull/59)
+- `:tool_context` key on `custom_context` — `Agent.build_chain` now preserves the original caller-supplied `tool_context` map as an explicit key (in addition to the existing flat merge) so nested extraction is unambiguous [#59](https://github.com/sagents-ai/sagents/pull/59)
+- `docs/tool_context_and_state.md` — new guide explaining the two context channels, how each propagates, and when to use which [#59](https://github.com/sagents-ai/sagents/pull/59)
+- Proper sub-agent unwinding on main-agent cancel — `AgentServer.cancel/1` now kills in-flight sub-agents first, does a two-phase Task shutdown (2s graceful, then brutal-kill), drains pending turn casts so the rolling state captures every completed turn, and persists the cancellation display message from AgentServer as the single authoritative writer [#60](https://github.com/sagents-ai/sagents/pull/60)
+- `:on_cancel` persistence context on `Sagents.AgentPersistence` — new lifecycle hook so apps can snapshot state when a main agent is cancelled, enabling page-reload recovery of partial progress [#60](https://github.com/sagents-ai/sagents/pull/60)
+- `:cancelled` tool-status variant on `Sagents.DisplayMessagePersistence` and the generator templates — the cancelled state is now a first-class tool-call terminal status alongside `:completed` and `:error` [#60](https://github.com/sagents-ai/sagents/pull/60)
+- Sub-agent failure and cancellation broadcasts now carry `final_messages` and `turn_count` — the debugger and UI can render "last N messages before failure" alongside the error. When a sub-agent is blocked mid-LLM-call and can't respond within 300ms, a minimal fallback broadcast is fired so observability is preserved either way [#60](https://github.com/sagents-ai/sagents/pull/60)
+- `execution_seq` counter on SubAgent `ServerState` — guards the rolling-state `handle_cast` against late messages from a cancelled or superseded run [#60](https://github.com/sagents-ai/sagents/pull/60)
+- `Sagents.TextLines` module — extracted from the FileSystem middleware, provides reusable 1-indexed line-number splitting, rendering (right-aligned 6-char numbers + tab separator), and range operations for any tool that needs consistent line-numbered text handling [#58](https://github.com/sagents-ai/sagents/pull/58)
+- `:custom_display_texts` option on the `FileSystem` middleware — per-tool UI label overrides [#58](https://github.com/sagents-ai/sagents/pull/58)
+- `:display_text` option on the `TodoList` middleware — customizes the UI label on the `write_todos` tool (defaults to "Updating task list"). Useful when todos are used internally by an agent and the default label would leak implementation detail to end users [#52](https://github.com/sagents-ai/sagents/pull/52)
+- `:enabled` option on the `DebugLog` middleware (default: `true`) — when `false`, every callback is a noop via pattern-matching function heads, so the middleware stays in the stack for easy re-enablement but performs zero I/O and registers no LLM event callbacks. Recommended for production via `Application.compile_env` [#53](https://github.com/sagents-ai/sagents/pull/53)
+- Anthropic cache control enabled in the generated `factory.ex` template — new factories created by `mix sagents.setup` now turn on automatic Anthropic prompt caching on the main orchestrator agent out of the box [#64](https://github.com/sagents-ai/sagents/pull/64)
+- `wait_until/2` helper in `Sagents.TestingHelpers` — general-purpose polling helper (10ms interval, 1s timeout) for synchronizing tests against async state changes like registry cleanups and ETS writes. Intended call pattern: `assert wait_until(fn -> condition end)` [#57](https://github.com/sagents-ai/sagents/pull/57)
+- SHA-pinned GitHub Actions in `.github/workflows/elixir.yml` with `persist-credentials: false` on checkout, and a new `.github/dependabot.yml` for weekly action updates with a 7-day cooldown — addresses zizmor's unpinned-action and credential-persistence recommendations [#60](https://github.com/sagents-ai/sagents/pull/60)
+
+### Changed
+- **BREAKING:** `FileSystem` middleware tools renamed: `replace_text` → `replace_file_text`, `replace_lines` → `replace_file_lines`, `search_text` → `find_in_file` (now operates on a single file instead of scanning the whole filesystem) [#55](https://github.com/sagents-ai/sagents/pull/55), [#58](https://github.com/sagents-ai/sagents/pull/58)
+- **BREAKING:** `FileSystem` middleware now validates `:enabled_tools` and `:custom_tool_descriptions` at `init/1` and raises on unknown tool names. Previously invalid entries were silently ignored [#55](https://github.com/sagents-ai/sagents/pull/55)
+- `FileSystem` middleware system prompt is trimmed to only describe the tools actually enabled via `:enabled_tools` — no more describing tools the LLM can't call [#58](https://github.com/sagents-ai/sagents/pull/58)
+- Cancellation display message is now persisted by `AgentServer` instead of the LiveView — avoids duplicate rows when multiple tabs are subscribed to the same conversation. Generator templates updated accordingly so `handle_status_cancelled/1` no longer inserts the message itself [#60](https://github.com/sagents-ai/sagents/pull/60)
+- SubAgent construction paths (`new_from_config` and `new_from_compiled`) collapsed into a shared `build_subagent/3` helper — a single enforcement point for parent-context propagation and a cleaner extension point for future sub-agent variants [#59](https://github.com/sagents-ai/sagents/pull/59)
+- `docs/filesystem_setup.md` rewritten — adds a "What the Filesystem Is For" section explaining what the FileSystem is and, more importantly, what it isn't, with a worked draft-then-commit pattern for splitting content (file) from metadata (domain record) across two tool calls so generated tokens aren't thrown away on metadata validation errors [#58](https://github.com/sagents-ai/sagents/pull/58)
+- `mix precommit` now runs `test --include cluster --include slow` so the new slow-tagged sub-agent cancellation integration test runs on every precommit [#60](https://github.com/sagents-ai/sagents/pull/60)
+
+### Fixed
+- Flaky `Sagents.SubAgentHitlIntegrationTest` — the race was in `Sagents.ProcessRegistry`'s async `:DOWN` handling, not in `SubAgentServer.stop/1`. Replaced the direct `whereis == nil` assertion with `wait_until`, and replaced a `Process.sleep(50)` workaround elsewhere in the file with `Process.monitor` + `assert_receive {:DOWN, ...}` + `wait_until` for the registry cleanup [#57](https://github.com/sagents-ai/sagents/pull/57)
+- `LangChainError` type/message distinctions are now preserved when sub-agent errors surface to the parent LLM (via `format_subagent_error/2`) — previously the structure was flattened [#60](https://github.com/sagents-ai/sagents/pull/60)
+
 ## v0.5.0
 
 Adds infrastructure pause/resume support for node draining, a new `DebugLog` middleware for local file-based agent diagnostics, broader LLM error visibility via new callbacks, and updates the LangChain dependency to v0.8.0. No breaking changes at the sagents API level. All sagents-level changes are additive and backward-compatible; users who directly import `LangChain.*` modules should review the LangChain 0.8.0 release notes for any transitive changes. [#50](https://github.com/sagents-ai/sagents/pull/50)
