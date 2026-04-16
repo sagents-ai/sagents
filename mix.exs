@@ -73,7 +73,7 @@ defmodule Sagents.MixProject do
         "compile --warnings-as-errors",
         "deps.unlock --unused",
         "format",
-        "test --include cluster"
+        "test --include cluster --include slow"
       ]
     ]
   end
