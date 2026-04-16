@@ -13,6 +13,7 @@ defmodule Sagents.AgentPersistence do
   | Context | When | Notes |
   |---------|------|-------|
   | `:on_completion` | Agent execution completes successfully (status → :idle) | Most common persistence point |
+  | `:on_cancel` | Execution cancelled by user | Preserves rolling state up to cancel point |
   | `:on_error` | Agent execution fails (status → :error) | Preserves state up to the error |
   | `:on_interrupt` | Execution paused for HITL approval (status → :interrupted) | Preserves interrupt context |
   | `:on_title_generated` | Conversation title auto-generated | State includes updated metadata |
@@ -33,6 +34,7 @@ defmodule Sagents.AgentPersistence do
 
   @type context ::
           :on_completion
+          | :on_cancel
           | :on_error
           | :on_interrupt
           | :on_title_generated

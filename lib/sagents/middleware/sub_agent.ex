@@ -144,6 +144,7 @@ defmodule Sagents.Middleware.SubAgent do
   alias Sagents.SubAgent
   alias Sagents.SubAgentServer
   alias Sagents.SubAgentsDynamicSupervisor
+  alias LangChain.Callbacks
   alias LangChain.Function
   alias LangChain.Message.ToolResult
 
@@ -177,6 +178,25 @@ defmodule Sagents.Middleware.SubAgent do
           end)
           |> Map.new(fn config -> {config.name, config.until_tool} end)
 
+        # Build display_texts map: %{subagent_type => display_text}.
+        # Used by the :on_tool_call_identified callback to re-label the
+        # `task` tool call in the UI based on which subagent was picked.
+        display_texts_map =
+          for cfg <- subagents,
+              text = Map.get(cfg, :display_text),
+              is_binary(text) and text != "",
+              into: %{},
+              do: {cfg.name, text}
+
+        # Build use_instructions map: %{subagent_type => use_instructions}.
+        # Presence of any entry enables the `get_task_instructions` tool.
+        use_instructions_map =
+          for cfg <- subagents,
+              text = Map.get(cfg, :use_instructions),
+              is_binary(text) and text != "",
+              into: %{},
+              do: {cfg.name, text}
+
         # Add "general-purpose" entry for dynamic subagent creation
         # This special marker enables runtime tool inheritance
         agent_map_with_general = Map.put(agent_map, "general-purpose", :dynamic)
@@ -196,7 +216,9 @@ defmodule Sagents.Middleware.SubAgent do
           agent_id: agent_id,
           model: model,
           block_middleware: block_middleware,
-          until_tool_map: until_tool_map
+          until_tool_map: until_tool_map,
+          display_texts_map: display_texts_map,
+          use_instructions_map: use_instructions_map
         }
 
         {:ok, config}
@@ -207,8 +229,8 @@ defmodule Sagents.Middleware.SubAgent do
   end
 
   @impl true
-  def system_prompt(_config) do
-    """
+  def system_prompt(config) do
+    base = """
     ## SubAgent Delegation
 
     You have access to a `task` tool for delegating work to specialized SubAgents.
@@ -227,12 +249,90 @@ defmodule Sagents.Middleware.SubAgent do
     SubAgents have their own conversation context and will work independently
     to complete the task. You will receive only their final result.
     """
+
+    if has_use_instructions?(config) do
+      base <>
+        """
+
+        When a sub-agent in the `task` menu has a terse description, call
+        `get_task_instructions(subagent_type: "...")` first to fetch its full
+        usage guide, then invoke `task` with informed `instructions`. For
+        trivial cases where the description is clear, skip the fetch and call
+        `task` directly.
+        """
+    else
+      base
+    end
   end
 
   @impl true
   def tools(config) do
-    [build_task_tool(config)]
+    if has_use_instructions?(config) do
+      [build_task_tool(config), build_get_task_instructions_tool(config)]
+    else
+      [build_task_tool(config)]
+    end
   end
+
+  @impl true
+  def callbacks(config) do
+    display_texts_map = Map.get(config, :display_texts_map, %{})
+
+    if map_size(display_texts_map) == 0 do
+      %{}
+    else
+      %{
+        on_tool_call_identified: fn chain, tool_call, _function ->
+          maybe_refire_with_subagent_display_text(chain, tool_call, display_texts_map)
+        end
+      }
+    end
+  end
+
+  defp has_use_instructions?(config) when is_map(config) do
+    config
+    |> Map.get(:use_instructions_map, %{})
+    |> map_size()
+    |> Kernel.>(0)
+  end
+
+  defp has_use_instructions?(_), do: false
+
+  # When the `task` tool call is identified, the chain augments it with the
+  # tool's static display_text ("Running task"). If the parent picked a
+  # subagent_type with its own `display_text`, re-fire the callback with the
+  # overridden ToolCall so downstream observers (UI) can re-label the running
+  # tool call.
+  defp maybe_refire_with_subagent_display_text(chain, %{name: "task"} = tool_call, display_texts) do
+    case Map.get(tool_call, :arguments) do
+      args when is_map(args) ->
+        subagent_type = Map.get(args, "subagent_type")
+
+        case Map.get(display_texts, subagent_type) do
+          nil ->
+            :ok
+
+          override when is_binary(override) ->
+            if tool_call.display_text != override do
+              updated_call = %{tool_call | display_text: override}
+              func = chain._tool_map[tool_call.name]
+
+              Callbacks.fire(chain.callbacks, :on_tool_call_identified, [
+                chain,
+                updated_call,
+                func
+              ])
+            end
+
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp maybe_refire_with_subagent_display_text(_chain, _tool_call, _display_texts), do: :ok
 
   ## Private Functions - Tool Building
 
@@ -240,8 +340,13 @@ defmodule Sagents.Middleware.SubAgent do
     # Get list of available subagent names from the lookup map
     subagent_names = config.agent_map |> Map.keys()
 
-    # Build description with available subagents
-    description = build_task_description(config.descriptions)
+    # Build description with available subagents (adding usage-guide hints
+    # for those with `use_instructions` set).
+    description =
+      build_task_description(
+        config.descriptions,
+        Map.get(config, :use_instructions_map, %{})
+      )
 
     Function.new!(%{
       name: "task",
@@ -278,15 +383,52 @@ defmodule Sagents.Middleware.SubAgent do
     })
   end
 
-  defp build_task_description(descriptions) do
+  defp build_task_description(descriptions, use_instructions_map) do
     base = "Delegate a task to a specialized SubAgent.\n\nAvailable SubAgents:\n"
 
     subagent_list =
       descriptions
-      |> Enum.map(fn {name, desc} -> "- #{name}: #{desc}" end)
+      |> Enum.map(fn {name, desc} ->
+        if Map.has_key?(use_instructions_map, name) do
+          "- #{name}: #{desc} Call get_task_instructions(\"#{name}\") for the full usage guide before invoking."
+        else
+          "- #{name}: #{desc}"
+        end
+      end)
       |> Enum.join("\n")
 
     base <> subagent_list
+  end
+
+  defp build_get_task_instructions_tool(config) do
+    use_instructions_map = Map.get(config, :use_instructions_map, %{})
+    eligible = Map.keys(use_instructions_map)
+
+    Function.new!(%{
+      name: "get_task_instructions",
+      description:
+        "Fetch the full usage guide for a specific sub-agent before calling `task`. " <>
+          "Use this to learn how to frame the `instructions` argument or what prerequisites the sub-agent expects.",
+      display_text: "Reading task instructions",
+      async: true,
+      parameters_schema: %{
+        type: "object",
+        required: ["subagent_type"],
+        properties: %{
+          "subagent_type" => %{
+            type: "string",
+            enum: eligible,
+            description: "Which sub-agent's usage guide to retrieve."
+          }
+        }
+      },
+      function: fn %{"subagent_type" => name}, _ctx ->
+        case Map.fetch(use_instructions_map, name) do
+          {:ok, txt} -> {:ok, txt}
+          :error -> {:error, "no usage guide for sub-agent #{inspect(name)}"}
+        end
+      end
+    })
   end
 
   ## Private Functions - Task Execution
@@ -470,9 +612,12 @@ defmodule Sagents.Middleware.SubAgent do
 
         # Spawn SubAgentServer under supervision
         # SubAgentServer will register itself in Sagents.Registry
+        tool_call_id = Map.get(context, :tool_call_id)
+
         child_spec = %{
           id: subagent.id,
-          start: {SubAgentServer, :start_link, [[subagent: subagent]]},
+          start:
+            {SubAgentServer, :start_link, [[subagent: subagent, tool_call_id: tool_call_id]]},
           # Don't restart on crash
           restart: :temporary
         }
@@ -552,10 +697,12 @@ defmodule Sagents.Middleware.SubAgent do
 
         # Get supervisor and start SubAgent (same as pre-configured)
         supervisor_name = SubAgentsDynamicSupervisor.get_name(config.agent_id)
+        tool_call_id = Map.get(context, :tool_call_id)
 
         child_spec = %{
           id: subagent.id,
-          start: {SubAgentServer, :start_link, [[subagent: subagent]]},
+          start:
+            {SubAgentServer, :start_link, [[subagent: subagent, tool_call_id: tool_call_id]]},
           restart: :temporary
         }
 
@@ -690,9 +837,24 @@ defmodule Sagents.Middleware.SubAgent do
 
       {:error, reason} ->
         Logger.error("SubAgent #{sub_agent_id} failed: #{inspect(reason)}")
+        # The rich error (final_messages, turn_count, original term) is
+        # broadcast to the debugger via SubAgentServer's :subagent_failed_with_context
+        # event -- see sub_agent_server.ex. This tool-result string is just the
+        # summary returned to the parent LLM.
         SubAgentServer.stop(sub_agent_id)
-        {:error, "SubAgent execution failed: #{inspect(reason)}"}
+        {:error, format_subagent_error(reason, subagent_type)}
     end
+  end
+
+  # Preserve structure for LangChainError (e.g., length-stopped) so the caller
+  # can tell an LLM length truncation apart from an infrastructure failure.
+  defp format_subagent_error(%LangChain.LangChainError{type: type, message: msg}, subagent_type)
+       when is_binary(msg) do
+    "SubAgent '#{subagent_type}' failed (#{type || "error"}): #{msg}"
+  end
+
+  defp format_subagent_error(reason, subagent_type) do
+    "SubAgent '#{subagent_type}' failed: #{inspect(reason)}"
   end
 
   @doc """
@@ -746,7 +908,7 @@ defmodule Sagents.Middleware.SubAgent do
         error_result =
           ToolResult.new!(%{
             tool_call_id: tool_call_id,
-            content: "SubAgent resume failed: #{inspect(reason)}",
+            content: format_subagent_error(reason, subagent_type),
             name: "task",
             is_error: true,
             is_interrupt: false
@@ -794,7 +956,7 @@ defmodule Sagents.Middleware.SubAgent do
       {:error, reason} ->
         Logger.error("SubAgent #{sub_agent_id} resume failed: #{inspect(reason)}")
         SubAgentServer.stop(sub_agent_id)
-        {:error, "SubAgent resume failed: #{inspect(reason)}"}
+        {:error, format_subagent_error(reason, subagent_type)}
     end
   end
 end

@@ -100,7 +100,8 @@ defmodule <%= @context_module %>.DisplayMessage do
     field :content_type, :string
     # Message-local ordering (0-based, resets per message)
     field :sequence, :integer, default: 0
-    # Tool execution status: "pending", "executing", "completed", "failed"
+    # Tool execution status: "pending", "executing", "completed", "failed",
+    # "interrupted", "cancelled"
     field :status, :string, default: "completed"
     field :metadata, :map, default: %{}
 
@@ -126,7 +127,14 @@ defmodule <%= @context_module %>.DisplayMessage do
     changeset
     |> validate_required([:conversation_id, :message_type, :content, :content_type])
     |> validate_inclusion(:content_type, @content_types)
-    |> validate_inclusion(:status, ["pending", "executing", "completed", "failed", "interrupted"])
+    |> validate_inclusion(:status, [
+      "pending",
+      "executing",
+      "completed",
+      "failed",
+      "interrupted",
+      "cancelled"
+    ])
     |> validate_number(:sequence, greater_than_or_equal_to: 0)
     |> validate_content_structure()
     |> foreign_key_constraint(:conversation_id)

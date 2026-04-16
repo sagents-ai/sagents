@@ -1852,7 +1852,227 @@ defmodule Sagents.Middleware.SubAgentTest do
           parts when is_list(parts) -> Enum.map_join(parts, "", & &1.content)
         end
 
-      assert content_text =~ "SubAgent resume failed"
+      assert content_text =~ "SubAgent '"
+      assert content_text =~ "failed"
+    end
+  end
+
+  describe "boilerplate composition" do
+    test "Config with only instructions -> boilerplate + instructions" do
+      config =
+        SubAgent.Config.new!(%{
+          name: "kb",
+          description: "KB draft",
+          tools: [test_tool()],
+          instructions: "You are drafting a knowledge-base article."
+        })
+
+      prompt = SubAgent.compose_child_system_prompt(config)
+
+      assert prompt =~ "no user"
+      assert prompt =~ "You are drafting a knowledge-base article."
+    end
+
+    test "Config with only system_prompt (legacy) -> boilerplate + system_prompt" do
+      config =
+        SubAgent.Config.new!(%{
+          name: "legacy",
+          description: "Legacy",
+          tools: [test_tool()],
+          system_prompt: "Legacy prompt body"
+        })
+
+      prompt = SubAgent.compose_child_system_prompt(config)
+
+      assert prompt =~ "bounded task"
+      assert prompt =~ "Legacy prompt body"
+    end
+
+    test "system_prompt_override replaces boilerplate, instructions still appended" do
+      config =
+        SubAgent.Config.new!(%{
+          name: "overridden",
+          description: "Overridden",
+          tools: [test_tool()],
+          system_prompt_override: "Custom header only",
+          instructions: "Body content"
+        })
+
+      prompt = SubAgent.compose_child_system_prompt(config)
+
+      refute prompt =~ "bounded task"
+      assert prompt =~ "Custom header only"
+      assert prompt =~ "Body content"
+    end
+
+    test "boilerplate mentions the no-user framing so regressions are caught" do
+      boilerplate = SubAgent.task_subagent_boilerplate()
+      assert boilerplate =~ "no user"
+    end
+  end
+
+  describe "get_task_instructions tool" do
+    test "is absent when no subagent defines use_instructions" do
+      config =
+        SubAgent.Config.new!(%{
+          name: "plain",
+          description: "Plain",
+          tools: [test_tool()],
+          system_prompt: "plain prompt"
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: "parent",
+          model: test_model(),
+          middleware: [],
+          subagents: [config]
+        )
+
+      tool_names = SubAgentMiddleware.tools(middleware_config) |> Enum.map(& &1.name)
+      assert "task" in tool_names
+      refute "get_task_instructions" in tool_names
+    end
+
+    test "is present when at least one subagent defines use_instructions" do
+      cfg =
+        SubAgent.Config.new!(%{
+          name: "kb",
+          description: "KB draft",
+          tools: [test_tool()],
+          instructions: "draft",
+          use_instructions: "How to use kb"
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: "parent",
+          model: test_model(),
+          middleware: [],
+          subagents: [cfg]
+        )
+
+      tools = SubAgentMiddleware.tools(middleware_config)
+      assert Enum.any?(tools, &(&1.name == "get_task_instructions"))
+
+      getter = Enum.find(tools, &(&1.name == "get_task_instructions"))
+      assert getter.async == true
+      assert getter.parameters_schema.properties["subagent_type"].enum == ["kb"]
+    end
+
+    test "returns the use_instructions string for a known subagent" do
+      cfg =
+        SubAgent.Config.new!(%{
+          name: "kb",
+          description: "KB draft",
+          tools: [test_tool()],
+          instructions: "draft",
+          use_instructions: "Full KB usage guide"
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: "parent",
+          model: test_model(),
+          middleware: [],
+          subagents: [cfg]
+        )
+
+      getter =
+        SubAgentMiddleware.tools(middleware_config)
+        |> Enum.find(&(&1.name == "get_task_instructions"))
+
+      assert {:ok, "Full KB usage guide"} =
+               getter.function.(%{"subagent_type" => "kb"}, %{})
+    end
+  end
+
+  describe "task description hint" do
+    test "adds get_task_instructions hint for subagents with use_instructions" do
+      cfg =
+        SubAgent.Config.new!(%{
+          name: "kb",
+          description: "KB draft.",
+          tools: [test_tool()],
+          instructions: "draft",
+          use_instructions: "How to use kb"
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: "parent",
+          model: test_model(),
+          middleware: [],
+          subagents: [cfg]
+        )
+
+      [task_tool | _] = SubAgentMiddleware.tools(middleware_config)
+      assert task_tool.description =~ "get_task_instructions(\"kb\")"
+    end
+
+    test "omits hint for subagents without use_instructions" do
+      cfg =
+        SubAgent.Config.new!(%{
+          name: "plain",
+          description: "Plain desc.",
+          tools: [test_tool()],
+          system_prompt: "plain"
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: "parent",
+          model: test_model(),
+          middleware: [],
+          subagents: [cfg]
+        )
+
+      [task_tool | _] = SubAgentMiddleware.tools(middleware_config)
+      refute task_tool.description =~ "get_task_instructions"
+    end
+  end
+
+  describe "display_text callback" do
+    test "callbacks/1 returns empty map when no display_text is configured" do
+      cfg =
+        SubAgent.Config.new!(%{
+          name: "plain",
+          description: "Plain",
+          tools: [test_tool()],
+          system_prompt: "x"
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: "parent",
+          model: test_model(),
+          middleware: [],
+          subagents: [cfg]
+        )
+
+      assert SubAgentMiddleware.callbacks(middleware_config) == %{}
+    end
+
+    test "callbacks/1 registers on_tool_call_identified when display_text is set" do
+      cfg =
+        SubAgent.Config.new!(%{
+          name: "kb",
+          description: "KB",
+          tools: [test_tool()],
+          instructions: "x",
+          display_text: "Drafting KB article"
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: "parent",
+          model: test_model(),
+          middleware: [],
+          subagents: [cfg]
+        )
+
+      cbs = SubAgentMiddleware.callbacks(middleware_config)
+      assert is_function(cbs.on_tool_call_identified, 3)
     end
   end
 end

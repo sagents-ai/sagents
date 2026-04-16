@@ -351,26 +351,14 @@ defmodule <%= module %> do
   @doc """
   Handles agent status change to :cancelled (user cancelled execution).
 
-  Creates a cancellation message, updates status, clears loading and streaming state.
-
-  Note: Does NOT persist agent state after cancellation because the state may be
-  inconsistent or incomplete after the task was killed.
+  The cancellation message is persisted as a display message by AgentServer and
+  arrives via `{:display_message_saved, ...}`. This handler just updates UI state.
   """
   def handle_status_cancelled(socket) do
-    cancellation_text = "_Agent execution cancelled by user. Partial response discarded._"
-
-    cancellation_message =
-      create_or_persist_message(
-        socket,
-        :assistant,
-        cancellation_text
-      )
-
     socket
     |> assign(:loading, false)
     |> assign(:agent_status, :cancelled)
     |> assign(:streaming_delta, nil)
-    |> stream_insert(:messages, cancellation_message)
   end
 
   @doc """

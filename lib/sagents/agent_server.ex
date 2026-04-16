@@ -256,6 +256,9 @@ defmodule Sagents.AgentServer do
       # Presence module for agent discovery (e.g., MyApp.Presence)
       # When set, agent tracks presence on "agent_server:presence" topic
       :presence_module,
+      # Monotonic counter bumped on each execute/resume. Turn casts carry their seq
+      # so late messages from a cancelled or superseded run are rejected.
+      execution_seq: 0,
       # Whether this server was restored from persisted state (vs fresh start)
       # Used to broadcast :node_transferred event on startup after Horde migration
       restored: false
@@ -1460,11 +1463,16 @@ defmodule Sagents.AgentServer do
 
   @impl true
   def handle_call(:execute, _from, %ServerState{status: :idle} = server_state) do
-    # Build PubSub callback handlers (created in GenServer, captures server_state)
-    pubsub_callbacks = build_pubsub_callbacks(server_state)
+    # Bump execution sequence so late callbacks from any prior run are rejected.
+    # Build callbacks AFTER bumping so the closure captures the current seq.
+    new_state = %{
+      server_state
+      | execution_seq: server_state.execution_seq + 1,
+        status: :running
+    }
 
-    # Transition to running
-    new_state = %{server_state | status: :running}
+    pubsub_callbacks = build_pubsub_callbacks(new_state)
+
     broadcast_event(new_state, {:status_changed, :running, nil})
     update_presence_status(new_state, :running)
 
@@ -1492,22 +1500,44 @@ defmodule Sagents.AgentServer do
       when not is_nil(task) do
     Logger.info("Cancelling agent execution for agent: #{server_state.agent.agent_id}")
 
-    # Shutdown the running task
-    Task.shutdown(task, :brutal_kill)
+    # Kill any running sub-agents FIRST. The main Task may be blocked in a
+    # synchronous GenServer.call to a SubAgentServer -- without this, Task.shutdown
+    # would spend its full 2s grace waiting on a call that can never return.
+    # Sub-agents emit a :subagent_cancelled broadcast before terminating so
+    # observability is preserved.
+    cancel_all_subagents(server_state)
 
-    # Transition to cancelled status (not completed)
-    # Note: We don't include the state in the broadcast because it may be in an
-    # inconsistent state after brutal task termination
-    new_state = %{server_state | status: :cancelled}
+    # Two-phase shutdown: give the chain up to 2s to flush the in-progress turn
+    # through callbacks (which top up the rolling state). If it doesn't return
+    # in time, brutal-kill. Either way, the rolling state in `server_state.state`
+    # already reflects every fully-processed turn up to this point.
+    _ = Task.shutdown(task, :timer.seconds(2)) || Task.shutdown(task, :brutal_kill)
+
+    # Drain any final turn casts the task may have emitted before exit so the
+    # rolling state captures as much as possible before we snapshot it.
+    server_state = drain_turn_casts(server_state)
+
+    new_state = %{server_state | status: :cancelled, task: nil}
+
+    # Persist the rolling state — the database now reflects messages produced
+    # up to the cancel point, so page reload recovers them.
+    maybe_persist_state(new_state, :on_cancel)
+
+    # Persist an assistant display message for the cancellation so it survives
+    # page reload. Persisting here (not in the LiveView) avoids duplicate rows
+    # when multiple LiveViews are subscribed to the same agent. Mirrors the
+    # :error path's persist_error_as_display_message.
+    persist_cancel_as_display_message(new_state)
 
     # Reset inactivity timer after cancellation
     new_state = reset_inactivity_timer(new_state)
 
-    # Broadcast cancellation event
+    # Broadcast in-flight state so the debugger shows what actually happened.
+    broadcast_debug_event(new_state, {:agent_state_update, new_state.state})
     broadcast_event(new_state, {:status_changed, :cancelled, nil})
     update_presence_status(new_state, :cancelled)
 
-    {:reply, :ok, Map.put(new_state, :task, nil)}
+    {:reply, :ok, new_state}
   end
 
   @impl true
@@ -1526,11 +1556,13 @@ defmodule Sagents.AgentServer do
     # display message updates (e.g., marking ask_user tools as completed).
     resolved_interrupt_data = server_state.interrupt_data
 
-    # Transition back to running
+    # Transition back to running. Bump execution_seq so callbacks from a prior
+    # run can't pollute the rolling state.
     new_state = %{
       server_state
       | status: :running,
-        interrupt_data: nil
+        interrupt_data: nil,
+        execution_seq: server_state.execution_seq + 1
     }
 
     broadcast_event(new_state, {:status_changed, :running, nil})
@@ -1771,6 +1803,30 @@ defmodule Sagents.AgentServer do
   def handle_cast({:publish_debug_event, event}, server_state) do
     broadcast_debug_event(server_state, event)
     {:noreply, server_state}
+  end
+
+  # Rolling-state turn update: append the completed message to the live state so
+  # `get_state/1`, debuggers, and persistence all observe turn-level progress
+  # before Agent.execute/3 returns. Out-of-order casts (from a cancelled or
+  # superseded run) are silently dropped.
+  @impl true
+  def handle_cast({:turn_state_update, exec_seq, %LangChain.Message{} = message}, server_state) do
+    if exec_seq == server_state.execution_seq and server_state.status == :running do
+      updated_messages = server_state.state.messages ++ [message]
+      updated_state = %{server_state.state | messages: updated_messages}
+      new_server_state = %{server_state | state: updated_state}
+
+      # Incremental broadcast: observers append to their local copy rather than
+      # rebuilding from the full state on every turn.
+      broadcast_debug_event(
+        new_server_state,
+        {:agent_state_messages_appended, [message]}
+      )
+
+      {:noreply, new_server_state}
+    else
+      {:noreply, server_state}
+    end
   end
 
   @impl true
@@ -2044,6 +2100,10 @@ defmodule Sagents.AgentServer do
   # This map is combined with middleware callback maps into a list
   # in execute_agent/2 and resume_agent/2 before being passed to Agent.execute/3.
   defp build_pubsub_callbacks(%ServerState{} = server_state) do
+    agent_id = server_state.agent.agent_id
+    exec_seq = server_state.execution_seq
+    server_name = get_name(agent_id)
+
     %{
       # Sagents-specific callback (NOT a LangChain key).
       # Fired by Agent.fire_callback/3 after before_model hooks, before LLM call.
@@ -2063,6 +2123,9 @@ defmodule Sagents.AgentServer do
       on_message_processed: fn _chain, message ->
         # Save and broadcast message (if callback configured)
         maybe_save_and_broadcast_message(server_state, message)
+        # Append to the rolling state so every observer (debugger, persistence,
+        # get_state) sees turn-level progress before Agent.execute/3 returns.
+        safe_cast(server_name, {:turn_state_update, exec_seq, message})
       end,
 
       # Callback for token usage information
@@ -2225,6 +2288,10 @@ defmodule Sagents.AgentServer do
   end
 
   defp handle_execution_result({:ok, new_state}, server_state) do
+    # Reconcile: the canonical state from Agent.execute replaces the rolling
+    # state wholesale. The rolling state is a best-effort live view; middleware
+    # after_model hooks may have transformed the state in ways our per-turn
+    # appender doesn't capture.
     updated_state = %{
       server_state
       | status: :idle,
@@ -2371,6 +2438,145 @@ defmodule Sagents.AgentServer do
 
       _ ->
         :ok
+    end
+  end
+
+  # Cancel every running sub-agent for this main agent. Called from the main
+  # agent's :cancel handler so that sub-agents don't outlive their parent.
+  #
+  # Two broadcast paths:
+  #   1. If the sub-agent can respond to :prepare_cancel within 300ms, IT
+  #      broadcasts the event (rich context with its final_messages).
+  #   2. If it is blocked (e.g. in-flight LLM call), the PARENT broadcasts a
+  #      minimal :subagent_cancelled event directly from this process.
+  # Either way, observers see a terminal event before the sub-agent is killed.
+  defp cancel_all_subagents(%ServerState{} = server_state) do
+    agent_id = server_state.agent.agent_id
+
+    case Sagents.SubAgentsDynamicSupervisor.whereis(agent_id) do
+      nil ->
+        :ok
+
+      sup_pid ->
+        children = DynamicSupervisor.which_children(sup_pid)
+
+        Enum.each(children, fn
+          {_id, child_pid, :worker, _mods} when is_pid(child_pid) ->
+            cancel_subagent_child(server_state, child_pid, sup_pid)
+
+          _ ->
+            :ok
+        end)
+
+        :ok
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp cancel_subagent_child(server_state, child_pid, sup_pid) do
+    # Snapshot the tool_call_id from the sub-agent's process dictionary BEFORE
+    # we terminate it -- Process.info doesn't go through the message queue, so
+    # it works even when the process is blocked in an LLM call.
+    tool_call_id = read_tool_call_id(child_pid)
+
+    broadcast_ok =
+      try do
+        GenServer.call(child_pid, :prepare_cancel, 300) == :ok
+      catch
+        :exit, _ -> false
+      end
+
+    unless broadcast_ok do
+      # Sub-agent was blocked and couldn't self-broadcast. Fire a minimal
+      # :subagent_cancelled event from the parent so observability still works.
+      broadcast_fallback_subagent_cancel(server_state, child_pid)
+    end
+
+    # Update the main agent's "task" tool-call display message to :cancelled
+    # so the chat UI stops showing a spinner for work that was abandoned.
+    # Fires the :tool_execution_update broadcast AND persists via
+    # DisplayMessagePersistence (if configured), mirroring the normal tool
+    # completion path.
+    if is_binary(tool_call_id) do
+      broadcast_tool_event(server_state, :cancelled, %{
+        call_id: tool_call_id,
+        name: "task"
+      })
+    end
+
+    case DynamicSupervisor.terminate_child(sup_pid, child_pid) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp read_tool_call_id(pid) do
+    case Process.info(pid, :dictionary) do
+      {:dictionary, dict} -> Keyword.get(dict, :tool_call_id)
+      _ -> nil
+    end
+  end
+
+  defp broadcast_fallback_subagent_cancel(%ServerState{} = server_state, child_pid) do
+    sub_agent_id = lookup_sub_agent_id(child_pid)
+
+    if sub_agent_id do
+      # Use the same wire format as SubAgentServer.broadcast_subagent_event/2.
+      # NB: no final_messages/turn_count in this payload -- the sub-agent was
+      # blocked in an LLM call and we can't query its current chain. Observers
+      # (the debugger) already have every :subagent_llm_message they received
+      # in their own state, so shipping empty placeholders here would only
+      # overwrite their real data.
+      broadcast_debug_event(
+        server_state,
+        {:subagent, sub_agent_id, {:subagent_status_changed, :cancelled}}
+      )
+
+      broadcast_debug_event(
+        server_state,
+        {:subagent, sub_agent_id, {:subagent_cancelled, %{}}}
+      )
+    end
+
+    :ok
+  end
+
+  defp lookup_sub_agent_id(child_pid) do
+    Sagents.ProcessRegistry.keys(child_pid)
+    |> Enum.find_value(fn
+      {:sub_agent, id} -> id
+      _ -> nil
+    end)
+  catch
+    :exit, _ -> nil
+  end
+
+  # Drain any pending turn-update casts from the mailbox so the rolling state
+  # captures every turn the task managed to emit before shutdown. Bounded loop:
+  # each iteration either appends a valid turn or returns immediately.
+  defp drain_turn_casts(%ServerState{} = server_state) do
+    receive do
+      {:"$gen_cast", {:turn_state_update, exec_seq, %LangChain.Message{} = message}}
+      when exec_seq == server_state.execution_seq ->
+        updated_messages = server_state.state.messages ++ [message]
+        updated_state = %{server_state.state | messages: updated_messages}
+        drain_turn_casts(%{server_state | state: updated_state})
+    after
+      0 -> server_state
+    end
+  end
+
+  # safe_cast is used from callback closures that run in the Task process. If
+  # the GenServer is no longer registered (crashed, shut down) the cast is a
+  # silent no-op rather than crashing the Task.
+  defp safe_cast(server_name, message) do
+    try do
+      GenServer.cast(server_name, message)
+    catch
+      :exit, _ -> :ok
     end
   end
 
@@ -2592,6 +2798,16 @@ defmodule Sagents.AgentServer do
     error_text = format_error_for_display(reason)
     error_message = Message.new_assistant!(error_text)
     maybe_save_and_broadcast_message(server_state, error_message)
+  end
+
+  # Create and persist an assistant message on cancellation so it survives page
+  # reload and reaches every subscribed LiveView via :display_message_saved.
+  # Persisting here (single authoritative writer) avoids duplicate inserts when
+  # multiple LiveViews are subscribed to the same agent.
+  defp persist_cancel_as_display_message(server_state) do
+    cancel_text = "_Agent execution cancelled by user. Partial response discarded._"
+    cancel_message = Message.new_assistant!(cancel_text)
+    maybe_save_and_broadcast_message(server_state, cancel_message)
   end
 
   defp format_error_for_display(%LangChain.LangChainError{message: message})

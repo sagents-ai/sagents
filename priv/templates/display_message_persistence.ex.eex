@@ -76,6 +76,10 @@ defmodule <%= module %> do
     <%= conversations_module %>.interrupt_tool_call(call_id, %{"display_text" => display_text})
   end
 
+  def update_tool_status(:cancelled, %{call_id: call_id}) do
+    <%= conversations_module %>.cancel_tool_call(call_id)
+  end
+
   @doc """
   Resolves an interrupted tool result display message with the actual result content.
   Called after a sub-agent resumes and completes.

@@ -99,7 +99,7 @@ defmodule Sagents.SubAgentTest do
       assert %{description: ["can't be blank"]} = errors_on(changeset)
     end
 
-    test "requires system_prompt field" do
+    test "requires at least one prompt source (system_prompt, instructions, or override)" do
       attrs = %{
         name: "test",
         description: "Test",
@@ -107,7 +107,41 @@ defmodule Sagents.SubAgentTest do
       }
 
       assert {:error, changeset} = SubAgentConfig.new(attrs)
-      assert %{system_prompt: ["can't be blank"]} = errors_on(changeset)
+      errors = errors_on(changeset)
+
+      assert errors[:system_prompt] == [
+               "at least one of :system_prompt, :instructions, or :system_prompt_override must be set"
+             ]
+    end
+
+    test "accepts instructions alone (no system_prompt)" do
+      attrs = %{
+        name: "test",
+        description: "Test",
+        tools: [test_tool()],
+        instructions: "Do the thing."
+      }
+
+      assert {:ok, config} = SubAgentConfig.new(attrs)
+      assert config.instructions == "Do the thing."
+      assert config.system_prompt == nil
+    end
+
+    test "accepts use_instructions, display_text, and system_prompt_override" do
+      attrs = %{
+        name: "test",
+        description: "Test",
+        tools: [test_tool()],
+        instructions: "Work body",
+        use_instructions: "How to use me",
+        display_text: "Running the thing",
+        system_prompt_override: "Custom header"
+      }
+
+      assert {:ok, config} = SubAgentConfig.new(attrs)
+      assert config.use_instructions == "How to use me"
+      assert config.display_text == "Running the thing"
+      assert config.system_prompt_override == "Custom header"
     end
 
     test "requires tools field" do
