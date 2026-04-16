@@ -2,15 +2,19 @@ defmodule Sagents.ProcessSupervisor do
   @moduledoc """
   Abstraction over dynamic supervisor implementations.
 
-  Supports two backends:
+  Supports three backends:
 
   - `:local` — Elixir's `DynamicSupervisor` (single-node)
+  - `:global` — Same as `:local` for supervision; cluster-wide process *names* use `:global` via `Sagents.ProcessRegistry`
   - `:horde` — `Horde.DynamicSupervisor` (distributed cluster)
 
   ## Configuration
 
       # Single-node (default — no config needed)
       config :sagents, :distribution, :local
+
+      # Cluster-wide naming via :global (supervisors stay local DynamicSupervisor)
+      config :sagents, :distribution, :global
 
       # Distributed cluster
       config :sagents, :distribution, :horde
@@ -42,7 +46,7 @@ defmodule Sagents.ProcessSupervisor do
   """
   def agents_supervisor_child_spec(opts \\ []) do
     case distribution_type() do
-      :local ->
+      dist when dist in [:local, :global] ->
         {DynamicSupervisor,
          Keyword.merge([name: @agent_supervisor_name, strategy: :one_for_one], opts)}
 
@@ -59,7 +63,7 @@ defmodule Sagents.ProcessSupervisor do
   """
   def filesystem_supervisor_child_spec(opts \\ []) do
     case distribution_type() do
-      :local ->
+      dist when dist in [:local, :global] ->
         {DynamicSupervisor,
          Keyword.merge([name: @filesystem_supervisor_name, strategy: :one_for_one], opts)}
 
@@ -106,13 +110,13 @@ defmodule Sagents.ProcessSupervisor do
   """
   def supervisor_module do
     case distribution_type() do
-      :local -> DynamicSupervisor
+      dist when dist in [:local, :global] -> DynamicSupervisor
       :horde -> Horde.DynamicSupervisor
     end
   end
 
   @doc """
-  Returns the configured distribution type (`:local` or `:horde`).
+  Returns the configured distribution type (`:local`, `:global`, or `:horde`).
   """
   def distribution_type do
     Application.get_env(:sagents, :distribution, :local)

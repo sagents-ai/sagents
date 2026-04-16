@@ -1,6 +1,9 @@
 defmodule Sagents.Horde.ClusterConfig do
   @moduledoc """
-  Configuration helpers for Horde clustering.
+  Configuration helpers for Horde clustering and distribution validation.
+
+  `Sagents.Horde.ClusterConfig.validate!/0` also accepts `config :sagents, :distribution, :global`
+  (Erlang `:global` names; see `Sagents.ProcessRegistry`).
 
   ## Configuration Examples
 
@@ -93,14 +96,15 @@ defmodule Sagents.Horde.ClusterConfig do
   def validate! do
     distribution = Application.get_env(:sagents, :distribution, :local)
 
-    unless distribution in [:local, :horde] do
+    unless distribution in [:local, :horde, :global] do
       raise """
       Invalid Sagents configuration: unrecognized distribution type #{inspect(distribution)}.
 
       Must be one of:
 
-          config :sagents, :distribution, :local   # Single-node (default)
-          config :sagents, :distribution, :horde   # Distributed cluster
+          config :sagents, :distribution, :local    # Single-node (default)
+          config :sagents, :distribution, :global  # Cluster-wide names via :global
+          config :sagents, :distribution, :horde   # Distributed cluster (Horde)
       """
     end
 

@@ -40,6 +40,12 @@ defmodule Sagents.Horde.ClusterConfigTest do
       assert :ok = ClusterConfig.validate!()
     end
 
+    test "passes with :global distribution" do
+      Application.put_env(:sagents, :distribution, :global)
+
+      assert :ok = ClusterConfig.validate!()
+    end
+
     test "raises error on unrecognized distribution type" do
       Application.put_env(:sagents, :distribution, :invalid)
 

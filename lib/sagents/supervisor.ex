@@ -34,15 +34,18 @@ defmodule Sagents.Supervisor do
 
   ## What it starts
 
-  - `Sagents.ProcessRegistry` — Process registry (local `Registry` or
-    `Horde.Registry`)
+  - `Sagents.ProcessRegistry` — Process registry (local `Registry`, `Horde.Registry`,
+    or Erlang `:global` per config)
   - Agents dynamic supervisor — For managing `AgentSupervisor` instances
   - Filesystem dynamic supervisor — For managing `FileSystemServer` instances
 
-  The backend (local vs Horde) is determined by application config:
+  The backend is determined by application config:
 
       # Single-node (default — no config needed)
       config :sagents, :distribution, :local
+
+      # Cluster-wide names via :global (no Horde)
+      config :sagents, :distribution, :global
 
       # Distributed cluster
       config :sagents, :distribution, :horde
