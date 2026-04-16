@@ -612,9 +612,12 @@ defmodule Sagents.Middleware.SubAgent do
 
         # Spawn SubAgentServer under supervision
         # SubAgentServer will register itself in Sagents.Registry
+        tool_call_id = Map.get(context, :tool_call_id)
+
         child_spec = %{
           id: subagent.id,
-          start: {SubAgentServer, :start_link, [[subagent: subagent]]},
+          start:
+            {SubAgentServer, :start_link, [[subagent: subagent, tool_call_id: tool_call_id]]},
           # Don't restart on crash
           restart: :temporary
         }
@@ -694,10 +697,12 @@ defmodule Sagents.Middleware.SubAgent do
 
         # Get supervisor and start SubAgent (same as pre-configured)
         supervisor_name = SubAgentsDynamicSupervisor.get_name(config.agent_id)
+        tool_call_id = Map.get(context, :tool_call_id)
 
         child_spec = %{
           id: subagent.id,
-          start: {SubAgentServer, :start_link, [[subagent: subagent]]},
+          start:
+            {SubAgentServer, :start_link, [[subagent: subagent, tool_call_id: tool_call_id]]},
           restart: :temporary
         }
 
@@ -832,9 +837,24 @@ defmodule Sagents.Middleware.SubAgent do
 
       {:error, reason} ->
         Logger.error("SubAgent #{sub_agent_id} failed: #{inspect(reason)}")
+        # The rich error (final_messages, turn_count, original term) is
+        # broadcast to the debugger via SubAgentServer's :subagent_failed_with_context
+        # event -- see sub_agent_server.ex. This tool-result string is just the
+        # summary returned to the parent LLM.
         SubAgentServer.stop(sub_agent_id)
-        {:error, "SubAgent execution failed: #{inspect(reason)}"}
+        {:error, format_subagent_error(reason, subagent_type)}
     end
+  end
+
+  # Preserve structure for LangChainError (e.g., length-stopped) so the caller
+  # can tell an LLM length truncation apart from an infrastructure failure.
+  defp format_subagent_error(%LangChain.LangChainError{type: type, message: msg}, subagent_type)
+       when is_binary(msg) do
+    "SubAgent '#{subagent_type}' failed (#{type || "error"}): #{msg}"
+  end
+
+  defp format_subagent_error(reason, subagent_type) do
+    "SubAgent '#{subagent_type}' failed: #{inspect(reason)}"
   end
 
   @doc """
@@ -888,7 +908,7 @@ defmodule Sagents.Middleware.SubAgent do
         error_result =
           ToolResult.new!(%{
             tool_call_id: tool_call_id,
-            content: "SubAgent resume failed: #{inspect(reason)}",
+            content: format_subagent_error(reason, subagent_type),
             name: "task",
             is_error: true,
             is_interrupt: false
@@ -936,7 +956,7 @@ defmodule Sagents.Middleware.SubAgent do
       {:error, reason} ->
         Logger.error("SubAgent #{sub_agent_id} resume failed: #{inspect(reason)}")
         SubAgentServer.stop(sub_agent_id)
-        {:error, "SubAgent resume failed: #{inspect(reason)}"}
+        {:error, format_subagent_error(reason, subagent_type)}
     end
   end
 end

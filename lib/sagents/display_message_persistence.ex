@@ -70,7 +70,7 @@ defmodule Sagents.DisplayMessagePersistence do
   @callback save_message(conversation_id :: String.t(), message :: LangChain.Message.t()) ::
               {:ok, list()} | {:error, term()}
 
-  @type tool_status :: :executing | :completed | :failed | :interrupted
+  @type tool_status :: :executing | :completed | :failed | :interrupted | :cancelled
 
   @doc """
   Update the status of a persisted tool call display message.
@@ -89,6 +89,7 @@ defmodule Sagents.DisplayMessagePersistence do
     | `:completed` | `%{call_id: "...", name: "...", result: "..."}` |
     | `:failed` | `%{call_id: "...", name: "...", error: "..."}` |
     | `:interrupted` | `%{call_id: "...", display_text: "..."}` |
+    | `:cancelled` | `%{call_id: "...", name: "..."}` |
 
   ## Returns
 

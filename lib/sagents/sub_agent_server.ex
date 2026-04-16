@@ -262,12 +262,93 @@ defmodule Sagents.SubAgentServer do
     :exit, {:noproc, _} -> :ok
   end
 
+  @doc """
+  Cancel a running SubAgentServer process.
+
+  Called when the parent AgentServer is cancelled — the sub-agent's work is
+  being abandoned because there is no longer anyone to return results to.
+
+  Broadcasts `{:subagent_status_changed, :cancelled}` and
+  `{:subagent_cancelled, %{final_messages, turn_count}}` on the parent's debug
+  topic BEFORE terminating, so observers (debugger) see the terminal event
+  instead of the sub-agent silently vanishing.
+
+  If the sub-agent is blocked in an LLM call and cannot respond to the
+  pre-cancel broadcast within a short window, it is terminated regardless —
+  the parent cancel must not be delayed.
+
+  Idempotent: returns `:ok` if the sub-agent is already gone.
+  """
+  @spec cancel(String.t()) :: :ok
+  def cancel(sub_agent_id) when is_binary(sub_agent_id) do
+    case whereis(sub_agent_id) do
+      nil ->
+        :ok
+
+      pid ->
+        # Best-effort pre-cancel broadcast. If the sub-agent is stuck in an
+        # LLM call it can't process this message — we still terminate below.
+        try do
+          GenServer.call(pid, :prepare_cancel, 500)
+        catch
+          :exit, _ -> :ok
+        end
+
+        terminate_via_supervisor(pid)
+    end
+  end
+
+  defp terminate_via_supervisor(pid) do
+    parent_agent_id =
+      try do
+        %{parent_agent_id: id} = GenServer.call(pid, :get_subagent, 200)
+        id
+      catch
+        :exit, _ -> nil
+      end
+
+    sup_pid =
+      parent_agent_id &&
+        Sagents.SubAgentsDynamicSupervisor.whereis(parent_agent_id)
+
+    cond do
+      is_pid(sup_pid) ->
+        # terminate_child/2 sends :shutdown and waits for the process to exit.
+        case DynamicSupervisor.terminate_child(sup_pid, pid) do
+          :ok -> :ok
+          {:error, :not_found} -> :ok
+        end
+
+      Process.alive?(pid) ->
+        # Fallback: no supervisor lookup possible (e.g. test harness ran the
+        # sub-agent standalone). Exit the process directly.
+        Process.exit(pid, :shutdown)
+        :ok
+
+      true ->
+        :ok
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
   ## Server Callbacks
 
   @impl true
   def init(opts) do
     subagent = Keyword.fetch!(opts, :subagent)
     started_at = System.monotonic_time(:millisecond)
+
+    # Stash the originating tool_call_id in the process dictionary so the
+    # parent AgentServer can read it via `Process.info(pid, :dictionary)` at
+    # cancel time WITHOUT doing a GenServer.call (which would block if this
+    # process is mid-LLM-call). The value is optional — older callers that
+    # don't pass :tool_call_id simply won't get the terminal tool-status
+    # display update on cancel.
+    case Keyword.get(opts, :tool_call_id) do
+      id when is_binary(id) -> Process.put(:tool_call_id, id)
+      _ -> :ok
+    end
 
     server_state = %ServerState{
       subagent: subagent,
@@ -319,8 +400,9 @@ defmodule Sagents.SubAgentServer do
 
         new_state = %{server_state | subagent: error_subagent}
 
-        # Broadcast error event
-        broadcast_subagent_event(new_state, {:subagent_error, error_subagent.error})
+        # Broadcast structured failure context so the debugger can render
+        # "Last N messages before failure" alongside the error type/message.
+        broadcast_subagent_failure(new_state, error_subagent)
 
         {:reply, {:error, error_subagent.error}, new_state}
     end
@@ -367,8 +449,9 @@ defmodule Sagents.SubAgentServer do
 
         new_state = %{server_state | subagent: error_subagent}
 
-        # Broadcast error event
-        broadcast_subagent_event(new_state, {:subagent_error, error_subagent.error})
+        # Broadcast structured failure context so the debugger can render
+        # the final chain messages alongside the error.
+        broadcast_subagent_failure(new_state, error_subagent)
 
         {:reply, {:error, error_subagent.error}, new_state}
 
@@ -386,6 +469,33 @@ defmodule Sagents.SubAgentServer do
   @impl true
   def handle_call(:get_status, _from, %ServerState{subagent: subagent} = server_state) do
     {:reply, subagent.status, server_state}
+  end
+
+  # Pre-cancel broadcast. Fires the terminal :cancelled events so observers see
+  # the sub-agent's final state before the process dies. May not be reachable
+  # if the sub-agent is currently blocked in an LLM call — in that case the
+  # caller times out and terminates via DynamicSupervisor regardless.
+  @impl true
+  def handle_call(:prepare_cancel, _from, %ServerState{subagent: subagent} = server_state) do
+    cancelled = %{subagent | status: :cancelled}
+    new_state = %{server_state | subagent: cancelled}
+
+    broadcast_subagent_event(new_state, {:subagent_status_changed, :cancelled})
+
+    # Only ship context if we actually have messages. Empty context would
+    # overwrite the debugger's accumulated per-turn view with placeholders.
+    ctx =
+      case cancelled.chain do
+        %{messages: messages} when is_list(messages) and messages != [] ->
+          %{error: nil, final_messages: messages, turn_count: length(messages)}
+
+        _ ->
+          %{}
+      end
+
+    broadcast_subagent_event(new_state, {:subagent_cancelled, ctx})
+
+    {:reply, :ok, new_state}
   end
 
   @impl true
@@ -424,13 +534,39 @@ defmodule Sagents.SubAgentServer do
           "SubAgentServer: #{completed_subagent.id} result extraction error: #{inspect(reason)}"
         )
 
-        new_state = %{server_state | subagent: completed_subagent}
+        # Overlay the extraction error onto the completed subagent so the
+        # failure broadcast carries both the chain's final messages and the
+        # structured error term (e.g., LangChainError{type: "to_string"} when
+        # the final message was length-truncated).
+        failed = %{completed_subagent | status: :error, error: reason}
+        new_state = %{server_state | subagent: failed}
 
-        # Broadcast error event
-        broadcast_subagent_event(new_state, {:subagent_error, reason})
+        broadcast_subagent_failure(new_state, failed)
 
         {:reply, {:error, reason}, new_state}
     end
+  end
+
+  # Broadcast a structured failure event that includes:
+  # - the raw error term (so the debugger can pattern-match on LangChainError)
+  # - the final chain messages (so the debugger can show context)
+  # - a turn_count convenience field
+  # Also emits the legacy :subagent_error event so existing consumers keep working.
+  defp broadcast_subagent_failure(server_state, %SubAgent{} = subagent) do
+    final_messages =
+      case subagent.chain do
+        %{messages: messages} when is_list(messages) -> messages
+        _ -> []
+      end
+
+    context = %{
+      error: subagent.error,
+      final_messages: final_messages,
+      turn_count: length(final_messages)
+    }
+
+    broadcast_subagent_event(server_state, {:subagent_failed_with_context, context})
+    broadcast_subagent_event(server_state, {:subagent_error, subagent.error})
   end
 
   # Build callbacks for LLMChain that broadcast message events to the parent's debug PubSub.

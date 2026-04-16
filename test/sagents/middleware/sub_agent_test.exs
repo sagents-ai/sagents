@@ -1852,7 +1852,8 @@ defmodule Sagents.Middleware.SubAgentTest do
           parts when is_list(parts) -> Enum.map_join(parts, "", & &1.content)
         end
 
-      assert content_text =~ "SubAgent resume failed"
+      assert content_text =~ "SubAgent '"
+      assert content_text =~ "failed"
     end
   end
 

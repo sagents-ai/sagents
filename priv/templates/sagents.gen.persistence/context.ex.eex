@@ -436,6 +436,38 @@ defmodule <%= @context_module %> do
   end
 
   @doc """
+  Updates a tool call message to "cancelled" status.
+
+  Called when a tool execution (typically a sub-agent task) was abandoned because
+  the parent agent was cancelled. Accepts tool calls in "pending", "executing",
+  or "interrupted" status.
+
+  ## Returns
+    - {:ok, %DisplayMessage{}} on success
+    - {:error, :not_found} if no eligible tool call with this call_id exists
+    - {:error, changeset} on validation failure
+  """
+  @spec cancel_tool_call(String.t()) ::
+          {:ok, DisplayMessage.t()} | {:error, :not_found | Ecto.Changeset.t()}
+  def cancel_tool_call(call_id) do
+    query =
+      from m in DisplayMessage,
+        where: fragment("?->>'call_id' = ?", m.content, ^call_id),
+        where: m.content_type == "tool_call",
+        where: m.status in ["pending", "executing", "interrupted"]
+
+    case Repo.one(query) do
+      nil ->
+        {:error, :not_found}
+
+      message ->
+        message
+        |> DisplayMessage.changeset(%{"status" => "cancelled"})
+        |> Repo.update()
+    end
+  end
+
+  @doc """
   Records an HITL decision (approved/rejected) on a tool call display message.
 
   Adds `"hitl_decision"` to the tool call's metadata so the UI can display
