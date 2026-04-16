@@ -155,11 +155,8 @@ defmodule Sagents.ProcessRegistryTest do
       assert ProcessRegistry.registry_module() == :global
     end
 
-    test "child_spec/1 returns placeholder Task spec" do
-      spec = ProcessRegistry.child_spec([])
-      assert %{id: {Sagents.ProcessRegistry, :global_placeholder}} = spec
-      assert {Task, :start_link, [_fun]} = spec.start
-      assert spec[:restart] == :temporary
+    test "child_spec/1 returns nil for :global" do
+      assert nil == ProcessRegistry.child_spec([])
     end
   end
 end

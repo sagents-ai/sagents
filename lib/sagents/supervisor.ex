@@ -63,11 +63,13 @@ defmodule Sagents.Supervisor do
     # Validate Horde configuration early (raises on invalid config)
     Sagents.Horde.ClusterConfig.validate!()
 
-    children = [
-      Sagents.ProcessRegistry.child_spec([]),
-      Sagents.ProcessSupervisor.agents_supervisor_child_spec([]),
-      Sagents.ProcessSupervisor.filesystem_supervisor_child_spec([])
-    ]
+    children =
+      [
+        Sagents.ProcessRegistry.child_spec([]),
+        Sagents.ProcessSupervisor.agents_supervisor_child_spec([]),
+        Sagents.ProcessSupervisor.filesystem_supervisor_child_spec([])
+      ]
+      |> Enum.reject(&is_nil/1)
 
     Supervisor.init(children, strategy: :one_for_one)
   end

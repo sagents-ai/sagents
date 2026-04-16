@@ -56,11 +56,8 @@ defmodule Sagents.ProcessRegistry do
         Supervisor.child_spec(Sagents.Horde.RegistryImpl, shutdown: 15_000)
 
       :global ->
-        %{
-          id: {__MODULE__, :global_placeholder},
-          start: {Task, :start_link, [fn -> :ok end]},
-          restart: :temporary
-        }
+        # Do not start anything
+        nil
     end
   end
 
