@@ -223,23 +223,25 @@ defmodule <%= @context_module %> do
   end
 
   @doc """
-  Loads all display messages for a conversation.
+  Loads display messages for a conversation, ordered chronologically.
 
   ## Options
 
-    * `:limit` - Maximum number of messages to return (default: 100)
-    * `:offset` - Number of messages to skip (default: 0)
+    * `:limit` - Maximum number of messages to return (default: all)
   """
   def load_display_messages(conversation_id, opts \\ []) do
-    limit = Keyword.get(opts, :limit, 100)
-    offset = Keyword.get(opts, :offset, 0)
+    query =
+      DisplayMessage
+      |> where([m], m.conversation_id == ^conversation_id)
+      |> order_by([m], [asc: m.inserted_at, asc: m.sequence])
 
-    DisplayMessage
-    |> where([m], m.conversation_id == ^conversation_id)
-    |> order_by([m], asc: m.inserted_at, asc: m.sequence)
-    |> limit(^limit)
-    |> offset(^offset)
-    |> Repo.all()
+    query =
+      case Keyword.get(opts, :limit) do
+        nil -> query
+        limit -> limit(query, ^limit)
+      end
+
+    Repo.all(query)
   end
 
   #
