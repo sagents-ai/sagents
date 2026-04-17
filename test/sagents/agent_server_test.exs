@@ -119,6 +119,87 @@ defmodule Sagents.AgentServerTest do
       # Agent should still be running despite middleware failure
       assert AgentServer.get_status(agent_id) == :idle
     end
+
+    test "state returned from on_server_start is used in subsequent agent state" do
+      # Middleware that mutates state in on_server_start by setting metadata.
+      # The AgentServer must persist this returned state so later reads see it.
+      defmodule StateMutatingStartMiddleware do
+        @behaviour Sagents.Middleware
+
+        @impl true
+        def init(_opts), do: {:ok, %{}}
+
+        @impl true
+        def on_server_start(state, _config) do
+          {:ok, State.put_metadata(state, "server_started", true)}
+        end
+      end
+
+      agent = create_test_agent(middleware: [StateMutatingStartMiddleware])
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      # get_state/1 is a GenServer.call, which also synchronizes with the
+      # preceding handle_continue that runs on_server_start callbacks.
+      state = AgentServer.get_state(agent_id)
+
+      assert State.get_metadata(state, "server_started") == true
+    end
+
+    test "state mutations from multiple middleware on_server_start accumulate" do
+      # Two middleware modules that both mutate state in on_server_start.
+      # Each must see the previous middleware's changes and its own change must
+      # be preserved in the final AgentServer state.
+      defmodule FirstStartMiddleware do
+        @behaviour Sagents.Middleware
+
+        @impl true
+        def init(_opts), do: {:ok, %{}}
+
+        @impl true
+        def on_server_start(state, _config) do
+          {:ok, State.put_metadata(state, "first", "one")}
+        end
+      end
+
+      defmodule SecondStartMiddleware do
+        @behaviour Sagents.Middleware
+
+        @impl true
+        def init(_opts), do: {:ok, %{}}
+
+        @impl true
+        def on_server_start(state, _config) do
+          assert State.get_metadata(state, "first") == "one",
+                 "second middleware should observe state from first middleware"
+
+          {:ok, State.put_metadata(state, "second", "two")}
+        end
+      end
+
+      agent =
+        create_test_agent(middleware: [FirstStartMiddleware, SecondStartMiddleware])
+
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      state = AgentServer.get_state(agent_id)
+
+      assert State.get_metadata(state, "first") == "one"
+      assert State.get_metadata(state, "second") == "two"
+    end
   end
 
   describe "get_state/1" do

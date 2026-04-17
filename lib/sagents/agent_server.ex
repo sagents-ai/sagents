@@ -1398,20 +1398,27 @@ defmodule Sagents.AgentServer do
 
   @impl true
   def handle_continue(:broadcast_initial_state, server_state) do
-    # Call on_server_start for each middleware
-    # This allows middleware to broadcast initial state, set up subscriptions, etc.
-    # E.g., TodoList middleware broadcasts initial todos for UI sync
-    Enum.each(server_state.agent.middleware, fn entry ->
-      case Middleware.apply_on_server_start(server_state.state, entry) do
-        {:ok, _state} ->
-          :ok
+    # Call on_server_start for each middleware, threading the returned state
+    # through subsequent middleware and persisting it on the server.
+    # This allows middleware to broadcast initial state, set up subscriptions,
+    # and also seed state (e.g., TodoList broadcasts initial todos, other
+    # middleware may populate metadata for the first before_model call).
+    updated_state =
+      Enum.reduce(server_state.agent.middleware, server_state.state, fn entry, state_acc ->
+        case Middleware.apply_on_server_start(state_acc, entry) do
+          {:ok, new_state} ->
+            new_state
 
-        {:error, reason} ->
-          Logger.error(
-            "Middleware #{inspect(entry.module)} on_server_start failed: #{inspect(reason)}"
-          )
-      end
-    end)
+          {:error, reason} ->
+            Logger.error(
+              "Middleware #{inspect(entry.module)} on_server_start failed: #{inspect(reason)}"
+            )
+
+            state_acc
+        end
+      end)
+
+    server_state = %{server_state | state: updated_state}
 
     # If this server was restored from persisted state (e.g., Horde migration),
     # broadcast a node_transferred event so observers know it landed here
