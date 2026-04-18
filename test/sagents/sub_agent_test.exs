@@ -1650,6 +1650,39 @@ defmodule Sagents.SubAgentTest do
 
       refute Keyword.has_key?(opts, :middleware)
     end
+
+    test "returns opts with max_runs when set" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          parent_state: %{messages: []},
+          max_runs: 100
+        )
+
+      opts = SubAgent.build_mode_opts(subagent)
+
+      assert Keyword.get(opts, :max_runs) == 100
+    end
+
+    test "does not include max_runs when not set" do
+      agent_config = test_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          parent_state: %{messages: []}
+        )
+
+      opts = SubAgent.build_mode_opts(subagent)
+
+      refute Keyword.has_key?(opts, :max_runs)
+    end
   end
 
   # Helper function to extract errors from changeset

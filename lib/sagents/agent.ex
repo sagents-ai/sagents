@@ -73,6 +73,10 @@ defmodule Sagents.Agent do
     # LangChain.Chains.LLMChain.Mode behaviour. Defaults to
     # Sagents.Modes.AgentExecution when nil.
     field :mode, :any, virtual: true
+    # Maximum number of LLM calls per execution. Overrides the mode's default
+    # (50 for AgentExecution). Can also be overridden per-invocation via
+    # Agent.execute/3 opts.
+    field :max_runs, :integer, virtual: true
   end
 
   @type t :: %Agent{}
@@ -90,7 +94,8 @@ defmodule Sagents.Agent do
     :async_tool_timeout,
     :fallback_models,
     :before_fallback,
-    :mode
+    :mode,
+    :max_runs
   ]
   @required_fields [:agent_id, :model]
 
@@ -117,6 +122,9 @@ defmodule Sagents.Agent do
   - `:before_fallback` - Optional function to modify chain before each attempt (default: nil).
     Signature: `fn chain -> modified_chain end`.
     Useful for provider-specific system prompts or modifications
+  - `:max_runs` - Maximum number of LLM calls per execution (default: 50 for AgentExecution mode).
+    Agents with many tools or complex middleware may need higher values. Can also be overridden
+    per-invocation via `Agent.execute/3` opts: `Agent.execute(agent, state, max_runs: 100)`.
 
   ## Options
 
@@ -849,6 +857,7 @@ defmodule Sagents.Agent do
       |> Keyword.put(:mode, agent.mode || Sagents.Modes.AgentExecution)
       |> Keyword.put(:middleware, middleware)
       |> maybe_put_until_tool(opts)
+      |> maybe_put_max_runs(agent, opts)
 
     if is_raw_langchain_mode?(agent.mode) do
       Logger.warning(
@@ -871,6 +880,18 @@ defmodule Sagents.Agent do
       {:pause, chain} ->
         {:pause, chain}
 
+      {:error, _chain, %LangChainError{type: "exceeded_max_runs"} = reason} ->
+        Logger.warning(
+          "Agent #{agent.agent_id} exceeded max_runs limit (#{reason.message}). " <>
+            "Set :max_runs on the Agent struct or pass max_runs: N to Agent.execute/3 opts."
+        )
+
+        {:error,
+         %LangChainError{
+           reason
+           | message: "Max number of automated turns reached. You may continue if desired."
+         }}
+
       {:error, _chain, %LangChainError{} = reason} ->
         {:error, reason}
 
@@ -883,6 +904,13 @@ defmodule Sagents.Agent do
     case Keyword.get(opts, :until_tool) do
       nil -> mode_opts
       until_tool -> Keyword.put(mode_opts, :until_tool, until_tool)
+    end
+  end
+
+  defp maybe_put_max_runs(mode_opts, agent, opts) do
+    case Keyword.get(opts, :max_runs) || agent.max_runs do
+      nil -> mode_opts
+      max_runs -> Keyword.put(mode_opts, :max_runs, max_runs)
     end
   end
 
