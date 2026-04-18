@@ -304,6 +304,16 @@ defmodule Sagents.AgentTest do
         )
       end
     end
+
+    test "creates agent with max_runs" do
+      {:ok, agent} = Agent.new(%{model: mock_model(), max_runs: 100})
+      assert agent.max_runs == 100
+    end
+
+    test "max_runs defaults to nil" do
+      {:ok, agent} = Agent.new(%{model: mock_model()})
+      assert agent.max_runs == nil
+    end
   end
 
   describe "execute/2" do
@@ -420,6 +430,136 @@ defmodule Sagents.AgentTest do
       assert %State{} = paused_state
       # Original message preserved, no assistant response added (paused before completion)
       assert [%{role: :user}] = paused_state.messages
+    end
+
+    test "forwards max_runs from agent struct to mode" do
+      # Agent with max_runs: 1 should error after a single LLM call that triggers tool use
+      tool =
+        LangChain.Function.new!(%{
+          name: "test_tool",
+          description: "A test tool",
+          function: fn _args, _context -> {:ok, "done"} end
+        })
+
+      # LLM always requests tool call, forcing a loop
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok,
+         [
+           Message.new_assistant!(%{
+             tool_calls: [
+               ToolCall.new!(%{
+                 call_id: "call_#{:erlang.unique_integer([:positive])}",
+                 name: "test_tool",
+                 arguments: %{}
+               })
+             ]
+           })
+         ]}
+      end)
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [tool],
+            max_runs: 1
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:error, %LangChainError{type: "exceeded_max_runs"}} =
+               Agent.execute(agent, initial_state)
+    end
+
+    test "max_runs in execute opts overrides agent struct" do
+      # Agent struct has max_runs: 100 but execute opts set max_runs: 1
+      tool =
+        LangChain.Function.new!(%{
+          name: "test_tool",
+          description: "A test tool",
+          function: fn _args, _context -> {:ok, "done"} end
+        })
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok,
+         [
+           Message.new_assistant!(%{
+             tool_calls: [
+               ToolCall.new!(%{
+                 call_id: "call_#{:erlang.unique_integer([:positive])}",
+                 name: "test_tool",
+                 arguments: %{}
+               })
+             ]
+           })
+         ]}
+      end)
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [tool],
+            max_runs: 100
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      # Override with a low limit via execute opts
+      assert {:error, %LangChainError{type: "exceeded_max_runs"}} =
+               Agent.execute(agent, initial_state, max_runs: 1)
+    end
+
+    test "max_runs exceeded logs warning and returns user-friendly message" do
+      tool =
+        LangChain.Function.new!(%{
+          name: "test_tool",
+          description: "A test tool",
+          function: fn _args, _context -> {:ok, "done"} end
+        })
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok,
+         [
+           Message.new_assistant!(%{
+             tool_calls: [
+               ToolCall.new!(%{
+                 call_id: "call_#{:erlang.unique_integer([:positive])}",
+                 name: "test_tool",
+                 arguments: %{}
+               })
+             ]
+           })
+         ]}
+      end)
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            tools: [tool],
+            max_runs: 1
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      log =
+        capture_log(fn ->
+          assert {:error, %LangChainError{type: "exceeded_max_runs"} = error} =
+                   Agent.execute(agent, initial_state)
+
+          assert error.message ==
+                   "Max number of automated turns reached. You may continue if desired."
+        end)
+
+      assert log =~ "exceeded max_runs limit"
+      assert log =~ "Set :max_runs on the Agent struct"
     end
   end
 

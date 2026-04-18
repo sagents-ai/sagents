@@ -134,6 +134,10 @@ defmodule Sagents.SubAgent do
     # Until-tool termination: tool name (string) or list of tool names
     field :until_tool, :any, virtual: true
 
+    # Maximum number of LLM calls per execution. Overrides the mode's default
+    # (50 for AgentExecution). See Agent :max_runs for details.
+    field :max_runs, :integer, virtual: true
+
     # Metadata
     field :id, :string
     field :parent_agent_id, :string
@@ -260,6 +264,7 @@ defmodule Sagents.SubAgent do
     parent_tool_context = Keyword.get(opts, :parent_tool_context, %{})
     parent_metadata = Keyword.get(opts, :parent_metadata, %{})
     until_tool = Keyword.get(opts, :until_tool)
+    max_runs = Keyword.get(opts, :max_runs)
 
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
 
@@ -294,6 +299,7 @@ defmodule Sagents.SubAgent do
       chain: chain,
       interrupt_on: interrupt_on,
       until_tool: until_tool,
+      max_runs: max_runs,
       status: :idle,
       created_at: DateTime.utc_now()
     }
@@ -657,7 +663,11 @@ defmodule Sagents.SubAgent do
   end
 
   @doc false
-  def build_mode_opts(%SubAgent{interrupt_on: interrupt_on, until_tool: until_tool}) do
+  def build_mode_opts(%SubAgent{
+        interrupt_on: interrupt_on,
+        until_tool: until_tool,
+        max_runs: max_runs
+      }) do
     opts = [mode: Sagents.Modes.AgentExecution]
 
     opts =
@@ -683,6 +693,12 @@ defmodule Sagents.SubAgent do
       case until_tool do
         nil -> opts
         ut -> Keyword.put(opts, :until_tool, ut)
+      end
+
+    opts =
+      case max_runs do
+        nil -> opts
+        mr -> Keyword.put(opts, :max_runs, mr)
       end
 
     opts
@@ -728,6 +744,7 @@ defmodule Sagents.SubAgent do
       field :middleware, {:array, :any}, default: [], virtual: true
       field :interrupt_on, :map
       field :until_tool, :any, virtual: true
+      field :max_runs, :integer, virtual: true
     end
 
     @type t :: %Config{
@@ -742,7 +759,8 @@ defmodule Sagents.SubAgent do
             model: term() | nil,
             middleware: list(),
             interrupt_on: map() | nil,
-            until_tool: String.t() | [String.t()] | nil
+            until_tool: String.t() | [String.t()] | nil,
+            max_runs: integer() | nil
           }
 
     def new(attrs) do
@@ -759,7 +777,8 @@ defmodule Sagents.SubAgent do
         :model,
         :middleware,
         :interrupt_on,
-        :until_tool
+        :until_tool,
+        :max_runs
       ])
       |> validate_required([:name, :description, :tools])
       |> validate_length(:name, min: 1, max: 100)

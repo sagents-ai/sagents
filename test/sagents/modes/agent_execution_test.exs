@@ -259,7 +259,7 @@ defmodule Sagents.Modes.AgentExecutionTest do
       result = AgentExecution.run(chain, until_tool: "submit_report", max_runs: 3)
 
       assert {:error, %LLMChain{}, %LangChainError{type: "exceeded_max_runs"} = error} = result
-      assert error.message =~ "Exceeded maximum number of runs"
+      assert error.message =~ "Exceeded maximum number of runs (3/3)"
     end
   end
 
