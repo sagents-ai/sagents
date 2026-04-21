@@ -20,6 +20,21 @@ defmodule Sagents.Horde.NodeTransferTest do
 
   setup_all do
     LocalCluster.start()
+
+    unless Node.alive?() do
+      raise """
+      Distributed Erlang did not start. LocalCluster.start/0 could not make this \
+      node distributed, most likely because EPMD is not running on localhost:4369.
+
+      Start EPMD and retry:
+
+          epmd -daemon
+
+      (LocalCluster 2.1.0 swallows :net_kernel.start errors silently, so the \
+      underlying failure surfaces later as :peer :not_alive.)
+      """
+    end
+
     :ok
   end
 
