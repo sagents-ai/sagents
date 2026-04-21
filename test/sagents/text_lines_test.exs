@@ -20,8 +20,18 @@ defmodule Sagents.TextLinesTest do
       assert {["a", "b", "c"], 3} = TextLines.split("a\nb\nc")
     end
 
-    test "trailing newline adds empty line" do
-      assert {["a", "b", ""], 3} = TextLines.split("a\nb\n")
+    test "trailing newline is a terminator, not a separate line" do
+      # POSIX-convention files end with "\n". String.split produces a phantom
+      # empty element; `split/1` drops it so line counts match editor
+      # conventions and LLMs don't try to edit a line that isn't there.
+      assert {["a", "b"], 2} = TextLines.split("a\nb\n")
+      assert {["a", "b", "c"], 3} = TextLines.split("a\nb\nc\n")
+    end
+
+    test "body with multiple trailing newlines keeps the intentional empties" do
+      # Only the terminator is dropped — intentional blank lines stay.
+      assert {["a", ""], 2} = TextLines.split("a\n\n")
+      assert {["a", "", ""], 3} = TextLines.split("a\n\n\n")
     end
   end
 
@@ -37,7 +47,7 @@ defmodule Sagents.TextLinesTest do
 
     test "paginates with offset and limit" do
       body = "a\nb\nc\nd\ne"
-      {formatted, 2, 3, 5} = TextLines.render(body, offset: 2, limit: 2)
+      {formatted, 2, 3, 5} = TextLines.render(body, start_line: 2, limit: 2)
 
       assert formatted =~ "Showing lines 2 to 3 of 5"
       assert formatted =~ "     2\tb"
@@ -55,7 +65,7 @@ defmodule Sagents.TextLinesTest do
 
     test "offset beyond content returns empty-ish result" do
       body = "a\nb"
-      {formatted, 100, 99, 2} = TextLines.render(body, offset: 100)
+      {formatted, 100, 99, 2} = TextLines.render(body, start_line: 100)
 
       assert formatted =~ "Showing lines 100 to 99 of 2"
     end
@@ -110,6 +120,78 @@ defmodule Sagents.TextLinesTest do
     test "errors on end_line beyond content" do
       assert {:error, msg} = TextLines.replace_range("a\nb", 1, 5, "x")
       assert msg =~ "end_line 5 is beyond content length (2 lines)"
+    end
+
+    test "preserves trailing newline on files that had one" do
+      body = "a\nb\nc\n"
+      # Body has 3 lines, not 4 — trailing \n is a terminator.
+      assert {:ok, "a\nX\nc\n", 1} = TextLines.replace_range(body, 2, 2, "X")
+    end
+
+    test "trying to edit a phantom line past the terminator returns an error, not a silent edit" do
+      # Regression for a bug where an LLM read a POSIX-terminated file,
+      # saw a phantom "line 4" (artifact of trailing \n), then asked to
+      # replace it. The old behavior silently inserted content after the
+      # real last line, duplicating whatever the LLM put in new_content.
+      body = "line1\nline2\nlast\n"
+      assert {["line1", "line2", "last"], 3} = TextLines.split(body)
+
+      assert {:error, msg} = TextLines.replace_range(body, 4, 4, "new content")
+      assert msg =~ "beyond content length (3 lines)"
+    end
+
+    test "appending via replace_range on the real last line does not duplicate surrounding content" do
+      # The correct usage pattern when appending: replace the actual last
+      # line with itself + new content. Verifies the trailing \n is
+      # preserved so the file stays POSIX-compliant.
+      body = "intro\nlast line\n"
+
+      assert {:ok, "intro\nlast line\nappended\n", 1} =
+               TextLines.replace_range(body, 2, 2, "last line\nappended")
+    end
+
+    test "empty new_content deletes the range entirely (no blank line left behind)" do
+      body = "a\nb\nc"
+      assert {:ok, "a\nc", 1} = TextLines.replace_range(body, 2, 2, "")
+    end
+
+    test "empty new_content deleting the middle of a file with trailing newline" do
+      body = "a\nb\nc\n"
+      assert {:ok, "a\nc\n", 1} = TextLines.replace_range(body, 2, 2, "")
+    end
+
+    test "empty new_content deleting a multi-line range" do
+      body = "a\nb\nc\nd\ne"
+      assert {:ok, "a\ne", 3} = TextLines.replace_range(body, 2, 4, "")
+    end
+
+    test "new_content of \"\\n\" inserts exactly one blank line" do
+      body = "a\nb\nc"
+      assert {:ok, "a\n\nc", 1} = TextLines.replace_range(body, 2, 2, "\n")
+    end
+
+    test "trailing newline on non-empty new_content is treated as a terminator, not a blank line" do
+      body = "a\nb\nc"
+      # "foo\n" and "foo" should produce the same result.
+      assert {:ok, "a\nfoo\nc", 1} = TextLines.replace_range(body, 2, 2, "foo\n")
+      assert {:ok, "a\nfoo\nc", 1} = TextLines.replace_range(body, 2, 2, "foo")
+    end
+
+    test "trailing newline on multi-line new_content is treated as a terminator" do
+      body = "a\nb\nc"
+      # "foo\nbar\n" and "foo\nbar" should produce the same result.
+      assert {:ok, "a\nfoo\nbar\nc", 1} = TextLines.replace_range(body, 2, 2, "foo\nbar\n")
+      assert {:ok, "a\nfoo\nbar\nc", 1} = TextLines.replace_range(body, 2, 2, "foo\nbar")
+    end
+
+    test "deleting the last real line of a file preserves its trailing newline" do
+      body = "a\nb\nc\n"
+      assert {:ok, "a\nb\n", 1} = TextLines.replace_range(body, 3, 3, "")
+    end
+
+    test "deleting the entire contents yields an empty body (plus preserved trailing newline)" do
+      body = "a\nb\nc\n"
+      assert {:ok, "\n", 3} = TextLines.replace_range(body, 1, 3, "")
     end
   end
 

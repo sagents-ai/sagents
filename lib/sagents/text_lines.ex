@@ -22,16 +22,32 @@ defmodule Sagents.TextLines do
   def split(""), do: {[""], 1}
 
   def split(body) when is_binary(body) do
-    lines = String.split(body, "\n")
+    # `String.split("foo\nbar\n", "\n")` returns `["foo", "bar", ""]` — the
+    # trailing empty element is an artifact of the line terminator, not a
+    # real line. Keeping it mis-renders file lengths and misleads LLMs into
+    # editing a phantom "last line". Drop it so line counts match human /
+    # editor conventions. `replace_range/4` re-adds the terminator on save.
+    lines =
+      body
+      |> String.split("\n")
+      |> drop_trailing_empty()
+
     {lines, length(lines)}
+  end
+
+  defp drop_trailing_empty(lines) do
+    case List.last(lines) do
+      "" when length(lines) > 1 -> Enum.drop(lines, -1)
+      _ -> lines
+    end
   end
 
   @doc """
   Renders lines with right-aligned 6-char line numbers and a tab separator.
 
   Options:
-    - `:offset` - 1-indexed start line (default 1)
-    - `:limit`  - max lines to return (default: all)
+    - `:start_line` - 1-indexed start line (default 1)
+    - `:limit`      - max lines to return (default: all)
 
   Returns `{formatted_string, start_line, end_line, total_lines}`.
   """
@@ -39,37 +55,43 @@ defmodule Sagents.TextLines do
           {String.t(), pos_integer(), pos_integer(), pos_integer()}
   def render(body, opts \\ []) do
     {lines, total} = split(body)
-    offset = max(Keyword.get(opts, :offset, 1), 1)
+    start_line = max(Keyword.get(opts, :start_line, 1), 1)
     limit = Keyword.get(opts, :limit, total)
 
-    # Convert 1-indexed offset to 0-indexed for Enum.slice
-    start_idx = offset - 1
+    # Convert 1-indexed start_line to 0-indexed for Enum.slice
+    start_idx = start_line - 1
 
     selected =
       lines
       |> Enum.slice(start_idx, limit)
-      |> Enum.with_index(offset)
+      |> Enum.with_index(start_line)
       |> Enum.map(fn {line, line_num} ->
         padded = String.pad_leading(Integer.to_string(line_num), 6)
         "#{padded}\t#{line}"
       end)
 
-    end_line = offset + length(selected) - 1
+    end_line = start_line + length(selected) - 1
 
     formatted =
       if start_idx > 0 or end_line < total do
-        "Showing lines #{offset} to #{end_line} of #{total}:\n" <>
+        "Showing lines #{start_line} to #{end_line} of #{total}:\n" <>
           Enum.join(selected, "\n")
       else
         Enum.join(selected, "\n")
       end
 
-    {formatted, offset, end_line, total}
+    {formatted, start_line, end_line, total}
   end
 
   @doc """
   Replaces lines `start_line..end_line` (1-indexed, inclusive) with
   `new_lines_text` and returns the rejoined body.
+
+  `new_lines_text` semantics:
+    - `""` deletes the targeted range (zero lines inserted)
+    - `"\\n"` inserts exactly one blank line
+    - A trailing `"\\n"` on non-empty content is a line terminator, not an
+      extra blank line: `"foo\\n"` and `"foo"` both insert one line `"foo"`
 
   Returns `{:ok, new_body, lines_replaced}` or `{:error, reason}`.
   """
@@ -77,6 +99,7 @@ defmodule Sagents.TextLines do
           {:ok, String.t(), non_neg_integer()} | {:error, String.t()}
   def replace_range(body, start_line, end_line, new_lines_text) do
     {lines, total} = split(body)
+    had_trailing_newline? = is_binary(body) and String.ends_with?(body, "\n")
 
     cond do
       start_line < 1 ->
@@ -102,11 +125,32 @@ defmodule Sagents.TextLines do
 
         before = Enum.slice(lines, 0, start_idx)
         after_lines = Enum.slice(lines, end_idx + 1, total - end_idx - 1)
-        new_lines = String.split(new_lines_text, "\n")
+        new_lines = split_new_content(new_lines_text)
 
         new_body = Enum.join(before ++ new_lines ++ after_lines, "\n")
+        new_body = if had_trailing_newline?, do: new_body <> "\n", else: new_body
+
         {:ok, new_body, lines_replaced}
     end
+  end
+
+  # Splits replacement content into the list of lines to insert.
+  #   ""          -> []           (delete the range)
+  #   "\n"        -> [""]         (one blank line)
+  #   "foo"       -> ["foo"]
+  #   "foo\n"     -> ["foo"]      (trailing \n is a terminator)
+  #   "foo\nbar"  -> ["foo", "bar"]
+  defp split_new_content(""), do: []
+
+  defp split_new_content(text) when is_binary(text) do
+    stripped =
+      if String.ends_with?(text, "\n") do
+        binary_part(text, 0, byte_size(text) - 1)
+      else
+        text
+      end
+
+    String.split(stripped, "\n")
   end
 
   @doc """

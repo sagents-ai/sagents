@@ -469,8 +469,8 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert result =~ "5\tline 5"
     end
 
-    test "reads file with offset", %{tool: tool} do
-      args = %{"file_path" => "/test.txt", "offset" => 2}
+    test "reads file with start_line", %{tool: tool} do
+      args = %{"file_path" => "/test.txt", "start_line" => 3}
 
       assert {:ok, result} = tool.function.(args, %{state: State.new!()})
       assert result =~ "3\tline 3"
@@ -487,8 +487,8 @@ defmodule Sagents.Middleware.FileSystemTest do
       refute result =~ "3\tline 3"
     end
 
-    test "reads file with offset and limit", %{tool: tool} do
-      args = %{"file_path" => "/test.txt", "offset" => 1, "limit" => 2}
+    test "reads file with start_line and limit", %{tool: tool} do
+      args = %{"file_path" => "/test.txt", "start_line" => 2, "limit" => 2}
 
       assert {:ok, result} = tool.function.(args, %{state: State.new!()})
       assert result =~ "2\tline 2"
@@ -1142,7 +1142,7 @@ defmodule Sagents.Middleware.FileSystemTest do
 
       # Now read the file to get more context
       read_tool = Enum.find(tools, fn tool -> tool.name == "read_file" end)
-      read_args = %{"file_path" => "/project.md", "offset" => 6, "limit" => 3}
+      read_args = %{"file_path" => "/project.md", "start_line" => 7, "limit" => 3}
       {:ok, read_result} = read_tool.function.(read_args, %{})
 
       # Should see the TODO line in context
@@ -1337,6 +1337,37 @@ defmodule Sagents.Middleware.FileSystemTest do
     end
 
     test "replaces last line only", %{agent_id: agent_id} do
+      # Heredoc produces "Line 1\nLine 2\nLine 3\n" — 3 content lines plus a
+      # terminating newline. The file has 3 lines; the trailing \n is not a
+      # fourth line. Replacing line 3 with new content produces a file that
+      # still ends with \n.
+      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", """
+      Line 1
+      Line 2
+      Line 3
+      """)
+
+      {:ok, config} = FileSystem.init(agent_id: agent_id)
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
+
+      args = %{
+        "file_path" => "/test.txt",
+        "start_line" => 3,
+        "end_line" => 3,
+        "new_content" => "REPLACED LAST LINE"
+      }
+
+      {:ok, result} = replace_lines_tool.function.(args, %{})
+      assert result =~ "Replaced 1 lines (3-3)"
+
+      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
+      assert content == "Line 1\nLine 2\nREPLACED LAST LINE\n"
+    end
+
+    test "errors when asked to replace a line beyond content length", %{agent_id: agent_id} do
+      # Regression: previously a 3-line file with trailing \n was treated as
+      # having 4 lines (phantom terminator). The tool silently allowed edits
+      # at line 4, producing off-by-one bugs when LLMs mis-counted.
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", """
       Line 1
       Line 2
@@ -1350,15 +1381,11 @@ defmodule Sagents.Middleware.FileSystemTest do
         "file_path" => "/test.txt",
         "start_line" => 4,
         "end_line" => 4,
-        "new_content" => "REPLACED LAST LINE"
+        "new_content" => "past the end"
       }
 
-      {:ok, result} = replace_lines_tool.function.(args, %{})
-      assert result =~ "Replaced 1 lines (4-4)"
-
-      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
-      lines = String.split(content, "\n", trim: true)
-      assert lines == ["Line 1", "Line 2", "Line 3", "REPLACED LAST LINE"]
+      {:error, msg} = replace_lines_tool.function.(args, %{})
+      assert msg =~ "start_line 4 is beyond content length (3 lines)"
     end
 
     test "replaces entire file", %{agent_id: agent_id} do
@@ -1374,18 +1401,87 @@ defmodule Sagents.Middleware.FileSystemTest do
       args = %{
         "file_path" => "/test.txt",
         "start_line" => 1,
-        "end_line" => 4,
+        "end_line" => 3,
         "new_content" => "Completely new content"
       }
 
       {:ok, result} = replace_lines_tool.function.(args, %{})
-      assert result =~ "Replaced 4 lines (1-4)"
+      assert result =~ "Replaced 3 lines (1-3)"
 
       {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
-      assert String.trim(content) == "Completely new content"
+      # Trailing newline preserved since the original file had one.
+      assert content == "Completely new content\n"
     end
 
-    test "replaces with empty content", %{agent_id: agent_id} do
+    test "returns a post-edit preview with line numbers and surrounding context", %{
+      agent_id: agent_id
+    } do
+      # Preview lets the model verify the edit landed correctly without a
+      # follow-up read_file. Should include lines around the affected range
+      # with post-edit line numbers.
+      FileSystemServer.write_file(
+        {:agent, agent_id},
+        "/test.txt",
+        "alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\n"
+      )
+
+      {:ok, config} = FileSystem.init(agent_id: agent_id)
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
+
+      args = %{
+        "file_path" => "/test.txt",
+        "start_line" => 5,
+        "end_line" => 5,
+        "new_content" => "ECHO-REPLACED"
+      }
+
+      {:ok, result} = replace_lines_tool.function.(args, %{})
+
+      assert result =~ "Context after edit:"
+      # Edited line 5 + 2 context lines each side → expect lines 3..7.
+      assert result =~ "     3\tcharlie"
+      assert result =~ "     4\tdelta"
+      assert result =~ "     5\tECHO-REPLACED"
+      assert result =~ "     6\tfoxtrot"
+      assert result =~ "     7\tgolf"
+      # Lines outside the ±2 window should not appear.
+      refute result =~ "     2\tbravo"
+      refute result =~ "     8\thotel"
+    end
+
+    test "preview expands correctly when replacement adds lines", %{agent_id: agent_id} do
+      FileSystemServer.write_file(
+        {:agent, agent_id},
+        "/test.txt",
+        "a\nb\nc\nd\ne\n"
+      )
+
+      {:ok, config} = FileSystem.init(agent_id: agent_id)
+      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
+
+      # Replace line 3 with 3 new lines — preview should show all 3 new
+      # lines plus ±2 context.
+      args = %{
+        "file_path" => "/test.txt",
+        "start_line" => 3,
+        "end_line" => 3,
+        "new_content" => "C1\nC2\nC3"
+      }
+
+      {:ok, result} = replace_lines_tool.function.(args, %{})
+
+      # The 3 inserted lines all appear with their post-edit numbers.
+      assert result =~ "     3\tC1"
+      assert result =~ "     4\tC2"
+      assert result =~ "     5\tC3"
+      # Context on each side (±2).
+      assert result =~ "     1\ta"
+      assert result =~ "     2\tb"
+      assert result =~ "     6\td"
+      assert result =~ "     7\te"
+    end
+
+    test "deletes the range when new_content is empty", %{agent_id: agent_id} do
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", """
       Line 1
       Line 2
@@ -1406,9 +1502,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert result =~ "Replaced 1 lines"
 
       {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
-      lines = String.split(content, "\n", trim: true)
-      # Empty string creates an empty line
-      assert length(lines) == 2
+      assert content == "Line 1\nLine 3\n"
     end
   end
 
