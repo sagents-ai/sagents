@@ -1045,4 +1045,26 @@ defmodule Sagents.FileSystemServerTest do
       assert entry.path == "/test.txt"
     end
   end
+
+  describe "trap_exit and linked ports" do
+    test "ignores {:EXIT, port, _} when a linked port closes", %{agent_id: agent_id} do
+      sh = System.find_executable("sh")
+      assert sh, "sh executable required for this test"
+
+      {:ok, fs_pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+
+      port =
+        Port.open({:spawn_executable, sh}, [
+          :binary,
+          args: ["-c", "exit 0"]
+        ])
+
+      assert is_port(port)
+      assert Port.connect(port, fs_pid)
+      Port.close(port)
+
+      assert Process.alive?(fs_pid)
+      assert {:ok, {:agent, ^agent_id}} = FileSystemServer.get_scope(fs_pid)
+    end
+  end
 end

@@ -639,6 +639,13 @@ defmodule Sagents.FileSystemServer do
   end
 
   @impl true
+  def handle_info({:EXIT, port, _reason}, state) when is_port(port) do
+    # With trap_exit, linked ports (e.g. from System.cmd in persistence) send
+    # {:EXIT, port, reason} when they close — ignore so the GenServer keeps running.
+    {:noreply, state}
+  end
+
+  @impl true
   def handle_info({:persist_file, path}, state) do
     new_state = FileSystemState.persist_file(state, path)
     {:noreply, new_state}
