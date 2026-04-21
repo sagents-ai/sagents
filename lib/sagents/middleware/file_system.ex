@@ -209,6 +209,36 @@ defmodule Sagents.Middleware.FileSystem do
   - Large or archived files may load slowly on first access\
   """
 
+  # Cross-cutting rules that apply whenever the agent reads or edits files by
+  # line number. Kept here (not in individual tool descriptions) so the guidance
+  # is written once — changing a rule is a one-place edit and the prompt cost
+  # is paid once per agent session instead of once per edit-tool description.
+  @prompt_line_number_rules """
+  ### Working with Line Numbers and File Content
+
+  - `read_file` displays each line in `cat -n` format: `    N\\t<content>`
+    (6-char right-aligned line number, a tab, then the line). The `    N\\t`
+    prefix is rendering metadata, NOT part of the file. When passing text to
+    `replace_file_text`'s `old_string`/`new_string` or `replace_file_lines`'s
+    `new_content`, include only what appears AFTER the tab. Preserve the exact
+    indentation (tabs/spaces) that appears after the tab — that IS file content.
+  - Line numbers are 1-based and consistent across `read_file`,
+    `replace_file_lines`, and `find_in_file` — the same number refers to the
+    same line in every tool.
+  - Line numbers shift after every edit. Always `read_file` between sequential
+    edits to the same file to pick up the new numbering.
+  - A trailing `\\n` on a file is a line terminator, not a blank line. A 3-line
+    file ending in `\\n` has 3 lines, not 4 — don't try to edit a phantom
+    "line 4" past the terminator.\
+  """
+
+  # Edit tools that consume text the agent may have copied from `read_file`'s
+  # `cat -n` output. The line-number rules section is emitted only when at
+  # least one of these is enabled: without an edit tool in the config, the
+  # cat-n-prefix and line-shift rules aren't actionable, and naming edit tools
+  # in the prompt when they're disabled would mislead the agent.
+  @line_aware_tools ~w(replace_file_text replace_file_lines)
+
   @impl true
   def init(opts) do
     # Support both new filesystem_scope and old agent_id (backward compatible)
@@ -330,6 +360,7 @@ defmodule Sagents.Middleware.FileSystem do
     [
       @prompt_header <> "\n" <> tool_list_section(enabled),
       @prompt_file_organization,
+      maybe_line_number_rules_section(enabled),
       maybe_pattern_filtering_section(enabled),
       best_practices_section(enabled),
       @prompt_persistence
@@ -349,6 +380,10 @@ defmodule Sagents.Middleware.FileSystem do
 
   defp maybe_pattern_filtering_section(enabled) do
     if "list_files" in enabled, do: @prompt_pattern_filtering
+  end
+
+  defp maybe_line_number_rules_section(enabled) do
+    if Enum.any?(@line_aware_tools, &(&1 in enabled)), do: @prompt_line_number_rules, else: nil
   end
 
   defp best_practices_section(enabled) do
@@ -431,28 +466,12 @@ defmodule Sagents.Middleware.FileSystem do
     default_description = """
     Read a file's contents with line numbers.
 
-    Supports pagination with start_line and limit parameters. Line numbers are
-    1-based and match those used by `replace_file_lines` and `find_in_file`.
+    Returns content in `cat -n` format (6-char line number, tab, content). Line
+    numbers are 1-based and match `replace_file_lines` and `find_in_file`. See
+    "Working with Line Numbers and File Content" in the system prompt for rules
+    on passing this text back to edit tools.
 
-    ## Output format
-
-    Results are returned in a `cat -n`-style format — each line is prefixed with
-    its 1-based line number (right-aligned, 6-char width) and a tab separator,
-    then the actual line content. Example:
-
-        41	Feel free to groan at any time! 😄
-
-    The line number prefix is rendering metadata, NOT part of the file content.
-    When passing text back to `replace_file_lines` or `replace_file_text`, send
-    only the content that appears AFTER the tab separator. Never include the
-    `    N\\t` prefix in `new_content`, `old_string`, or `new_string` — doing so
-    will write the line number prefix into the file and corrupt it.
-
-    ## Usage tips
-
-    - For large files: read in chunks with `start_line` and `limit`.
-    - For editing: always read first to verify current line numbers, then make
-      the edit. Line numbers shift after every edit, so re-read between edits.
+    Supports pagination via `start_line` and `limit` for large files.
     """
 
     description = get_custom_description(config, "read_file", default_description)
@@ -530,18 +549,10 @@ defmodule Sagents.Middleware.FileSystem do
     For large block replacements where you have line numbers, prefer replace_file_lines —
     it is significantly more token-efficient.
 
-    ## Critical: do not include read_file's line-number prefixes
-
-    `read_file` renders content in `cat -n` format: each line prefixed with
-    `    N\\t` (right-aligned 6-char line number + tab + content). That prefix
-    is rendering metadata, NOT part of the file. When you copy text from
-    read_file's output into `old_string` or `new_string`, include only what
-    appears AFTER the tab separator. Including the `    N\\t` prefix will
-    cause the search to miss (old_string wouldn't match the actual file) or,
-    for new_string, write the line numbers literally into the file.
-
-    Preserve the exact indentation (tabs/spaces) that appears after the tab
-    separator — that indentation IS part of the file content.
+    When copying text from `read_file`'s output into `old_string` or `new_string`,
+    include only the content that appears AFTER the tab separator — never the
+    `    N\\t` line-number prefix. (See "Working with Line Numbers and File
+    Content" in the system prompt for details.)
     """
 
     description = get_custom_description(config, "replace_file_text", default_description)
@@ -743,17 +754,9 @@ defmodule Sagents.Middleware.FileSystem do
 
     ## Best Practices
 
-    - ALWAYS use read_file first to see the current line numbers. Line numbers
-      shift after every edit, so re-read between edits if you're making multiple
-      changes to the same file.
+    - ALWAYS `read_file` first to see the current line numbers before editing.
     - Carefully verify start_line and end_line before calling. Wrong line numbers
       will destructively replace the wrong content with no way to undo.
-    - NEVER include the `    N\\t` line-number prefix from read_file's output
-      in `new_content`. That prefix is rendering metadata, not file content —
-      including it will write the line numbers literally into the file and
-      corrupt it. Copy only what appears AFTER the tab separator.
-    - Preserve the exact indentation (tabs/spaces) from the content you saw
-      after the tab separator in read_file's output.
     - For small, targeted edits where you know the exact text, use replace_file_text
       instead — it has a built-in safety check (the old_string must match).
     - For multi-line replacements where you have line numbers from a recent
