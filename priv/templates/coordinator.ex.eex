@@ -8,10 +8,12 @@ defmodule <%= module %> do
 
   ## Usage
 
-      # Start or resume a conversation agent with explicit filesystem scope
-      filesystem_scope = {:<%= owner_type %>, current_<%= owner_type %>.id}
+      # Start or resume a conversation agent. Pass the tenant scope and
+      # filesystem scope from the caller's session (e.g. a LiveView socket).
+      filesystem_scope = {:<%= owner_type %>, current_scope.<%= owner_type %>.id}
       {:ok, session} = <%= module %>.start_conversation_session(
         conversation_id,
+        scope: current_scope,
         filesystem_scope: filesystem_scope
       )
 
@@ -37,8 +39,6 @@ defmodule <%= module %> do
   **1. In mount/3 - Subscribe to agent events:**
 
       def mount(%{"conversation_id" => conversation_id}, _session, socket) do
-        <%= owner_type %>_id = socket.assigns.current_<%= owner_type %>.id
-
         if connected?(socket) do
           # Subscribe to agent events for real-time updates
           <%= module %>.ensure_subscribed_to_conversation(conversation_id)
@@ -51,11 +51,19 @@ defmodule <%= module %> do
 
       def handle_event("send_message", %{"message" => message_text}, socket) do
         conversation_id = socket.assigns.conversation_id
-        <%= owner_type %>_id = socket.assigns.current_<%= owner_type %>.id
-        filesystem_scope = {:<%= owner_type %>, <%= owner_type %>_id}
+        current_scope = socket.assigns.current_scope
+        filesystem_scope = {:<%= owner_type %>, current_scope.<%= owner_type %>.id}
 
-        # Start agent session with explicit filesystem scope
-        case <%= module %>.start_conversation_session(conversation_id, filesystem_scope: filesystem_scope) do
+        # Start agent session. Pass `:scope` so sagents can thread it through
+        # persistence callbacks (arg #1) and tool `context.scope`. Pass
+        # `:filesystem_scope` so FileSystem middleware operates on the right
+        # bucket. The two are independent — same owner, different purposes.
+        session_opts = [
+          scope: current_scope,
+          filesystem_scope: filesystem_scope
+        ]
+
+        case <%= module %>.start_conversation_session(conversation_id, session_opts) do
           {:ok, session} ->
             # Create and add message to agent
             message = Message.new_user!(message_text)
@@ -140,16 +148,18 @@ defmodule <%= module %> do
 
   ## Examples
 
-      # Standard usage - pass the filesystem scope explicitly
-      filesystem_scope = {:<%= owner_type %>, current_<%= owner_type %>.id}
+      # Standard usage - pass tenant scope and filesystem scope from the caller.
+      filesystem_scope = {:<%= owner_type %>, current_scope.<%= owner_type %>.id}
       {:ok, session} = <%= module %>.start_conversation_session(
         conversation_id,
+        scope: current_scope,
         filesystem_scope: filesystem_scope
       )
 
       # Custom inactivity timeout (30 minutes)
       {:ok, session} = <%= module %>.start_conversation_session(
         conversation_id,
+        scope: current_scope,
         filesystem_scope: {:<%= owner_type %>, <%= owner_field %>},
         inactivity_timeout: :timer.minutes(30)
       )
@@ -157,15 +167,19 @@ defmodule <%= module %> do
       # With custom factory options (e.g., for timezone-aware middleware)
       {:ok, session} = <%= module %>.start_conversation_session(
         conversation_id,
+        scope: current_scope,
         filesystem_scope: filesystem_scope,
         factory_opts: [timezone: "America/New_York"]
       )
 
-      # With caller context for tool functions
+      # With extra caller context for tool functions (scope is separate — don't
+      # stuff it into :tool_context). `:tool_context` is a grab-bag for
+      # non-scope data your own tools need.
       {:ok, session} = <%= module %>.start_conversation_session(
         conversation_id,
+        scope: current_scope,
         filesystem_scope: filesystem_scope,
-        tool_context: %{user_id: user_id, tenant: "acme"}
+        tool_context: %{feature_flags: flags, request_id: req_id}
       )
 
   """

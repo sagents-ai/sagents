@@ -31,9 +31,16 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
         {:ok, socket |> AgentLiveHelpers.init_agent_state() |> assign(...)}
       end
 
-      # In handle_params/3
+      # In handle_params/3 -- pass scope (required) and user_id (for presence)
       def handle_params(%{"conversation_id" => id}, _uri, socket) do
-        case AgentLiveHelpers.load_conversation(socket, id, scope: ...) do
+        current_scope = socket.assigns.current_scope
+
+        case AgentLiveHelpers.load_conversation(
+               socket,
+               id,
+               scope: current_scope,
+               user_id: current_scope.user.id
+             ) do
           {:ok, socket} -> {:noreply, socket}
           {:error, socket} -> {:noreply, push_navigate(socket, to: ~p"/chat")}
         end
@@ -252,7 +259,9 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
            * Customize message formatting or error handling as needed
            * The module is hardcoded with your context (#{config.context_module})
 
-        2. Integrate state management helpers:
+        2. Integrate state management helpers. `load_conversation/3` requires
+           a `:scope` — pass the Phoenix scope from the socket so that
+           every DB query and persistence callback is tenant-filtered.
 
            defmodule MyAppWeb.ChatLive do
              alias #{config.helper_module}
@@ -267,7 +276,14 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
              end
 
              def handle_params(%{"conversation_id" => id}, _uri, socket) do
-               case AgentLiveHelpers.load_conversation(socket, id, scope: ...) do
+               current_scope = socket.assigns.current_scope
+
+               case AgentLiveHelpers.load_conversation(
+                      socket,
+                      id,
+                      scope: current_scope,
+                      user_id: current_scope.user.id
+                    ) do
                  {:ok, socket} -> {:noreply, socket}
                  {:error, socket} -> {:noreply, push_navigate(socket, to: ~p"/chat")}
                end

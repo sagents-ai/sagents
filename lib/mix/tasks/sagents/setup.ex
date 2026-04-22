@@ -342,6 +342,18 @@ defmodule Mix.Tasks.Sagents.Setup do
            * Configure HITL in default_interrupt_on/0
            * Change model provider in get_model_config/0 if needed
 
+        5. Thread scope through from the caller. When starting a session:
+
+               #{config.coordinator_module}.start_conversation_session(
+                 conversation_id,
+                 scope: socket.assigns.current_scope,
+                 filesystem_scope: {:#{config.owner_type}, socket.assigns.current_scope.#{config.owner_type}.id}
+               )
+
+           Sagents propagates `:scope` to #{config.context_module} calls (as
+           the first positional argument) and into tool-call `context.scope`.
+           See the Coordinator moduledoc for the full integration pattern.
+
       Your Sagents infrastructure is configured for:
         - Owner type: :#{config.owner_type}
         - Owner field: #{config.owner_field}
