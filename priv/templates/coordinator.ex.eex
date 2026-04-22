@@ -134,6 +134,10 @@ defmodule <%= module %> do
     queries downstream will have no owner to filter by. Set on the agent's `:scope`
     field via the Factory; sagents propagates it as the first positional argument to
     persistence callbacks and as `context.scope` to tool functions.
+    **Sizing note:** the scope struct is copied across process boundaries on every
+    hop (LiveView → AgentServer → tool invocations). If your Phoenix Scope preloads
+    heavy Ecto associations, consider passing a slim version instead. See
+    `sagents/docs/tool_context_and_state.md` ("Keep scope lean") for the pattern.
   - `:inactivity_timeout` - Milliseconds before agent stops (default: 10 minutes)
   - `:tool_context` - Map of caller-supplied data. Its entries become keys on
     the `context` map passed as the tool function's second argument. For example,

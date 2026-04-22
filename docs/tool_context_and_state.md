@@ -60,6 +60,45 @@ end
 
 **Collision rule:** if `tool_context` contains a `:scope` key, sagents overrides it with `agent.scope` when building `custom_context`. Sagents owns that key. Don't put scope in `tool_context`.
 
+#### Keep scope lean
+
+The scope struct crosses process boundaries every time it reaches the Agent — LiveView process → Coordinator call → AgentServer GenServer → (for sub-agents) SubAgent processes → (for every tool invocation) the LLMChain's tool-call executor. In Erlang/Elixir, message passing between processes **copies** the term. A "scope" that embeds fully-loaded Ecto structs with preloaded associations (e.g., a `%User{}` with loaded `:organization`, `:memberships`, `:preferences`, `:api_keys`) gets copied in its entirety on every hop.
+
+For agents this cost adds up: a long-running conversation can cross those boundaries hundreds of times, and the BEAM has to copy the whole graph each time even if the tool only reads `scope.user.id`.
+
+If your application's Phoenix `Scope` is heavy, consider defining a **minimal agent-scoped struct** to pass to the agent instead of the full app scope:
+
+```elixir
+defmodule MyApp.Accounts.AgentScope do
+  @moduledoc """
+  Slim projection of `MyApp.Accounts.Scope` for passing to sagents.
+
+  Contains only the fields tool functions and persistence queries actually
+  read — not the full preloaded user graph.
+  """
+  defstruct [:user_id, :user_email, :org_id, :role]
+
+  def from_scope(%MyApp.Accounts.Scope{} = scope) do
+    %__MODULE__{
+      user_id: scope.user.id,
+      user_email: scope.user.email,
+      org_id: scope.org && scope.org.id,
+      role: scope.role
+    }
+  end
+end
+
+# At the LiveView / Coordinator call site:
+Coordinator.start_conversation_session(conversation_id,
+  scope: MyApp.Accounts.AgentScope.from_scope(socket.assigns.current_scope),
+  filesystem_scope: filesystem_scope
+)
+```
+
+Then your generated context's `scope_query/2` and `get_owner_id/1` helpers target fields on the slim struct (`scope.user_id`) instead of the full one (`scope.user.id`).
+
+This is *not* required — the default generated code assumes the full Phoenix Scope and works fine for most applications. It's worth doing when (a) your Scope preloads deep associations, (b) you run long conversations with many tool invocations, or (c) profiling shows scope-copy cost on hot paths. If in doubt, start with the full Scope and slim it down if it becomes a measured problem.
+
 ### `tool_context` -- Static, Caller-Supplied Grab-Bag
 
 `tool_context` is the integrator's own map of non-scope, caller-supplied data. It's for data that the agent's tools need but that doesn't have its own dedicated channel: feature flags, request-correlation IDs, a tenant-display-name to render in responses, etc.
