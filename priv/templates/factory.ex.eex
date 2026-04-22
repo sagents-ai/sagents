@@ -108,7 +108,6 @@ defmodule <%= module %> do
     Pass `nil` to disable HITL entirely.
   - `:tool_context` - Optional. Map of caller-supplied data passed to tool functions
     via `LLMChain.custom_context`. Defaults to `%{}`. Example: `%{user_id: 42}`.
-    Scope is NOT stuffed here — it has its own `:scope` channel.
 
   ## Examples
 
