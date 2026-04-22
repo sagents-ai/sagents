@@ -8,13 +8,13 @@ defmodule Sagents.TestDisplayMessagePersistence do
   @behaviour Sagents.DisplayMessagePersistence
 
   @impl true
-  def save_message(_conversation_id, %LangChain.Message{} = message) do
+  def save_message(_scope, %LangChain.Message{} = message, _context) do
     display_data = Sagents.TestingHelpers.message_to_display_data(message)
     {:ok, [display_data]}
   end
 
   @impl true
-  def update_tool_status(_status, _tool_info) do
+  def update_tool_status(_scope, _status, _tool_info, _context) do
     {:error, :not_found}
   end
 end
@@ -27,12 +27,12 @@ defmodule Sagents.TestDisplayMessagePersistenceRaising do
   @behaviour Sagents.DisplayMessagePersistence
 
   @impl true
-  def save_message(_conversation_id, _message) do
+  def save_message(_scope, _message, _context) do
     raise "Simulated persistence error"
   end
 
   @impl true
-  def update_tool_status(_status, _tool_info) do
+  def update_tool_status(_scope, _status, _tool_info, _context) do
     {:error, :not_found}
   end
 end
@@ -51,7 +51,7 @@ defmodule Sagents.TestDisplayMessagePersistenceForwarding do
   end
 
   @impl true
-  def save_message(_conversation_id, %LangChain.Message{} = message) do
+  def save_message(_scope, %LangChain.Message{} = message, _context) do
     display_items = Sagents.Message.DisplayHelpers.extract_display_items(message)
     pid = :persistent_term.get({__MODULE__, :test_pid})
     send(pid, {:saved_message, message, display_items})
@@ -59,7 +59,7 @@ defmodule Sagents.TestDisplayMessagePersistenceForwarding do
   end
 
   @impl true
-  def update_tool_status(_status, _tool_info) do
+  def update_tool_status(_scope, _status, _tool_info, _context) do
     {:error, :not_found}
   end
 end

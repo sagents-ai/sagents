@@ -572,11 +572,12 @@ defmodule Sagents.Middleware.SubAgent do
         until_tool_map = Map.get(config, :until_tool_map, %{})
         until_tool = Map.get(until_tool_map, subagent_type)
 
-        # Extract parent's tool_context and metadata so SubAgent tools see the
+        # Extract parent's tool_context, metadata, and scope so SubAgent tools see the
         # same context as parent tools. Agent.build_chain stores the original
-        # tool_context map as an explicit :tool_context key in custom_context.
-        # Metadata is nested in state and copied into the SubAgent's fresh State.
-        {parent_tool_context, parent_metadata} = extract_parent_context(context)
+        # tool_context map as an explicit :tool_context key in custom_context, and
+        # scope under the canonical :scope key. Metadata is nested in state and copied
+        # into the SubAgent's fresh State.
+        {parent_tool_context, parent_metadata, parent_scope} = extract_parent_context(context)
 
         # Create SubAgent struct from pre-configured agent
         # Check if it's a Compiled struct (with initial_messages) or just an Agent
@@ -591,7 +592,8 @@ defmodule Sagents.Middleware.SubAgent do
                 initial_messages: compiled.initial_messages || [],
                 until_tool: until_tool,
                 parent_tool_context: parent_tool_context,
-                parent_metadata: parent_metadata
+                parent_metadata: parent_metadata,
+                scope: parent_scope
               )
 
             agent ->
@@ -602,7 +604,8 @@ defmodule Sagents.Middleware.SubAgent do
                 agent_config: agent,
                 until_tool: until_tool,
                 parent_tool_context: parent_tool_context,
-                parent_metadata: parent_metadata
+                parent_metadata: parent_metadata,
+                scope: parent_scope
               )
           end
 
@@ -682,8 +685,8 @@ defmodule Sagents.Middleware.SubAgent do
             interrupt_on: nil
           )
 
-        # Extract parent's tool_context and metadata for SubAgent inheritance
-        {parent_tool_context, parent_metadata} = extract_parent_context(context)
+        # Extract parent's tool_context, metadata, and scope for SubAgent inheritance
+        {parent_tool_context, parent_metadata, parent_scope} = extract_parent_context(context)
 
         # Create SubAgent struct with parent context
         subagent =
@@ -692,7 +695,8 @@ defmodule Sagents.Middleware.SubAgent do
             instructions: instructions,
             agent_config: agent_config,
             parent_tool_context: parent_tool_context,
-            parent_metadata: parent_metadata
+            parent_metadata: parent_metadata,
+            scope: parent_scope
           )
 
         # Get supervisor and start SubAgent (same as pre-configured)
@@ -724,18 +728,19 @@ defmodule Sagents.Middleware.SubAgent do
     end
   end
 
-  # Extract parent's tool_context and state.metadata from the runtime context.
+  # Extract parent's tool_context, state.metadata, and scope from the runtime context.
   #
   # Agent.build_chain stores the original tool_context map as an explicit
-  # :tool_context key in custom_context, so we read it directly rather than
-  # trying to reconstruct it by removing internal keys.
+  # :tool_context key in custom_context, and the parent's scope under the
+  # canonical :scope key. We read both directly.
   # Metadata lives nested inside context.state.metadata.
   #
-  # Returns {tool_context_map, metadata_map}.
+  # Returns {tool_context_map, metadata_map, scope}.
   defp extract_parent_context(context) do
     parent_tool_context = Map.get(context, :tool_context, %{})
     parent_metadata = get_in(context, [:state, Access.key(:metadata)]) || %{}
-    {parent_tool_context, parent_metadata}
+    parent_scope = Map.get(context, :scope)
+    {parent_tool_context, parent_metadata, parent_scope}
   end
 
   defp default_general_purpose_prompt() do

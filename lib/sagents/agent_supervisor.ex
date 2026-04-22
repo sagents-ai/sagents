@@ -396,11 +396,8 @@ defmodule Sagents.AgentSupervisor do
 
   # Resolve the initial state for the AgentServer.
   #
-  # When agent_persistence is configured, attempts to load fresh state from the
-  # database. This is critical for Horde redistribution: when a node departs and
-  # Horde replays the child spec on a surviving node, the initial_state in the
-  # child spec is stale (captured at first startup). Loading from DB gets the
-  # latest persisted state including all messages and middleware state.
+  # When agent_persistence is configured, loads fresh state from the DB rather
+  # than using the `initial_state` captured in the child spec
   #
   # Returns {state, restored} where restored is true if state was loaded from DB.
   defp resolve_initial_state(config, agent) do
@@ -408,7 +405,14 @@ defmodule Sagents.AgentSupervisor do
     fallback_state = Keyword.get(config, :initial_state, State.new!(%{agent_id: agent.agent_id}))
 
     if agent_persistence do
-      case agent_persistence.load_state(agent.agent_id) do
+      conversation_id = Keyword.get(config, :conversation_id)
+
+      context = %{
+        agent_id: agent.agent_id,
+        conversation_id: conversation_id
+      }
+
+      case agent_persistence.load_state(agent.scope, context) do
         {:ok, exported_state} ->
           case StateSerializer.deserialize_state(agent.agent_id, exported_state["state"]) do
             {:ok, state} ->

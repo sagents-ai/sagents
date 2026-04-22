@@ -171,11 +171,14 @@ defmodule Sagents.SubAgent do
   - `:instructions` - Task description (required)
   - `:agent_config` - Agent struct with tools, model, middleware (required)
   - `:parent_tool_context` - Parent's tool_context map to inherit (optional).
-    Static, caller-supplied data (e.g., `user_id`, `current_scope`) that tools
+    Static, caller-supplied data (e.g., `user_id`, feature flags) that tools
     access as flat top-level keys on context. Defaults to `%{}`.
   - `:parent_metadata` - Parent's state metadata map to inherit (optional).
     Dynamic, middleware-managed data (e.g., `conversation_title`) that tools
     access via `context.state.metadata`. Defaults to `%{}`.
+  - `:scope` - Scope struct to inherit from the parent (optional). Propagated to
+    the SubAgent's `custom_context.scope` so sub-agent tools and persistence callbacks
+    see the same tenant context as the parent. Defaults to `agent_config.scope`.
 
   ## Examples
 
@@ -184,7 +187,8 @@ defmodule Sagents.SubAgent do
         instructions: "Research renewable energy impacts",
         agent_config: agent_struct,
         parent_tool_context: %{user_id: 42, tenant: "acme"},
-        parent_metadata: %{"conversation_title" => "Research"}
+        parent_metadata: %{"conversation_title" => "Research"},
+        scope: %MyApp.Accounts.Scope{user: user}
       )
   """
   def new_from_config(opts) do
@@ -209,11 +213,14 @@ defmodule Sagents.SubAgent do
   - `:compiled_agent` - Pre-built Agent struct (required)
   - `:initial_messages` - Optional initial message sequence (default: [])
   - `:parent_tool_context` - Parent's tool_context map to inherit (optional).
-    Static, caller-supplied data (e.g., `user_id`, `current_scope`) that tools
+    Static, caller-supplied data (e.g., `user_id`, feature flags) that tools
     access as flat top-level keys on context. Defaults to `%{}`.
   - `:parent_metadata` - Parent's state metadata map to inherit (optional).
     Dynamic, middleware-managed data (e.g., `conversation_title`) that tools
     access via `context.state.metadata`. Defaults to `%{}`.
+  - `:scope` - Scope struct to inherit from the parent (optional). Propagated to
+    the SubAgent's `custom_context.scope` so sub-agent tools and persistence callbacks
+    see the same tenant context as the parent. Defaults to `compiled_agent.scope`.
 
   ## Examples
 
@@ -263,6 +270,10 @@ defmodule Sagents.SubAgent do
     parent_agent_id = Keyword.fetch!(opts, :parent_agent_id)
     parent_tool_context = Keyword.get(opts, :parent_tool_context, %{})
     parent_metadata = Keyword.get(opts, :parent_metadata, %{})
+    # Scope propagates from parent to SubAgent so sub-agent tools and callbacks
+    # see the same tenant context. Fall back to the compiled/config agent's own
+    # `:scope` field if the caller didn't pass one (e.g., direct new_from_compiled).
+    scope = Keyword.get(opts, :scope, agent.scope)
     until_tool = Keyword.get(opts, :until_tool)
     max_runs = Keyword.get(opts, :max_runs)
 
@@ -280,7 +291,9 @@ defmodule Sagents.SubAgent do
         parent_middleware: agent.middleware,
         # Preserve the tool_context as an explicit key so nested SubAgents
         # can extract it cleanly (same as Agent.build_chain).
-        tool_context: parent_tool_context
+        tool_context: parent_tool_context,
+        # First-class scope channel, same canonical key as Agent.build_chain.
+        scope: scope
       })
 
     chain =

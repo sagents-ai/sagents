@@ -96,9 +96,11 @@ defmodule Sagents.SubAgentToolContextTest do
 
       assert %State{} = ctx.state
       assert is_list(ctx.parent_middleware)
-      # Only internal keys present (including :tool_context which holds the empty map)
-      assert Map.keys(ctx) |> Enum.sort() == [:parent_middleware, :state, :tool_context]
+      # Only internal keys present (including :tool_context which holds the empty map,
+      # and :scope which defaults to nil when no scope is supplied).
+      assert Map.keys(ctx) |> Enum.sort() == [:parent_middleware, :scope, :state, :tool_context]
       assert ctx.tool_context == %{}
+      assert ctx.scope == nil
     end
   end
 

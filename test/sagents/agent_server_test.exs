@@ -974,15 +974,16 @@ defmodule Sagents.AgentServerTest do
 
       assert AgentServer.get_status(agent_id) == :idle
 
-      # Verify persistence was called with :on_completion context
+      # Verify persistence was called with :on_completion lifecycle
       calls = TestAgentPersistence.get_calls_for(agent_id)
 
       completion_call =
-        Enum.find(calls, fn {_id, _data, ctx} -> ctx == :on_completion end)
+        Enum.find(calls, fn {_id, _scope, _data, ctx} -> ctx.lifecycle == :on_completion end)
 
       assert completion_call != nil
-      {persisted_agent_id, persisted_state_data, :on_completion} = completion_call
+      {persisted_agent_id, _scope, persisted_state_data, ctx} = completion_call
       assert persisted_agent_id == agent_id
+      assert ctx.lifecycle == :on_completion
       assert persisted_state_data["version"] == 1
       assert persisted_state_data["state"] != nil
     end
@@ -1041,15 +1042,16 @@ defmodule Sagents.AgentServerTest do
 
       assert AgentServer.get_status(agent_id) == :idle
 
-      # Verify persistence was called with :on_completion context for resume 3-tuple
+      # Verify persistence was called with :on_completion lifecycle for resume 3-tuple
       calls = TestAgentPersistence.get_calls_for(agent_id)
 
       completion_call =
-        Enum.find(calls, fn {_id, _data, ctx} -> ctx == :on_completion end)
+        Enum.find(calls, fn {_id, _scope, _data, ctx} -> ctx.lifecycle == :on_completion end)
 
       assert completion_call != nil
-      {persisted_agent_id, persisted_state_data, :on_completion} = completion_call
+      {persisted_agent_id, _scope, persisted_state_data, ctx} = completion_call
       assert persisted_agent_id == agent_id
+      assert ctx.lifecycle == :on_completion
       assert persisted_state_data["version"] == 1
     end
   end

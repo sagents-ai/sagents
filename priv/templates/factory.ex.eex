@@ -98,10 +98,17 @@ defmodule <%= module %> do
   - `:filesystem_scope` - Required. Scope tuple for filesystem isolation.
     Examples: `{:<%= owner_type %>, <%= owner_field %>}`, `{:project, 456}`, `{:team, 789}`.
     Pass `nil` for agent-scoped (isolated per conversation).
+  - `:scope` - Integrator-defined scope struct (e.g., `%MyApp.Accounts.Scope{}`).
+    In production this should be passed by the Coordinator from the caller's session.
+    `nil` is allowed (for tests, admin scripts, or background jobs without a user
+    context) but tenant-scoped queries downstream will have no owner to filter by.
+    Set on `agent.scope`; sagents propagates to persistence callbacks (arg #1) and
+    to tool `context.scope`.
   - `:interrupt_on` - Optional. Map of tool names requiring approval.
     Pass `nil` to disable HITL entirely.
   - `:tool_context` - Optional. Map of caller-supplied data passed to tool functions
     via `LLMChain.custom_context`. Defaults to `%{}`. Example: `%{user_id: 42}`.
+    Scope is NOT stuffed here — it has its own `:scope` channel.
 
   ## Examples
 
@@ -138,6 +145,7 @@ defmodule <%= module %> do
   def create_agent(opts \\ []) do
     agent_id = Keyword.fetch!(opts, :agent_id)
     filesystem_scope = Keyword.fetch!(opts, :filesystem_scope)
+    scope = Keyword.get(opts, :scope)
     interrupt_on = Keyword.get(opts, :interrupt_on, default_interrupt_on())
     tool_context = Keyword.get(opts, :tool_context, %{})
 
@@ -151,7 +159,8 @@ defmodule <%= module %> do
         before_fallback: get_before_fallback(),
         # Add any custom tools here (tools not provided by middleware)
         tools: [],
-        tool_context: tool_context
+        tool_context: tool_context,
+        scope: scope
       },
       # Since we specify the full middleware stack, don't add defaults
       replace_default_middleware: true
