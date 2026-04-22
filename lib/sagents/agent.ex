@@ -59,6 +59,10 @@ defmodule Sagents.Agent do
     field :middleware, {:array, :any}, default: [], virtual: true
     field :name, :string
     field :filesystem_scope, :any, virtual: true
+    # Integrator-defined scope struct (e.g., MyApp.Accounts.Scope). Opaque to
+    # sagents. NOT serialized — scope is session state that belongs to the
+    # caller starting the agent, not to persisted conversations.
+    field :scope, :any, virtual: true, default: nil
     # Caller-supplied context merged into LLMChain.custom_context for tool functions.
     field :tool_context, :map, default: %{}, virtual: true
     # Timeout for async tool execution. Integer (ms) or :infinity.
@@ -90,6 +94,7 @@ defmodule Sagents.Agent do
     :middleware,
     :name,
     :filesystem_scope,
+    :scope,
     :tool_context,
     :async_tool_timeout,
     :fallback_models,
@@ -111,10 +116,17 @@ defmodule Sagents.Agent do
   - `:middleware` - List of middleware modules/configs (default: [])
   - `:name` - Agent name for identification (default: nil)
   - `:filesystem_scope` - Optional scope key for referencing an independently-running filesystem (e.g., `{:user, 123}`, `{:project, 456}`)
+  - `:scope` - Integrator-defined scope struct (e.g., `%MyApp.Accounts.Scope{}`). Opaque
+    to Sagents — propagated as the first positional argument to persistence callbacks
+    (`AgentPersistence`, `DisplayMessagePersistence`, `FileSystemCallbacks`) and auto-merged
+    into tool-call `custom_context` under the canonical `:scope` key. Default: `nil`.
+    Note: **not serialized** — scope is session/runtime state belonging to the caller
+    starting the agent, not to persisted conversations. On restore, scope comes from the
+    fresh Coordinator invocation that starts the agent.
   - `:tool_context` - Map of caller-supplied data merged into `LLMChain.custom_context`
     so every tool function receives it as part of its second argument. Internal keys
-    (`:state`, `:parent_middleware`, `:parent_tools`) always take precedence on collision.
-    (default: `%{}`)
+    (`:state`, `:parent_middleware`, `:parent_tools`, `:scope`) always take precedence on
+    collision. (default: `%{}`)
   - `:async_tool_timeout` - Timeout for parallel tool execution. Integer (milliseconds) or
     `:infinity`. Overrides application-level config. See LLMChain module docs for details.
     (default: uses application config or `:infinity`)
@@ -756,7 +768,10 @@ defmodule Sagents.Agent do
             # Preserve the original tool_context map as an explicit key so
             # SubAgent middleware can extract it cleanly without reconstructing
             # it.
-            tool_context: agent.tool_context || %{}
+            tool_context: agent.tool_context || %{},
+            # First-class scope channel: tool functions read `context.scope`. If
+            # tool_context contained `:scope`, it's overridden here.
+            scope: agent.scope
           }
         )
     }

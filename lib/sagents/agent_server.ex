@@ -2587,8 +2587,21 @@ defmodule Sagents.AgentServer do
     end
   end
 
+  # Extract the integrator-defined scope from the Agent struct. Source of truth
+  # for all scope-bearing callback invocations below.
+  defp current_scope(%ServerState{agent: %{scope: scope}}), do: scope
+
+  # Build the shared callback context map — agent_id + conversation_id. Scope is
+  # passed separately as the first positional argument to each callback.
+  defp callback_context(%ServerState{} = s) do
+    %{
+      agent_id: s.agent.agent_id,
+      conversation_id: s.conversation_id
+    }
+  end
+
   # Persist agent state via the AgentPersistence behaviour (if configured)
-  defp maybe_persist_state(%ServerState{} = server_state, context) do
+  defp maybe_persist_state(%ServerState{} = server_state, lifecycle) do
     case server_state.agent_persistence do
       nil ->
         :ok
@@ -2600,13 +2613,16 @@ defmodule Sagents.AgentServer do
             server_state.state
           )
 
-        case module.persist_state(server_state.agent.agent_id, state_data, context) do
+        scope = current_scope(server_state)
+        context = Map.put(callback_context(server_state), :lifecycle, lifecycle)
+
+        case module.persist_state(scope, state_data, context) do
           :ok ->
             :ok
 
           {:error, reason} ->
             Logger.error(
-              "Agent persistence failed for #{server_state.agent.agent_id} (#{context}): #{inspect(reason)}"
+              "Agent persistence failed for #{server_state.agent.agent_id} (#{lifecycle}): #{inspect(reason)}"
             )
 
             :ok
@@ -2621,7 +2637,15 @@ defmodule Sagents.AgentServer do
 
     # Persist if configured
     if server_state.display_message_persistence do
-      case server_state.display_message_persistence.update_tool_status(status, tool_info) do
+      scope = current_scope(server_state)
+      context = callback_context(server_state)
+
+      case server_state.display_message_persistence.update_tool_status(
+             scope,
+             status,
+             tool_info,
+             context
+           ) do
         {:ok, updated_msg} ->
           broadcast_event(server_state, {:display_message_updated, updated_msg})
 
@@ -2736,8 +2760,11 @@ defmodule Sagents.AgentServer do
   defp maybe_resolve_tool_result(%ServerState{} = server_state, tool_call_id, result_content) do
     module = server_state.display_message_persistence
 
-    if module && function_exported?(module, :resolve_tool_result, 2) do
-      case module.resolve_tool_result(tool_call_id, result_content) do
+    if module && function_exported?(module, :resolve_tool_result, 4) do
+      scope = current_scope(server_state)
+      context = callback_context(server_state)
+
+      case module.resolve_tool_result(scope, tool_call_id, result_content, context) do
         {:ok, updated_msg} ->
           broadcast_event(server_state, {:display_message_updated, updated_msg})
 
@@ -2754,15 +2781,17 @@ defmodule Sagents.AgentServer do
   end
 
   defp run_message_preprocessor(%ServerState{} = server_state, message) do
+    scope = current_scope(server_state)
+
     context = %{
       agent_id: server_state.agent.agent_id,
       conversation_id: server_state.conversation_id,
-      tool_context: server_state.agent.tool_context,
+      tool_context: server_state.agent.tool_context || %{},
       state: server_state.state
     }
 
     try do
-      server_state.message_preprocessor.preprocess(message, context)
+      server_state.message_preprocessor.preprocess(scope, message, context)
     rescue
       exception ->
         Logger.error(
@@ -2777,9 +2806,11 @@ defmodule Sagents.AgentServer do
   defp maybe_save_and_broadcast_message(server_state, message) do
     if server_state.display_message_persistence && server_state.conversation_id do
       module = server_state.display_message_persistence
+      scope = current_scope(server_state)
+      context = callback_context(server_state)
 
       try do
-        case module.save_message(server_state.conversation_id, message) do
+        case module.save_message(scope, message, context) do
           {:ok, display_messages} when is_list(display_messages) ->
             Enum.each(display_messages, fn display_msg ->
               broadcast_event(server_state, {:display_message_saved, display_msg})

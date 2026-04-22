@@ -211,10 +211,10 @@ defmodule <%= module %> do
       # Subscribe to agent events and track presence
       socket = maybe_subscribe_and_track(socket, conversation_id, user_id)
 
-      # Load display messages and todos
-      display_messages = conversations.load_display_messages(conversation_id)
+      # Load display messages and todos (scoped)
+      display_messages = conversations.load_display_messages(scope, conversation_id)
       has_messages = !Enum.empty?(display_messages)
-      saved_todos = conversations.load_todos(conversation_id)
+      saved_todos = conversations.load_todos(scope, conversation_id)
 
       # Check if agent is already running
       agent_status = AgentServer.get_status(agent_id)
@@ -472,7 +472,7 @@ defmodule <%= module %> do
   """
   def handle_display_message_saved(socket, display_msg) do
     socket =
-      if socket.assigns[:conversation_id] do
+      if socket.assigns[:conversation_id] && socket.assigns[:current_scope] do
         # Clear streaming_delta - persisted messages are now the authoritative display.
         # All display messages are saved to DB before broadcasting, so reload gets them all.
         socket
@@ -619,8 +619,13 @@ defmodule <%= module %> do
   Uses reset: true to ensure proper ordering and clean state.
   """
   def reload_messages_from_db(socket) do
-    if socket.assigns[:conversation_id] do
-      messages = <%= conversations_alias %>.load_display_messages(socket.assigns.conversation_id)
+    if socket.assigns[:conversation_id] && socket.assigns[:current_scope] do
+      messages =
+        <%= conversations_alias %>.load_display_messages(
+          socket.assigns.current_scope,
+          socket.assigns.conversation_id
+        )
+
       stream(socket, :messages, messages, reset: true)
     else
       socket
@@ -635,8 +640,9 @@ defmodule <%= module %> do
   Returns the message map (not the socket).
   """
   def create_or_persist_message(socket, message_type, text) do
-    if socket.assigns[:conversation_id] do
+    if socket.assigns[:conversation_id] && socket.assigns[:current_scope] do
       case <%= conversations_alias %>.append_text_message(
+             socket.assigns.current_scope,
              socket.assigns.conversation_id,
              message_type,
              text
@@ -740,8 +746,12 @@ defmodule <%= module %> do
         _ -> tool[:tool_call_id]
       end
 
-    if call_id do
-      <%= conversations_alias %>.record_hitl_decision(call_id, decision)
+    if call_id && socket.assigns[:current_scope] do
+      <%= conversations_alias %>.record_hitl_decision(
+        socket.assigns.current_scope,
+        call_id,
+        decision
+      )
     end
   end
 

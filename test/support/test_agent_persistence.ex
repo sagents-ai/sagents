@@ -5,6 +5,9 @@ defmodule Sagents.TestAgentPersistence do
   Before use, call `setup/0` in your test setup to create the ETS table.
   After the test, call `get_calls/0` or `get_calls_for/1` to inspect what was persisted.
 
+  Records each call as `{agent_id, scope, state_data, context}`. The `context` is
+  the full callback-context map including `:lifecycle`.
+
   ## Usage
 
       setup do
@@ -17,7 +20,7 @@ defmodule Sagents.TestAgentPersistence do
         # ... trigger execution ...
 
         calls = Sagents.TestAgentPersistence.get_calls()
-        assert Enum.any?(calls, fn {_id, _data, ctx} -> ctx == :on_completion end)
+        assert Enum.any?(calls, fn {_id, _scope, _data, ctx} -> ctx.lifecycle == :on_completion end)
       end
   """
 
@@ -39,7 +42,8 @@ defmodule Sagents.TestAgentPersistence do
   end
 
   @doc """
-  Returns all recorded persistence calls as a list of `{agent_id, state_data, context}` tuples.
+  Returns all recorded persistence calls as a list of
+  `{agent_id, scope, state_data, context}` tuples.
   """
   def get_calls do
     :ets.tab2list(@table_name)
@@ -61,13 +65,13 @@ defmodule Sagents.TestAgentPersistence do
   end
 
   @impl true
-  def persist_state(agent_id, state_data, context) do
-    :ets.insert(@table_name, {agent_id, state_data, context})
+  def persist_state(scope, state_data, context) do
+    :ets.insert(@table_name, {context.agent_id, scope, state_data, context})
     :ok
   end
 
   @impl true
-  def load_state(_agent_id) do
+  def load_state(_scope, _context) do
     {:error, :not_found}
   end
 end

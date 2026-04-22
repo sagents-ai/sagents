@@ -9,7 +9,7 @@ defmodule Sagents.AgentServerMessagePreprocessorTest do
     @behaviour Sagents.MessagePreprocessor
 
     @impl true
-    def preprocess(message, _context) do
+    def preprocess(_scope, message, _context) do
       {:ok, message, message}
     end
   end
@@ -18,7 +18,7 @@ defmodule Sagents.AgentServerMessagePreprocessorTest do
     @behaviour Sagents.MessagePreprocessor
 
     @impl true
-    def preprocess(_message, _context) do
+    def preprocess(_scope, _message, _context) do
       display_msg = Message.new_user!("[display] original")
       llm_msg = Message.new_user!("[llm] original")
       {:ok, display_msg, llm_msg}
@@ -29,7 +29,7 @@ defmodule Sagents.AgentServerMessagePreprocessorTest do
     @behaviour Sagents.MessagePreprocessor
 
     @impl true
-    def preprocess(_message, _context) do
+    def preprocess(_scope, _message, _context) do
       {:error, :message_rejected}
     end
   end
@@ -38,9 +38,9 @@ defmodule Sagents.AgentServerMessagePreprocessorTest do
     @behaviour Sagents.MessagePreprocessor
 
     @impl true
-    def preprocess(message, context) do
-      # Send context to the registered test process
-      send(context.tool_context[:test_pid], {:preprocessor_context, context})
+    def preprocess(scope, message, context) do
+      # Send scope + context to the registered test process
+      send(context.tool_context[:test_pid], {:preprocessor_context, scope, context})
       {:ok, message, message}
     end
   end
@@ -49,7 +49,7 @@ defmodule Sagents.AgentServerMessagePreprocessorTest do
     @behaviour Sagents.MessagePreprocessor
 
     @impl true
-    def preprocess(_message, _context) do
+    def preprocess(_scope, _message, _context) do
       raise "preprocessor crashed"
     end
   end
@@ -58,7 +58,7 @@ defmodule Sagents.AgentServerMessagePreprocessorTest do
     @behaviour Sagents.DisplayMessagePersistence
 
     @impl true
-    def save_message(_conversation_id, message) do
+    def save_message(_scope, message, _context) do
       # Use the process dictionary to find the test pid
       # (set by the test before starting the server)
       if pid = Process.get(:test_pid) do
@@ -69,20 +69,22 @@ defmodule Sagents.AgentServerMessagePreprocessorTest do
     end
 
     @impl true
-    def update_tool_status(_status, _info), do: {:ok, nil}
+    def update_tool_status(_scope, _status, _info, _context), do: {:ok, nil}
   end
 
   defp create_agent(agent_id, opts \\ []) do
     {:ok, model} = ChatOpenAI.new(%{model: "gpt-4", api_key: "test-key"})
 
     tool_context = Keyword.get(opts, :tool_context, %{})
+    scope = Keyword.get(opts, :scope)
 
     {:ok, agent} =
       Agent.new(%{
         agent_id: agent_id,
         model: model,
         base_system_prompt: "You are helpful",
-        tool_context: tool_context
+        tool_context: tool_context,
+        scope: scope
       })
 
     agent
@@ -192,9 +194,10 @@ defmodule Sagents.AgentServerMessagePreprocessorTest do
   end
 
   describe "preprocessor context" do
-    test "receives agent_id, conversation_id, tool_context, and state" do
-      tool_context = %{current_scope: {:user, 42}, custom_key: "value", test_pid: self()}
-      agent = create_agent("ctx-1", tool_context: tool_context)
+    test "receives scope as first arg plus agent_id, conversation_id, tool_context, and state" do
+      tool_context = %{custom_key: "value", test_pid: self()}
+      scope = {:user, 42}
+      agent = create_agent("ctx-1", tool_context: tool_context, scope: scope)
 
       {:ok, _pid} =
         AgentServer.start_link(
@@ -207,11 +210,12 @@ defmodule Sagents.AgentServerMessagePreprocessorTest do
       msg = Message.new_user!("Hello")
       :ok = GenServer.call(AgentServer.get_name("ctx-1"), {:add_message, msg})
 
-      assert_received {:preprocessor_context, context}
+      assert_received {:preprocessor_context, received_scope, context}
+      assert received_scope == {:user, 42}
       assert context.agent_id == "ctx-1"
       assert context.conversation_id == "conv-5"
-      assert context.tool_context.current_scope == {:user, 42}
       assert context.tool_context.custom_key == "value"
+      refute Map.has_key?(context.tool_context, :current_scope)
       assert %State{} = context.state
 
       AgentServer.stop("ctx-1")

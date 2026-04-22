@@ -11,6 +11,10 @@ defmodule Sagents.MessagePreprocessor do
      For example, `@ProjectBrief` might be expanded to include the full document content
      so the model can reason over it.
 
+  ## Scope-first contract
+
+  The `preprocess/3` callback takes the integrator's scope struct as its first positional argument.
+
   ## When this runs
 
   Called inside `AgentServer.handle_call({:add_message, ...})` **before** the message
@@ -42,21 +46,28 @@ defmodule Sagents.MessagePreprocessor do
   If not configured, messages flow through unchanged to both paths.
   """
 
+  @typedoc """
+  Context map passed to `preprocess/3`. Contains identifiers plus the caller's
+  `tool_context` (for integrator-defined tool-parameter data, no longer a transport
+  for scope) and the current agent state.
+  """
+  @type preprocessor_context :: %{
+          required(:agent_id) => String.t(),
+          required(:conversation_id) => String.t() | nil,
+          required(:tool_context) => map(),
+          required(:state) => Sagents.State.t()
+        }
+
   @doc """
   Transform a user-submitted message into separate display and LLM representations.
 
-  ## Context
+  ## Parameters
 
-  The `context` map provides:
-
-  - `:agent_id` — The agent identifier string
-  - `:conversation_id` — The conversation identifier (may be nil)
-  - `:tool_context` — The caller-supplied context map from the Agent struct.
-    Contains `:current_scope` (the Phoenix Scope with the current user),
-    injected by the Coordinator at session start. Use this to scope document
-    lookups, permission checks, etc.
-  - `:state` — The current `Sagents.State` (messages, metadata). Useful for
-    context-aware preprocessing (e.g., referencing prior messages).
+  - `scope` — Integrator-defined scope struct (or `nil`). Use for document lookups,
+    permission checks, etc.
+  - `message` — The `LangChain.Message` being submitted
+  - `context` — Map with `:agent_id`, `:conversation_id`, `:tool_context`
+    (integrator's non-scope tool-parameter data), and `:state` (current `Sagents.State`).
 
   ## Returns
 
@@ -64,7 +75,11 @@ defmodule Sagents.MessagePreprocessor do
     For passthrough, return the same message for both.
   - `{:error, reason}` — Reject the message. AgentServer replies with `{:error, reason}`.
   """
-  @callback preprocess(message :: LangChain.Message.t(), context :: map()) ::
+  @callback preprocess(
+              scope :: term() | nil,
+              message :: LangChain.Message.t(),
+              context :: preprocessor_context()
+            ) ::
               {:ok, display_message :: LangChain.Message.t(),
                llm_message :: LangChain.Message.t()}
               | {:error, term()}

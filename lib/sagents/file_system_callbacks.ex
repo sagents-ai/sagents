@@ -3,72 +3,47 @@ defmodule Sagents.FileSystemCallbacks do
   Behavior for file system persistence callbacks.
 
   Implement this behavior to provide custom persistence for filesystem operations.
-  All callbacks are optional - implement only what you need.
+  All callbacks are optional — implement only what you need.
+
+  ## Scope-first contract
+
+  Every callback takes the integrator's scope struct as its first positional argument.
 
   ## Example Implementation
 
       defmodule MyApp.FilesystemPersistence do
-        @behaviour Sagents.FilesystemCallbacks
+        @behaviour Sagents.FileSystemCallbacks
 
         @impl true
-        def on_write(file_path, content, context) do
-          # Save to database
-          case MyApp.Files.create_or_update(context.user_id, file_path, content) do
+        def on_write(%MyApp.Accounts.Scope{user: user}, file_path, content, _context) do
+          case MyApp.Files.create_or_update(user.id, file_path, content) do
             {:ok, file} -> {:ok, %{id: file.id}}
             {:error, reason} -> {:error, reason}
           end
         end
 
         @impl true
-        def on_read(file_path, context) do
-          case MyApp.Files.get(context.user_id, file_path) do
+        def on_read(%MyApp.Accounts.Scope{user: user}, file_path, _context) do
+          case MyApp.Files.get(user.id, file_path) do
             nil -> {:error, :not_found}
             file -> {:ok, file.content}
           end
         end
 
         @impl true
-        def on_delete(file_path, context) do
-          case MyApp.Files.delete(context.user_id, file_path) do
+        def on_delete(%MyApp.Accounts.Scope{user: user}, file_path, _context) do
+          case MyApp.Files.delete(user.id, file_path) do
             {:ok, _} -> {:ok, %{}}
             {:error, reason} -> {:error, reason}
           end
         end
 
         @impl true
-        def on_list(context) do
-          files = MyApp.Files.list_for_user(context.user_id)
+        def on_list(%MyApp.Accounts.Scope{user: user}, _context) do
+          files = MyApp.Files.list_for_user(user.id)
           {:ok, Enum.map(files, & &1.path)}
         end
       end
-
-  ## Configuration
-
-      {:ok, agent} = Agents.new(
-        model: model,
-        filesystem_opts: [
-          persistence: MyApp.FilesystemPersistence,
-          context: %{user_id: user_id, session_id: session_id}
-        ]
-      )
-
-  ## Alternative: Function-based Callbacks
-
-      {:ok, agent} = Agents.new(
-        model: model,
-        filesystem_opts: [
-          on_write: fn file_path, content, context ->
-            MyApp.Files.save(context.user_id, file_path, content)
-          end,
-          on_read: fn file_path, context ->
-            case MyApp.Files.get(context.user_id, file_path) do
-              nil -> {:error, :not_found}
-              file -> {:ok, file.content}
-            end
-          end,
-          context: %{user_id: user_id}
-        ]
-      )
   """
 
   @type file_path :: String.t()
@@ -80,15 +55,16 @@ defmodule Sagents.FileSystemCallbacks do
   Called when a file is created or overwritten.
 
   ## Parameters
+  - `scope` - Integrator-defined scope struct (or `nil`). Use to filter DB writes.
   - `file_path` - Path of the file being written
   - `content` - Full content of the file
-  - `context` - Additional context (user_id, session_id, etc.)
+  - `context` - Filesystem-specific fields (agent_id, session_id, etc.)
 
   ## Returns
   - `{:ok, metadata}` - Success, optionally with metadata
   - `{:error, reason}` - Failure reason
   """
-  @callback on_write(file_path, content, context) :: result()
+  @callback on_write(scope :: term() | nil, file_path, content, context) :: result()
 
   @doc """
   Called when a file is read.
@@ -97,42 +73,47 @@ defmodule Sagents.FileSystemCallbacks do
   in-memory state. This enables lazy-loading from persistent storage.
 
   ## Parameters
+  - `scope` - Integrator-defined scope struct (or `nil`)
   - `file_path` - Path of the file being read
-  - `context` - Additional context (user_id, session_id, etc.)
+  - `context` - Filesystem-specific fields
 
   ## Returns
   - `{:ok, content}` - File content from storage
   - `{:error, :not_found}` - File doesn't exist in storage
   - `{:error, reason}` - Other error
   """
-  @callback on_read(file_path, context) :: {:ok, content} | {:error, term()}
+  @callback on_read(scope :: term() | nil, file_path, context) ::
+              {:ok, content} | {:error, term()}
 
   @doc """
   Called when a file is deleted.
 
   ## Parameters
+  - `scope` - Integrator-defined scope struct (or `nil`)
   - `file_path` - Path of the file being deleted
-  - `context` - Additional context (user_id, session_id, etc.)
+  - `context` - Filesystem-specific fields
 
   ## Returns
   - `{:ok, metadata}` - Success
   - `{:error, reason}` - Failure reason
   """
-  @callback on_delete(file_path, context) :: result()
+  @callback on_delete(scope :: term() | nil, file_path, context) :: result()
 
   @doc """
   Called to list all files in persistent storage.
 
-  Optional - if not implemented, only in-memory files are listed.
+  Optional — if not implemented, only in-memory files are listed.
 
   ## Parameters
-  - `context` - Additional context (user_id, session_id, etc.)
+  - `scope` - Integrator-defined scope struct (or `nil`)
+  - `context` - Filesystem-specific fields
 
   ## Returns
   - `{:ok, [file_path]}` - List of file paths
   - `{:error, reason}` - Failure reason
   """
-  @callback on_list(context) :: {:ok, [file_path]} | {:error, term()}
+  @callback on_list(scope :: term() | nil, context) ::
+              {:ok, [file_path]} | {:error, term()}
 
-  @optional_callbacks [on_write: 3, on_read: 2, on_delete: 2, on_list: 1]
+  @optional_callbacks [on_write: 4, on_read: 3, on_delete: 3, on_list: 2]
 end
