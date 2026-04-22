@@ -136,7 +136,7 @@ defmodule Sagents.Agent do
     Useful for provider-specific system prompts or modifications
   - `:max_runs` - Maximum number of LLM calls per execution (default: 50 for AgentExecution mode).
     Agents with many tools or complex middleware may need higher values. Can also be overridden
-    per-invocation via `Agent.execute/3` opts: `Agent.execute(agent, state, max_runs: 100)`.
+    per-invocation via `execute/3` opts: `execute(agent, state, max_runs: 100)`.
 
   ## Options
 
