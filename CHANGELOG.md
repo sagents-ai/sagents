@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.7.0
+
+Introduces first-class scope propagation across all integration boundaries — persistence, file system callbacks, and message preprocessing — so multi-tenant and authorization-aware applications can stop threading scope through `tool_context` workarounds. Also adds a configurable `max_run` guard on agents and sub-agents, fixes a bug where `on_server_start` state updates were silently discarded, hardens the FileSystem line-number semantics, and patches several generator template issues.
+
+**Breaking changes** — see Upgrading section below.
+
+### Upgrading from v0.6.0 to v0.7.0
+
+A `MIGRATION_PROMPT_v0.6.0_TO_v0.7.0.md` file is included in the repository root. Give it to your coding assistant — it contains exact before/after signatures, step-by-step instructions, and coverage of non-obvious call sites (tests, direct calls, tool functions that previously used the `tool_context` scope workaround).
+
+The four affected behaviour modules are `AgentPersistence`, `DisplayMessagePersistence`, `FileSystemCallbacks`, and `MessagePreprocessor` — every callback in each gains `scope` as a new first positional argument. The `AgentPersistence` context argument also changed from a bare atom/string to a typed map. The Coordinator call site gains a `scope:` option that must be threaded through from the caller.
+
+For generated files, re-run `mix sagents.setup` with the same options on a clean, committed workspace, accept the overwrites, and merge your customizations back in with a diff tool.
+
+### Added
+- First-class `scope` field on `Agent` — an integrator-defined scope struct (e.g., `%MyApp.Accounts.Scope{}`) that is propagated as the first positional argument to all persistence callbacks and auto-merged into tool-call `custom_context` under the `:scope` key. Not serialized — scope is session/runtime state from the caller, not stored state. [#72](https://github.com/sagents-ai/sagents/pull/72)
+- `max_run` configuration option on `Agent` and `SubAgent` — limits the maximum number of LLM rounds before the agent stops with a user-friendly error message. Catches exception cases and provides clearer log messages when the limit is exceeded [#69](https://github.com/sagents-ai/sagents/pull/69)
+- `AgentPersistence` typed context maps — `persist_context` (`%{agent_id, conversation_id, lifecycle}`) and `load_context` (`%{agent_id, conversation_id}`) replace the old bare `agent_id` string, providing conversation identity and lifecycle reason at every persistence call site [#72](https://github.com/sagents-ai/sagents/pull/72)
+- `DisplayMessagePersistence` typed `callback_context` map — `%{agent_id, conversation_id}` replaces the ad-hoc context previously passed to callbacks [#72](https://github.com/sagents-ai/sagents/pull/72)
+- Line-number rules section in the `FileSystem` middleware system prompt — emitted only when at least one line-aware edit tool (`replace_file_text`, `replace_file_lines`) is enabled, explaining `cat -n` prefix semantics, 1-based numbering, line-shift after edits, and trailing-newline behavior [#71](https://github.com/sagents-ai/sagents/pull/71)
+- Post-edit preview returned by `replace_file_text` and `replace_file_lines` — the updated file content is returned immediately after an edit, eliminating the follow-up `read_file` call the agent previously needed [#71](https://github.com/sagents-ai/sagents/pull/71)
+
+### Changed
+- **BREAKING:** `AgentPersistence` callbacks `persist_state/3` and `load_state/1` now take `scope` as their first positional argument and use typed context maps instead of a bare `agent_id` string [#72](https://github.com/sagents-ai/sagents/pull/72)
+- **BREAKING:** `DisplayMessagePersistence` callbacks (`save_message`, `update_tool_status`, `resolve_tool_result`) now take `scope` as their first positional argument [#72](https://github.com/sagents-ai/sagents/pull/72)
+- **BREAKING:** `FileSystemCallbacks` callbacks (`on_write`, `on_read`, `on_delete`, `on_list`) now take `scope` as their first positional argument; optional callback arity for each updated accordingly [#72](https://github.com/sagents-ai/sagents/pull/72)
+- **BREAKING:** `MessagePreprocessor.preprocess/2` is now `preprocess/3` with `scope` as the first positional argument [#72](https://github.com/sagents-ai/sagents/pull/72)
+- Generator templates updated across the board for scope-first callbacks — `coordinator.ex.eex`, `factory.ex.eex`, `agent_persistence.ex.eex`, `display_message_persistence.ex.eex`, `agent_live_helpers.ex.eex`, and the persistence context template [#72](https://github.com/sagents-ai/sagents/pull/72) [#73](https://github.com/sagents-ai/sagents/pull/73)
+- `SubAgent.task_subagent_boilerplate/0` made public with full documentation — previously undocumented despite being referenced in module docs [#66](https://github.com/sagents-ai/sagents/pull/66)
+- `docs/persistence.md` and `docs/tool_context_and_state.md` rewritten to reflect the scope-first contract, updated callback signatures, and the new Coordinator integration pattern [#73](https://github.com/sagents-ai/sagents/pull/73)
+- Updated LangChain dependency to `>= 0.8.2` [#71](https://github.com/sagents-ai/sagents/pull/71)
+
+### Fixed
+- `AgentServer` now threads `on_server_start/2` return values through the middleware chain and applies the accumulated state — previously the state returned by each middleware was silently discarded and middleware couldn't observe each other's startup changes [#67](https://github.com/sagents-ai/sagents/pull/67)
+- Generated `load_display_messages` context function no longer applies a result-count limit by default, preventing longer conversations from losing new messages on reload [#68](https://github.com/sagents-ai/sagents/pull/68)
+- `FileSystemServer` now handles `{:EXIT, port, reason}` in `handle_info/2` when `trap_exit` is enabled — port exits from `System.cmd` during persistence callbacks were crashing the server [#70](https://github.com/sagents-ai/sagents/pull/70)
+- FileSystem `replace_file_text` and `replace_file_lines` line-number semantics corrected to be consistently 1-based across `read_file`, `replace_file_lines`, and `find_in_file` [#71](https://github.com/sagents-ai/sagents/pull/71)
+
 ## v0.6.0
 
 Brings task-style sub-agents with dramatically improved cancellation handling, parent→sub-agent context propagation, a trimmer and more focused FileSystem middleware, and a handful of middleware configurability improvements. Also hardens CI against supply-chain risks.
