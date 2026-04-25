@@ -835,14 +835,16 @@ defmodule <%= module %> do
     :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
   end
 
-  defp format_error_message(reason) do
-    error_display =
-      case reason do
-        %LangChain.LangChainError{} = error -> error.message
-        other -> inspect(other)
-      end
+  defp format_error_message(%LangChain.LangChainError{type: "delta_conversion_failed"}) do
+    "The assistant returned an invalid response. Please try again."
+  end
 
-    "Sorry, I encountered an error: #{error_display}"
+  defp format_error_message(%LangChain.LangChainError{message: message}) do
+    "Sorry, I encountered an error: #{message}"
+  end
+
+  defp format_error_message(other) do
+    "Sorry, I encountered an error: #{inspect(other)}"
   end
 
   # Set display_text on matching ToolCall(s) in a delta's tool_calls list.

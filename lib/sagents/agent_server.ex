@@ -2848,6 +2848,10 @@ defmodule Sagents.AgentServer do
     maybe_save_and_broadcast_message(server_state, cancel_message)
   end
 
+  defp format_error_for_display(%LangChain.LangChainError{type: "delta_conversion_failed"}) do
+    "The assistant returned an invalid response. Please try again."
+  end
+
   defp format_error_for_display(%LangChain.LangChainError{message: message})
        when is_binary(message) do
     "Sorry, I encountered an error: #{message}"
