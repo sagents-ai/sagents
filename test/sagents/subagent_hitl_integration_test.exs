@@ -117,7 +117,7 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
                   name: "task",
                   arguments: %{
                     "instructions" => "Write a test file",
-                    "subagent_type" => "writer"
+                    "task_name" => "writer"
                   }
                 })
               ])
@@ -159,7 +159,7 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
       # Verify interrupt data structure
       assert interrupt_data.type == :subagent_hitl
       assert is_binary(interrupt_data.sub_agent_id)
-      assert interrupt_data.subagent_type == "writer"
+      assert interrupt_data.task_name == "writer"
       assert is_binary(interrupt_data.tool_call_id)
 
       # Verify inner interrupt data
@@ -255,7 +255,7 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
                   name: "task",
                   arguments: %{
                     "instructions" => "Edit files",
-                    "subagent_type" => "editor"
+                    "task_name" => "editor"
                   }
                 })
               ])
@@ -355,7 +355,7 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
                   name: "task",
                   arguments: %{
                     "instructions" => "Do risky thing",
-                    "subagent_type" => "crashy"
+                    "task_name" => "crashy"
                   }
                 })
               ])
