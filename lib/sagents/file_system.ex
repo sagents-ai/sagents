@@ -61,7 +61,9 @@ defmodule Sagents.FileSystem do
   - `configs` - List of FileSystemConfig structs
   - `opts` - Additional options:
     - `:supervisor` - Supervisor reference (PID or registered name). Defaults to `FileSystemSupervisor`.
-    - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple (optional)
+
+  Subscribers receive events via direct `send/2` (see
+  `Sagents.FileSystemServer.subscribe/1`)
 
   ## Returns
 
@@ -82,9 +84,6 @@ defmodule Sagents.FileSystem do
 
       # Subsequent calls return the same PID
       {:ok, ^pid} = ensure_filesystem({:user, 123}, [config])
-
-      # With PubSub
-      {:ok, pid} = ensure_filesystem({:user, 123}, [config], pubsub: {Phoenix.PubSub, :my_pubsub})
   """
   @spec ensure_filesystem(tuple(), list(), keyword()) :: {:ok, pid()} | {:error, term()}
 
@@ -127,7 +126,6 @@ defmodule Sagents.FileSystem do
   - `configs` - List of FileSystemConfig structs
   - `opts` - Additional options:
     - `:supervisor` - Supervisor reference (PID or registered name). Defaults to `FileSystemSupervisor`.
-    - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple (optional)
 
   ## Returns
 

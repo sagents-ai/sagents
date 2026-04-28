@@ -137,8 +137,9 @@ defmodule Sagents.AgentSupervisor do
 
   - `:agent` - The Agent struct (required)
   - `:initial_state` - Initial State for AgentServer (optional)
-  - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` (optional, default: nil)
-  - `:debug_pubsub` - Optional debug PubSub configuration as `{module(), atom()}` or `nil` (optional, default: nil)
+  - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` (optional, default: nil).
+    Used only for `Phoenix.Presence` `presence_diff` wiring; per-agent events are
+    delivered directly to subscriber pids via `Sagents.Publisher`.
   - `:inactivity_timeout` - Timeout in milliseconds for automatic shutdown (optional, default: 300_000 - 5 minutes)
     Set to `nil` or `:infinity` to disable automatic shutdown
   - `:name` - Supervisor name registration (optional)
@@ -169,13 +170,6 @@ defmodule Sagents.AgentSupervisor do
       {:ok, sup_pid} = AgentSupervisor.start_link(
         agent: agent,
         inactivity_timeout: nil
-      )
-
-      # With debug pubsub
-      {:ok, sup_pid} = AgentSupervisor.start_link(
-        agent: agent,
-        pubsub: {Phoenix.PubSub, :my_app_pubsub},
-        debug_pubsub: {Phoenix.PubSub, :my_debug_pubsub}
       )
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -303,7 +297,6 @@ defmodule Sagents.AgentSupervisor do
     # This is critical for Horde redistribution where the child spec's initial_state is stale
     {initial_state, restored} = resolve_initial_state(config, agent)
     pubsub = Keyword.get(config, :pubsub)
-    debug_pubsub = Keyword.get(config, :debug_pubsub)
     inactivity_timeout = Keyword.get(config, :inactivity_timeout, 300_000)
     shutdown_delay = Keyword.get(config, :shutdown_delay, 5000)
     presence_tracking = Keyword.get(config, :presence_tracking)
@@ -312,6 +305,7 @@ defmodule Sagents.AgentSupervisor do
     display_message_persistence = Keyword.get(config, :display_message_persistence)
     message_preprocessor = Keyword.get(config, :message_preprocessor)
     presence_module = Keyword.get(config, :presence_module)
+    initial_subscribers = Keyword.get(config, :initial_subscribers, [])
 
     # Build AgentServer options
     agent_server_opts = [
@@ -321,18 +315,13 @@ defmodule Sagents.AgentSupervisor do
       inactivity_timeout: inactivity_timeout,
       shutdown_delay: shutdown_delay,
       id: agent_id,
-      name: AgentServer.get_name(agent_id)
+      name: AgentServer.get_name(agent_id),
+      initial_subscribers: initial_subscribers
     ]
 
     # Add pubsub if provided
     agent_server_opts =
       if pubsub, do: Keyword.put(agent_server_opts, :pubsub, pubsub), else: agent_server_opts
-
-    # Add debug_pubsub if provided
-    agent_server_opts =
-      if debug_pubsub,
-        do: Keyword.put(agent_server_opts, :debug_pubsub, debug_pubsub),
-        else: agent_server_opts
 
     # Add presence_tracking if provided
     agent_server_opts =

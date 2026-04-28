@@ -179,11 +179,6 @@ defmodule Sagents.TestingHelpers do
     display_message_persistence = Keyword.get(opts, :display_message_persistence)
     initial_state = Keyword.get(opts, :initial_state)
 
-    # Subscribe to agent's PubSub topic so test can receive events
-    # AgentServer broadcasts to "agent_server:#{agent_id}"
-    topic = "agent_server:#{agent_id}"
-    Sagents.PubSub.raw_subscribe(pubsub_module, pubsub_name, topic)
-
     # Create a minimal test agent
     model =
       ChatAnthropic.new!(%{
@@ -235,11 +230,17 @@ defmodule Sagents.TestingHelpers do
     case AgentSupervisor.start_link_sync(supervisor_config) do
       {:ok, _supervisor_pid} ->
         pid = AgentServer.get_pid(agent_id)
+        # Subscribe the calling test process to the agent's main + debug channels
+        # via direct subscribe (the new Sagents.Publisher transport).
+        _ = AgentServer.subscribe(agent_id)
+        _ = AgentServer.subscribe_debug(agent_id)
         {:ok, %{agent_id: agent_id, pid: pid}}
 
       {:error, {:already_started, _supervisor_pid}} ->
         # Already started - return existing pid
         pid = AgentServer.get_pid(agent_id)
+        _ = AgentServer.subscribe(agent_id)
+        _ = AgentServer.subscribe_debug(agent_id)
         {:ok, %{agent_id: agent_id, pid: pid}}
 
       {:error, reason} ->

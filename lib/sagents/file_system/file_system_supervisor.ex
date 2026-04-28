@@ -149,13 +149,6 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
             # Build start_link options
             start_opts = [scope_key: scope_key, configs: configs]
 
-            # Add pubsub if provided
-            start_opts =
-              case Keyword.get(opts, :pubsub) do
-                nil -> start_opts
-                pubsub -> Keyword.put(start_opts, :pubsub, pubsub)
-              end
-
             # Start new filesystem Note: The child spec requires the "id" but
             # the DynamicSupervisor doesn't use it. It does not need to be
             # unique.

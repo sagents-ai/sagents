@@ -4,33 +4,12 @@ defmodule Sagents.AgentServerDebugPubSubTest do
   alias Sagents.{AgentServer, State, Middleware}
   alias LangChain.Message
 
-  setup do
-    # Start PubSub for testing
-    pubsub_name = :"test_pubsub_#{System.unique_integer([:positive])}"
-    debug_pubsub_name = :"test_debug_pubsub_#{System.unique_integer([:positive])}"
-
-    {:ok, _} =
-      Phoenix.PubSub.Supervisor.start_link(name: pubsub_name, adapter_name: Phoenix.PubSub.PG2)
-
-    {:ok, _} =
-      Phoenix.PubSub.Supervisor.start_link(
-        name: debug_pubsub_name,
-        adapter_name: Phoenix.PubSub.PG2
-      )
-
-    %{
-      pubsub_name: pubsub_name,
-      debug_pubsub_name: debug_pubsub_name
-    }
-  end
-
   # Simple test middleware that can trigger state updates
   defmodule TestMiddleware do
     @behaviour Middleware
 
     @impl true
     def init(opts) do
-      # Convert opts to map
       config = Enum.into(opts, %{})
       {:ok, config}
     end
@@ -43,7 +22,6 @@ defmodule Sagents.AgentServerDebugPubSubTest do
 
     @impl true
     def handle_message(:test_message, state, _middleware_state) do
-      # Update state metadata
       updated_state = State.put_metadata(state, "test_key", "test_value")
       {:ok, updated_state}
     end
@@ -54,183 +32,54 @@ defmodule Sagents.AgentServerDebugPubSubTest do
     end
   end
 
-  describe "debug pubsub configuration" do
-    test "starts server with debug pubsub enabled", %{
-      pubsub_name: pubsub_name,
-      debug_pubsub_name: debug_pubsub_name
-    } do
-      agent = create_test_agent()
-      agent_id = agent.agent_id
-
-      assert {:ok, _pid} =
-               AgentServer.start_link(
-                 agent: agent,
-                 pubsub: {Phoenix.PubSub, pubsub_name},
-                 debug_pubsub: {Phoenix.PubSub, debug_pubsub_name}
-               )
-
-      # Verify the server is running
-      assert AgentServer.get_status(agent_id) == :idle
-    end
-
-    test "starts server without debug pubsub", %{pubsub_name: pubsub_name} do
-      agent = create_test_agent()
-      agent_id = agent.agent_id
-
-      assert {:ok, _pid} =
-               AgentServer.start_link(
-                 agent: agent,
-                 pubsub: {Phoenix.PubSub, pubsub_name}
-               )
-
-      # Verify subscribe_debug returns error
-      assert {:error, :no_debug_pubsub} = AgentServer.subscribe_debug(agent_id)
-    end
-  end
-
   describe "subscribe_debug/1" do
-    test "subscribes to debug events successfully", %{
-      pubsub_name: pubsub_name,
-      debug_pubsub_name: debug_pubsub_name
-    } do
+    test "subscribes to debug events successfully" do
       agent = create_test_agent()
       agent_id = agent.agent_id
 
-      {:ok, _pid} =
-        AgentServer.start_link(
-          agent: agent,
-          pubsub: {Phoenix.PubSub, pubsub_name},
-          debug_pubsub: {Phoenix.PubSub, debug_pubsub_name}
-        )
+      {:ok, _pid} = AgentServer.start_link(agent: agent)
 
-      assert :ok = AgentServer.subscribe_debug(agent_id)
+      assert {:ok, server_pid, ref} = AgentServer.subscribe_debug(agent_id)
+      assert is_pid(server_pid)
+      assert is_reference(ref)
     end
 
-    test "returns error when debug pubsub not configured", %{pubsub_name: pubsub_name} do
-      agent = create_test_agent()
-      agent_id = agent.agent_id
-
-      {:ok, _pid} =
-        AgentServer.start_link(
-          agent: agent,
-          pubsub: {Phoenix.PubSub, pubsub_name}
-        )
-
-      assert {:error, :no_debug_pubsub} = AgentServer.subscribe_debug(agent_id)
+    test "returns process_not_found when no AgentServer is running" do
+      assert {:error, :process_not_found} =
+               AgentServer.subscribe_debug("never-started-#{System.unique_integer([:positive])}")
     end
   end
 
   describe "debug event broadcasting" do
-    test "broadcasts agent_state_update on middleware message with broadcast: true", %{
-      pubsub_name: pubsub_name,
-      debug_pubsub_name: debug_pubsub_name
-    } do
-      # Create agent with test middleware
-      agent =
-        create_test_agent(
-          middleware: [
-            {TestMiddleware, []}
-          ]
-        )
-
+    test "broadcasts agent_state_update on middleware message" do
+      agent = create_test_agent(middleware: [{TestMiddleware, []}])
       agent_id = agent.agent_id
 
-      {:ok, _pid} =
-        AgentServer.start_link(
-          agent: agent,
-          pubsub: {Phoenix.PubSub, pubsub_name},
-          debug_pubsub: {Phoenix.PubSub, debug_pubsub_name}
-        )
+      {:ok, _pid} = AgentServer.start_link(agent: agent)
 
-      # Subscribe to debug events
-      :ok = AgentServer.subscribe_debug(agent_id)
+      {:ok, _pid, _ref} = AgentServer.subscribe_debug(agent_id)
 
-      # Send a middleware message (use module name as ID)
       :ok = AgentServer.notify_middleware(agent_id, TestMiddleware, :test_message)
 
-      # Should receive debug event wrapped in {:agent, {:debug, event}} tuple
       assert_receive {:agent, {:debug, {:agent_state_update, TestMiddleware, %State{}}}}, 100
     end
 
-    test "does not broadcast to regular pubsub when using debug events", %{
-      pubsub_name: pubsub_name,
-      debug_pubsub_name: debug_pubsub_name
-    } do
-      # Create agent with test middleware
-      agent =
-        create_test_agent(
-          middleware: [
-            {TestMiddleware, []}
-          ]
-        )
-
+    test "main subscribers do not receive debug events" do
+      agent = create_test_agent(middleware: [{TestMiddleware, []}])
       agent_id = agent.agent_id
 
-      {:ok, _pid} =
-        AgentServer.start_link(
-          agent: agent,
-          pubsub: {Phoenix.PubSub, pubsub_name},
-          debug_pubsub: {Phoenix.PubSub, debug_pubsub_name}
-        )
+      {:ok, _pid} = AgentServer.start_link(agent: agent)
 
-      # Subscribe to regular events (not debug)
-      :ok = AgentServer.subscribe(agent_id)
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id)
 
-      # Send a middleware message
       :ok = AgentServer.notify_middleware(agent_id, TestMiddleware, :test_message)
 
-      # Should NOT receive agent_state_update on regular pubsub (neither wrapped nor unwrapped)
       refute_receive {:agent, {:debug, {:agent_state_update, _, _}}}, 100
     end
   end
 
-  describe "debug event topic" do
-    test "uses correct debug topic format", %{
-      pubsub_name: pubsub_name,
-      debug_pubsub_name: debug_pubsub_name
-    } do
-      agent = create_test_agent()
-      agent_id = agent.agent_id
-
-      {:ok, _pid} =
-        AgentServer.start_link(
-          agent: agent,
-          pubsub: {Phoenix.PubSub, pubsub_name},
-          debug_pubsub: {Phoenix.PubSub, debug_pubsub_name}
-        )
-
-      # Get debug pubsub info
-      {debug_pubsub, returned_debug_pubsub_name, debug_topic} =
-        GenServer.call(AgentServer.get_name(agent_id), :get_debug_pubsub_info)
-
-      assert debug_pubsub == Phoenix.PubSub
-      assert returned_debug_pubsub_name == debug_pubsub_name
-      assert debug_topic == "agent_server:debug:#{agent_id}"
-    end
-
-    test "returns nil when debug pubsub not configured", %{pubsub_name: pubsub_name} do
-      agent = create_test_agent()
-      agent_id = agent.agent_id
-
-      {:ok, _pid} =
-        AgentServer.start_link(
-          agent: agent,
-          pubsub: {Phoenix.PubSub, pubsub_name}
-        )
-
-      # Get debug pubsub info
-      result = GenServer.call(AgentServer.get_name(agent_id), :get_debug_pubsub_info)
-
-      assert result == nil
-    end
-  end
-
   describe "debug events with state restoration" do
-    test "debug pubsub can be configured when restoring state", %{
-      pubsub_name: pubsub_name,
-      debug_pubsub_name: debug_pubsub_name
-    } do
-      # Create and export state
+    test "debug subscriptions work after restoring from persisted state" do
       agent = create_test_agent()
       agent_id = agent.agent_id
       initial_state = State.new!(%{messages: [Message.new_user!("Test message")]})
@@ -238,17 +87,13 @@ defmodule Sagents.AgentServerDebugPubSubTest do
       {:ok, _pid} =
         AgentServer.start_link(
           agent: agent,
-          initial_state: initial_state,
-          pubsub: nil
+          initial_state: initial_state
         )
 
       exported_state = AgentServer.export_state(agent_id)
       :ok = AgentServer.stop(agent_id)
-
-      # Give it a moment to fully stop
       Process.sleep(100)
 
-      # Restore with debug pubsub enabled
       new_agent_id = "restored-agent-#{System.unique_integer([:positive])}"
       restored_agent = create_test_agent(agent_id: new_agent_id)
 
@@ -256,90 +101,30 @@ defmodule Sagents.AgentServerDebugPubSubTest do
                AgentServer.start_link_from_state(
                  exported_state,
                  agent: restored_agent,
-                 agent_id: new_agent_id,
-                 pubsub: {Phoenix.PubSub, pubsub_name},
-                 debug_pubsub: {Phoenix.PubSub, debug_pubsub_name}
+                 agent_id: new_agent_id
                )
 
-      # Should be able to subscribe to debug events
-      assert :ok = AgentServer.subscribe_debug(new_agent_id)
+      assert {:ok, _pid, _ref} = AgentServer.subscribe_debug(new_agent_id)
     end
   end
 
-  describe "multiple agents with debug pubsub" do
-    test "multiple agents can use same debug pubsub instance", %{
-      pubsub_name: pubsub_name,
-      debug_pubsub_name: debug_pubsub_name
-    } do
-      # Create two agents
-      agent1 = create_test_agent()
-      agent2 = create_test_agent()
+  describe "multiple agents" do
+    test "debug events are isolated per agent" do
+      agent1 = create_test_agent(middleware: [{TestMiddleware, []}])
+      agent2 = create_test_agent(middleware: [{TestMiddleware, []}])
 
-      {:ok, _pid1} =
-        AgentServer.start_link(
-          agent: agent1,
-          pubsub: {Phoenix.PubSub, pubsub_name},
-          debug_pubsub: {Phoenix.PubSub, debug_pubsub_name}
-        )
-
-      {:ok, _pid2} =
-        AgentServer.start_link(
-          agent: agent2,
-          pubsub: {Phoenix.PubSub, pubsub_name},
-          debug_pubsub: {Phoenix.PubSub, debug_pubsub_name}
-        )
-
-      # Both should be able to subscribe to their respective debug events
-      assert :ok = AgentServer.subscribe_debug(agent1.agent_id)
-      assert :ok = AgentServer.subscribe_debug(agent2.agent_id)
-    end
-
-    test "debug events are isolated per agent", %{
-      pubsub_name: pubsub_name,
-      debug_pubsub_name: debug_pubsub_name
-    } do
-      # Create two agents with middleware
-      agent1 =
-        create_test_agent(
-          middleware: [
-            {TestMiddleware, []}
-          ]
-        )
-
-      agent2 =
-        create_test_agent(
-          middleware: [
-            {TestMiddleware, []}
-          ]
-        )
-
-      {:ok, _pid1} =
-        AgentServer.start_link(
-          agent: agent1,
-          pubsub: {Phoenix.PubSub, pubsub_name},
-          debug_pubsub: {Phoenix.PubSub, debug_pubsub_name}
-        )
-
-      {:ok, _pid2} =
-        AgentServer.start_link(
-          agent: agent2,
-          pubsub: {Phoenix.PubSub, pubsub_name},
-          debug_pubsub: {Phoenix.PubSub, debug_pubsub_name}
-        )
+      {:ok, _pid1} = AgentServer.start_link(agent: agent1)
+      {:ok, _pid2} = AgentServer.start_link(agent: agent2)
 
       # Subscribe to agent1's debug events only
-      :ok = AgentServer.subscribe_debug(agent1.agent_id)
+      {:ok, _pid, _ref} = AgentServer.subscribe_debug(agent1.agent_id)
 
-      # Send message to agent2
+      # Send message to agent2 — we should not see its events
       :ok = AgentServer.notify_middleware(agent2.agent_id, TestMiddleware, :test_message)
-
-      # Should NOT receive debug events from agent2
       refute_receive {:agent, {:debug, {:agent_state_update, _, _}}}, 100
 
-      # Send message to agent1
+      # Send message to agent1 — we should see this one
       :ok = AgentServer.notify_middleware(agent1.agent_id, TestMiddleware, :test_message)
-
-      # Should receive debug events from agent1 wrapped in {:agent, {:debug, event}} tuple
       assert_receive {:agent, {:debug, {:agent_state_update, TestMiddleware, %State{}}}}, 100
     end
   end

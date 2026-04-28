@@ -56,8 +56,7 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
         AgentServer.start_link(
           agent: agent,
           name: AgentServer.get_name(agent_id),
-          pubsub: {Phoenix.PubSub, :langchain_pubsub},
-          debug_pubsub: {Phoenix.PubSub, :langchain_pubsub}
+          pubsub: {Phoenix.PubSub, :langchain_pubsub}
         )
 
       AgentServer.subscribe(agent_id)
@@ -112,8 +111,7 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
         AgentServer.start_link(
           agent: agent,
           name: AgentServer.get_name(agent_id),
-          pubsub: {Phoenix.PubSub, :langchain_pubsub},
-          debug_pubsub: {Phoenix.PubSub, :langchain_pubsub}
+          pubsub: {Phoenix.PubSub, :langchain_pubsub}
         )
 
       AgentServer.subscribe(agent_id)
@@ -168,8 +166,7 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
         AgentServer.start_link(
           agent: agent,
           name: AgentServer.get_name(agent_id),
-          pubsub: {Phoenix.PubSub, :langchain_pubsub},
-          debug_pubsub: {Phoenix.PubSub, :langchain_pubsub}
+          pubsub: {Phoenix.PubSub, :langchain_pubsub}
         )
 
       AgentServer.subscribe(agent_id)
@@ -216,8 +213,7 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
         AgentServer.start_link(
           agent: agent,
           name: AgentServer.get_name(agent_id),
-          pubsub: {Phoenix.PubSub, :langchain_pubsub},
-          debug_pubsub: {Phoenix.PubSub, :langchain_pubsub}
+          pubsub: {Phoenix.PubSub, :langchain_pubsub}
         )
 
       AgentServer.subscribe(agent_id)
