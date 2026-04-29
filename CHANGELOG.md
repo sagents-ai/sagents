@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.8.0-rc.1
+
+Replaces `Phoenix.PubSub` with direct, monitored point-to-point delivery for agent and file-system events, renames the SubAgent middleware's external `subagent_type` argument to `task_name` (with automatic v1→v2 state migration), adds an optional `debug_summary/1` middleware callback so the live debugger can render large configs without hanging, and ships a friendlier UI message for malformed streaming deltas.
+
+**Breaking changes** — see Upgrading section below.
+
+### Upgrading from v0.7.0 to v0.8.0-rc.1
+
+**Transport change (PR [#79](https://github.com/sagents-ai/sagents/pull/79)):** `Sagents.PubSub` is removed. Subscriptions to per-agent and per-filesystem events now go through `Sagents.Subscriber` and the producer's own subscriber tracking. Phoenix.Presence (for discovery) is unchanged.
+
+To migrate a host application:
+1. Remove any direct calls to `Sagents.PubSub.subscribe/1` / `broadcast/2`. Replace with `use Sagents.Subscriber` in your LiveViews/GenServers and call the generated `subscribe/2` helper, or pass `:initial_subscribers` when starting servers to enroll the caller inside `init/1` and avoid the start/subscribe race.
+2. Re-run `mix sagents.setup` (or the relevant generators) on a clean, committed workspace and merge customizations back in. The generator now emits a new `agent_subscriber_session.ex` template; `coordinator.ex` and `agent_live_helpers.ex` are substantially trimmed.
+3. Existing `handle_info/2` clauses keep matching — event payload shapes (`{:agent, _}`, `{:file_system, _}`, `{:status_changed, _, _}`, `{:llm_deltas, _}`, etc.) are unchanged.
+
+**SubAgent argument rename (PR [#78](https://github.com/sagents-ai/sagents/pull/78)):** The `task` and `get_task_instructions` tools now take `task_name` instead of `subagent_type`. The available-tasks listing moved out of the `task` tool's description into an `## Available Tasks` system-prompt section (suppressible via the new `:include_task_list` option).
+
+To migrate:
+1. **Persisted state:** No action needed if you use `Sagents.Persistence.StateSerializer.deserialize_server_state/2`. The serializer bumps the on-disk format to v2 and auto-rewrites `"subagent_type"` → `"task_name"` on stored `task` / `get_task_instructions` tool-call arguments.
+2. **Pattern matches on interrupt data:** Rename the key in any match like `%{type: :subagent_hitl, subagent_type: type, sub_agent_id: id}` to `task_name`. Shape is otherwise unchanged.
+3. **Resume-info maps:** Callers building `context.resume_info` for sub-agent resume must use `:task_name` instead of `:subagent_type`.
+4. **Custom prompts:** Update any prompt or doc referencing the old `subagent_type` argument or "Available SubAgents" wording — the new section is `## Available Tasks` and the argument is `task_name`. `get_task_instructions` is now `async: false`, so the model blocks until the usage guide is returned.
+
+### Added
+- Optional `debug_summary/1` callback on the `Sagents.Middleware` behaviour — middleware authors can return a small map or string for the live debugger to render instead of `inspect/2` on the full config. Implemented for `SubAgent` middleware to drop the heavy `agent_map` from the debugger's Middleware tab [#80](https://github.com/sagents-ai/sagents/pull/80)
+- `:include_task_list` option on `SubAgent` middleware (default `true`) — opt out of rendering the auto-generated task menu when integrators want to drive task selection externally [#78](https://github.com/sagents-ai/sagents/pull/78)
+- `Sagents.Publisher` and `Sagents.Subscriber` modules — new direct-delivery transport replacing Phoenix.PubSub, with `:initial_subscribers` start option to enroll subscribers inside `init/1` and a Presence-based recovery loop for crash-restart and Horde migration [#79](https://github.com/sagents-ai/sagents/pull/79)
+- New `agent_subscriber_session.ex` generator template — captures the LiveView subscribe/recovery lifecycle in one place [#79](https://github.com/sagents-ai/sagents/pull/79)
+- `docs/subscriptions_and_presence.md` — documents the Publisher/Subscriber model, `:initial_subscribers`, and the five lifecycle scenarios [#79](https://github.com/sagents-ai/sagents/pull/79)
+
+### Changed
+- **BREAKING:** SubAgent middleware tools (`task`, `get_task_instructions`) now take `task_name` instead of `subagent_type`. Interrupt-data and resume-info maps use `:task_name`. Persisted v1 state is migrated to v2 automatically by `StateSerializer` [#78](https://github.com/sagents-ai/sagents/pull/78)
+- **BREAKING:** `Sagents.PubSub` removed. Agent and FileSystem events now flow over `Sagents.Publisher` / `Sagents.Subscriber` instead of `Phoenix.PubSub`. Generator templates (`coordinator.ex`, `agent_live_helpers.ex`) updated [#79](https://github.com/sagents-ai/sagents/pull/79)
+- `get_task_instructions` is now `async: false` — the model waits for the usage guide before calling `task` [#78](https://github.com/sagents-ai/sagents/pull/78)
+- Available sub-agents now rendered as an `## Available Tasks` section in the middleware system prompt instead of being inlined into the `task` tool description [#78](https://github.com/sagents-ai/sagents/pull/78)
+- Bumped `langchain` dependency to `>= 0.8.4` to pick up the stabilized `delta_conversion_failed` error type [#77](https://github.com/sagents-ai/sagents/pull/77)
+
+### Fixed
+- Friendlier user-facing message when the LLM returns a malformed streaming delta — `delta_conversion_failed` errors now render a short "please try again" message instead of leaking internal jargon. Applied in both `AgentServer` and the generated `agent_live_helpers.ex` template [#77](https://github.com/sagents-ai/sagents/pull/77)
+- Doc-generation warning resolved [#75](https://github.com/sagents-ai/sagents/pull/75)
+
 ## v0.7.0
 
 Introduces first-class scope propagation across all integration boundaries — persistence, file system callbacks, and message preprocessing — so multi-tenant and authorization-aware applications can stop threading scope through `tool_context` workarounds. Also adds a configurable `max_run` guard on agents and sub-agents, fixes a bug where `on_server_start` state updates were silently discarded, hardens the FileSystem line-number semantics, and patches several generator template issues.
