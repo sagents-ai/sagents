@@ -35,7 +35,7 @@ defmodule Sagents.Persistence.StateSerializerTest do
       # Check that result has string keys and correct values
       # Agent config is NOT serialized - only state
       assert %{
-               "version" => 1,
+               "version" => 2,
                "state" => _state_data,
                "serialized_at" => _serialized_at
              } = result
@@ -541,4 +541,255 @@ defmodule Sagents.Persistence.StateSerializerTest do
   end
 
   defp all_keys_are_strings?(_other), do: true
+
+  describe "version migration" do
+    test "current_version/0 returns 2" do
+      assert StateSerializer.current_version() == 2
+    end
+
+    test "v1 → v2 renames subagent_type to task_name on `task` tool calls" do
+      v1 = %{
+        "version" => 1,
+        "state" => %{
+          "messages" => [
+            %{
+              "role" => "assistant",
+              "content" => nil,
+              "status" => "complete",
+              "tool_calls" => [
+                %{
+                  "call_id" => "call-1",
+                  "type" => "function",
+                  "name" => "task",
+                  "arguments" => %{
+                    "subagent_type" => "researcher",
+                    "instructions" => "Research X"
+                  },
+                  "status" => "complete"
+                }
+              ]
+            }
+          ],
+          "todos" => [],
+          "metadata" => %{}
+        }
+      }
+
+      {:ok, state} = StateSerializer.deserialize_server_state("agent-123", v1)
+
+      [msg] = state.messages
+      [tc] = msg.tool_calls
+      assert tc.arguments == %{"task_name" => "researcher", "instructions" => "Research X"}
+      refute Map.has_key?(tc.arguments, "subagent_type")
+    end
+
+    test "v1 → v2 renames the same key on `get_task_instructions` tool calls" do
+      v1 = %{
+        "version" => 1,
+        "state" => %{
+          "messages" => [
+            %{
+              "role" => "assistant",
+              "content" => nil,
+              "status" => "complete",
+              "tool_calls" => [
+                %{
+                  "call_id" => "call-2",
+                  "type" => "function",
+                  "name" => "get_task_instructions",
+                  "arguments" => %{"subagent_type" => "researcher"},
+                  "status" => "complete"
+                }
+              ]
+            }
+          ],
+          "todos" => [],
+          "metadata" => %{}
+        }
+      }
+
+      {:ok, state} = StateSerializer.deserialize_server_state("agent-123", v1)
+
+      [msg] = state.messages
+      [tc] = msg.tool_calls
+      assert tc.arguments == %{"task_name" => "researcher"}
+    end
+
+    test "v1 → v2 leaves unrelated tool calls alone even if they share the key" do
+      # A custom tool that happens to use a "subagent_type" key must not be
+      # rewritten — the rename is scoped to the SubAgent middleware tools.
+      v1 = %{
+        "version" => 1,
+        "state" => %{
+          "messages" => [
+            %{
+              "role" => "assistant",
+              "content" => nil,
+              "status" => "complete",
+              "tool_calls" => [
+                %{
+                  "call_id" => "call-3",
+                  "type" => "function",
+                  "name" => "some_other_tool",
+                  "arguments" => %{"subagent_type" => "still here"},
+                  "status" => "complete"
+                }
+              ]
+            }
+          ],
+          "todos" => [],
+          "metadata" => %{}
+        }
+      }
+
+      {:ok, state} = StateSerializer.deserialize_server_state("agent-123", v1)
+
+      [msg] = state.messages
+      [tc] = msg.tool_calls
+      assert tc.arguments == %{"subagent_type" => "still here"}
+    end
+
+    test "v1 → v2 is a no-op when the legacy key is absent" do
+      v1 = %{
+        "version" => 1,
+        "state" => %{
+          "messages" => [
+            %{
+              "role" => "assistant",
+              "content" => nil,
+              "status" => "complete",
+              "tool_calls" => [
+                %{
+                  "call_id" => "call-4",
+                  "type" => "function",
+                  "name" => "task",
+                  "arguments" => %{
+                    "task_name" => "researcher",
+                    "instructions" => "Research X"
+                  },
+                  "status" => "complete"
+                }
+              ]
+            }
+          ],
+          "todos" => [],
+          "metadata" => %{}
+        }
+      }
+
+      {:ok, state} = StateSerializer.deserialize_server_state("agent-123", v1)
+
+      [msg] = state.messages
+      [tc] = msg.tool_calls
+      assert tc.arguments == %{"task_name" => "researcher", "instructions" => "Research X"}
+    end
+
+    test "missing version field is treated as v1 and migrated" do
+      data = %{
+        "state" => %{
+          "messages" => [
+            %{
+              "role" => "assistant",
+              "content" => nil,
+              "status" => "complete",
+              "tool_calls" => [
+                %{
+                  "call_id" => "call-5",
+                  "type" => "function",
+                  "name" => "task",
+                  "arguments" => %{"subagent_type" => "researcher"},
+                  "status" => "complete"
+                }
+              ]
+            }
+          ],
+          "todos" => [],
+          "metadata" => %{}
+        }
+      }
+
+      {:ok, state} = StateSerializer.deserialize_server_state("agent-123", data)
+
+      [msg] = state.messages
+      [tc] = msg.tool_calls
+      assert tc.arguments == %{"task_name" => "researcher"}
+    end
+
+    test "v2 input passes through unchanged" do
+      v2 = %{
+        "version" => 2,
+        "state" => %{
+          "messages" => [
+            %{
+              "role" => "assistant",
+              "content" => nil,
+              "status" => "complete",
+              "tool_calls" => [
+                %{
+                  "call_id" => "call-6",
+                  "type" => "function",
+                  "name" => "task",
+                  "arguments" => %{"task_name" => "researcher"},
+                  "status" => "complete"
+                }
+              ]
+            }
+          ],
+          "todos" => [],
+          "metadata" => %{}
+        }
+      }
+
+      {:ok, state} = StateSerializer.deserialize_server_state("agent-123", v2)
+
+      [msg] = state.messages
+      [tc] = msg.tool_calls
+      assert tc.arguments == %{"task_name" => "researcher"}
+    end
+
+    test "v1 → v2 migrates many messages without dropping unrelated ones" do
+      v1 = %{
+        "version" => 1,
+        "state" => %{
+          "messages" => [
+            %{"role" => "user", "content" => "Hello", "status" => "complete"},
+            %{
+              "role" => "assistant",
+              "content" => nil,
+              "status" => "complete",
+              "tool_calls" => [
+                %{
+                  "call_id" => "call-a",
+                  "type" => "function",
+                  "name" => "task",
+                  "arguments" => %{"subagent_type" => "a", "instructions" => "i"},
+                  "status" => "complete"
+                },
+                %{
+                  "call_id" => "call-b",
+                  "type" => "function",
+                  "name" => "calculator",
+                  "arguments" => %{"expression" => "1+1"},
+                  "status" => "complete"
+                }
+              ]
+            },
+            %{"role" => "user", "content" => "follow-up", "status" => "complete"}
+          ],
+          "todos" => [],
+          "metadata" => %{}
+        }
+      }
+
+      {:ok, state} = StateSerializer.deserialize_server_state("agent-123", v1)
+
+      assert [user1, assistant, user2] = state.messages
+      assert user1.role == :user
+      assert user2.role == :user
+
+      [task_call, calc_call] = assistant.tool_calls
+      assert task_call.arguments == %{"task_name" => "a", "instructions" => "i"}
+      assert calc_call.arguments == %{"expression" => "1+1"}
+    end
+  end
 end

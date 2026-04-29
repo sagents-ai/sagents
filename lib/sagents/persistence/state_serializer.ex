@@ -16,7 +16,8 @@ defmodule Sagents.Persistence.StateSerializer do
 
   ## Agent Configuration vs Conversation State
 
-  StateSerializer follows the principle: **Code lives in code. Data lives in data.**
+  StateSerializer follows the principle: **Code lives in code. Data lives in
+  data.**
 
   **What is serialized**:
   - ✅ Conversation state: messages, todos, metadata
@@ -25,16 +26,24 @@ defmodule Sagents.Persistence.StateSerializer do
   - ❌ Agent configuration: middleware, tools, model
   - ❌ Runtime identifiers: agent_id
 
-  Agent capabilities (middleware, tools, model) are code-defined by your application.
-  When restoring a conversation, create the agent from your application code and
-  restore only the conversation state.
+  Agent capabilities (middleware, tools, model) are code-defined by your
+  application. When restoring a conversation, create the agent from your
+  application code and restore only the conversation state.
 
   See `AgentServer` module documentation for complete restoration examples.
 
   ## Versioning
 
   The serialized state includes a version field that allows for future
-  migrations of the state format. The current version is 1.
+  migrations of the state format. The current version is 2.
+
+  ### v1 → v2
+
+  The `Sagents.Middleware.SubAgent` `task` tool's required argument was renamed
+  from `subagent_type` to `task_name`. Stored tool-call arguments on `assistant`
+  messages are rewritten on read so historical conversations remain consistent
+  with the current tool schema. Affects calls named `"task"` or
+  `"get_task_instructions"`.
   """
   require Logger
 
@@ -42,7 +51,7 @@ defmodule Sagents.Persistence.StateSerializer do
   alias LangChain.Message
   alias LangChain.Message.{ContentPart, ToolCall, ToolResult}
 
-  @current_version 1
+  @current_version 2
 
   @doc """
   Get the current serialization format version.
@@ -409,16 +418,49 @@ defmodule Sagents.Persistence.StateSerializer do
   defp maybe_add_field(map, _key, nil), do: map
   defp maybe_add_field(map, key, value), do: Map.put(map, key, value)
 
-  defp maybe_migrate(%{"version" => 1} = data), do: data
+  defp maybe_migrate(%{"version" => 2} = data), do: data
+
+  defp maybe_migrate(%{"version" => 1} = data) do
+    data
+    |> migrate_v1_to_v2()
+    |> Map.put("version", 2)
+  end
 
   defp maybe_migrate(%{"version" => _other} = data) do
-    # Future: implement migration from older versions
-    # For now, just pass through
+    # Future versions go here. Unknown versions pass through
     data
   end
 
   defp maybe_migrate(data) do
-    # No version field, assume version 1
-    Map.put(data, "version", 1)
+    # No version field — treat as the oldest supported version and run
+    # the full migration chain.
+    data |> Map.put("version", 1) |> maybe_migrate()
   end
+
+  # v1 → v2: SubAgent middleware renamed the `task` / `get_task_instructions`
+  # tool argument from "subagent_type" to "task_name". Rewrite stored tool
+  # calls so replayed conversations match the current tool schema.
+  defp migrate_v1_to_v2(%{"state" => %{"messages" => messages} = state} = data)
+       when is_list(messages) do
+    migrated = Enum.map(messages, &migrate_v1_subagent_tool_call/1)
+    %{data | "state" => %{state | "messages" => migrated}}
+  end
+
+  defp migrate_v1_to_v2(data), do: data
+
+  defp migrate_v1_subagent_tool_call(%{"tool_calls" => calls} = msg) when is_list(calls) do
+    %{msg | "tool_calls" => Enum.map(calls, &rename_subagent_type_arg/1)}
+  end
+
+  defp migrate_v1_subagent_tool_call(msg), do: msg
+
+  defp rename_subagent_type_arg(%{"name" => name, "arguments" => args} = tc)
+       when name in ["task", "get_task_instructions"] and is_map(args) do
+    case Map.pop(args, "subagent_type") do
+      {nil, _} -> tc
+      {value, rest} -> %{tc | "arguments" => Map.put(rest, "task_name", value)}
+    end
+  end
+
+  defp rename_subagent_type_arg(tc), do: tc
 end

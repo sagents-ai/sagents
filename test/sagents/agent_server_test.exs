@@ -1033,7 +1033,7 @@ defmodule Sagents.AgentServerTest do
       {persisted_agent_id, _scope, persisted_state_data, ctx} = completion_call
       assert persisted_agent_id == agent_id
       assert ctx.lifecycle == :on_completion
-      assert persisted_state_data["version"] == 1
+      assert persisted_state_data["version"] == 2
       assert persisted_state_data["state"] != nil
     end
 
@@ -1101,7 +1101,7 @@ defmodule Sagents.AgentServerTest do
       {persisted_agent_id, _scope, persisted_state_data, ctx} = completion_call
       assert persisted_agent_id == agent_id
       assert ctx.lifecycle == :on_completion
-      assert persisted_state_data["version"] == 1
+      assert persisted_state_data["version"] == 2
     end
   end
 
@@ -1247,7 +1247,7 @@ defmodule Sagents.AgentServerTest do
       exported_state = AgentServer.export_state(original_agent_id)
 
       # Verify the exported state has the expected structure
-      assert exported_state["version"] == 1
+      assert exported_state["version"] == 2
       assert exported_state["state"] != nil
       assert exported_state["serialized_at"] != nil
 
