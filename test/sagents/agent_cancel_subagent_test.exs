@@ -108,7 +108,7 @@ defmodule Sagents.AgentCancelSubAgentTest do
                   name: "task",
                   arguments: %{
                     "instructions" => "do slow research",
-                    "subagent_type" => "slow-researcher"
+                    "task_name" => "slow-researcher"
                   }
                 })
               ]

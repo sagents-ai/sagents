@@ -1264,7 +1264,7 @@ defmodule Sagents.AgentTest do
           interrupt_data: %{
             type: :subagent_hitl,
             sub_agent_id: "sub-agent-1",
-            subagent_type: "researcher",
+            task_name: "researcher",
             tool_call_id: "call_task_1",
             interrupt_data: %{action_requests: []}
           }
@@ -1310,7 +1310,7 @@ defmodule Sagents.AgentTest do
           interrupt_data: %{
             type: :subagent_hitl,
             sub_agent_id: "sub-agent-1",
-            subagent_type: "researcher",
+            task_name: "researcher",
             tool_call_id: "call_task_1",
             interrupt_data: %{action_requests: [%{tool_name: "web_search"}]}
           }
@@ -1357,7 +1357,7 @@ defmodule Sagents.AgentTest do
           interrupt_data: %{
             type: :subagent_hitl,
             sub_agent_id: "sub-agent-1",
-            subagent_type: "researcher",
+            task_name: "researcher",
             tool_call_id: "call_task_1",
             interrupt_data: %{}
           }

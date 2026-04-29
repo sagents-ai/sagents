@@ -16,7 +16,7 @@ defmodule Sagents.SubAgent.Task do
   ## Callbacks
 
   - `task_name/0` — short, kebab-case identifier exposed to the parent LLM
-    as the `subagent_type` enum value (e.g. `"search-web"`).
+    as the `task_name` enum value (e.g. `"search-web"`).
   - `description/0` — one-line blurb surfaced in the `task` tool's auto-
     generated menu. Always in the parent's context.
   - `use_instructions/0` — *optional.* Detailed "how to invoke this" guide
