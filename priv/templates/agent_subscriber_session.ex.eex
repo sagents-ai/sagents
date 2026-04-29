@@ -266,14 +266,21 @@ defmodule <%= module %> do
   subs map doesn't carry a stale entry.
   """
   def handle_agent_shutdown(state, _shutdown_data) do
+    base = %{
+      agent_id: nil,
+      agent_status: :not_running,
+      loading: false,
+      streaming_delta: nil
+    }
+
     case Map.get(state, :agent_id) do
       nil ->
-        %{agent_id: nil}
+        base
 
       agent_id ->
         subs = Map.get(state, :sagents_subs, %{})
         new_subs = Subscriber.unsubscribe_from_agent(subs, agent_id)
-        %{agent_id: nil, sagents_subs: new_subs}
+        Map.put(base, :sagents_subs, new_subs)
     end
   end
 
