@@ -207,6 +207,7 @@ defmodule Sagents.AgentServer do
   """
 
   use GenServer
+  use Sagents.Publisher, state_field: :publisher
   require Logger
 
   alias Sagents.Agent
@@ -216,6 +217,7 @@ defmodule Sagents.AgentServer do
   alias Sagents.MiddlewareEntry
   alias Sagents.Persistence.StateSerializer
   alias Sagents.ProcessRegistry
+  alias Sagents.Publisher
   alias LangChain.Message
   alias LangChain.Message.ContentPart
 
@@ -233,10 +235,11 @@ defmodule Sagents.AgentServer do
       :agent,
       :state,
       :status,
-      :pubsub,
-      :topic,
-      :debug_pubsub,
-      :debug_topic,
+      # %Sagents.Publisher.State{} — tracks subscribers on :main and :debug channels
+      :publisher,
+      # Phoenix.PubSub server name (atom) used only for presence wiring (subscribing
+      # to presence_diff broadcasts). Per-agent events go directly to subscribers.
+      :pubsub_name,
       :interrupt_data,
       :error,
       :inactivity_timeout,
@@ -268,10 +271,8 @@ defmodule Sagents.AgentServer do
             agent: Agent.t(),
             state: State.t(),
             status: :idle | :running | :interrupted | :cancelled | :error,
-            pubsub: {module(), atom()} | nil,
-            topic: String.t(),
-            debug_pubsub: {module(), atom()} | nil,
-            debug_topic: String.t() | nil,
+            publisher: Sagents.Publisher.State.t(),
+            pubsub_name: atom() | nil,
             interrupt_data: map() | nil,
             error: term() | nil,
             inactivity_timeout: pos_integer() | nil | :infinity,
@@ -306,10 +307,16 @@ defmodule Sagents.AgentServer do
 
   - `:agent` - The Agent struct (required)
   - `:initial_state` - Initial State (default: empty state)
-  - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` to disable (default: nil)
-    Example: `{Phoenix.PubSub, :my_app_pubsub}`
-  - `:debug_pubsub` - Optional separate PubSub for debug events as `{module(), atom()}` or `nil` (default: nil)
-    Example: `{Phoenix.PubSub, :my_debug_pubsub}`
+  - `:initial_subscribers` - List of `{channel, pid}` tuples to enroll as
+    subscribers before `init/1` returns. Use this to atomically start the
+    server and subscribe — every event broadcast (including the initial
+    `{:status_changed, :idle, nil}` and any `{:node_transferred, _}`
+    after a Horde restore) is delivered to listed pids. Channels are
+    `:main` and `:debug`. Default: `[]`.
+  - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` (default: nil).
+    Used **only** for presence wiring (subscribing to `Phoenix.Presence`
+    diff broadcasts). Per-agent events are delivered directly to
+    subscribers via `Sagents.Publisher`, no PubSub required.
   - `:name` - Server name registration (optional, defaults to `get_name(agent.agent_id)`)
   - `:inactivity_timeout` - Timeout in milliseconds for automatic shutdown due to inactivity (default: 300_000 - 5 minutes)
     Set to `nil` or `:infinity` to disable automatic shutdown
@@ -350,13 +357,6 @@ defmodule Sagents.AgentServer do
       {:ok, pid} = AgentServer.start_link(
         agent: agent,
         inactivity_timeout: nil
-      )
-
-      # Enable debug pubsub
-      {:ok, pid} = AgentServer.start_link(
-        agent: agent,
-        pubsub: {Phoenix.PubSub, :my_app_pubsub},
-        debug_pubsub: {Phoenix.PubSub, :my_debug_pubsub}
       )
   """
   def start_link(opts) do
@@ -492,136 +492,64 @@ defmodule Sagents.AgentServer do
   end
 
   @doc """
-  Deprecated: Use `notify_middleware/3` instead.
+  Subscribe the calling process to main events from this AgentServer.
 
-  This is an alias for `notify_middleware/3` retained for backwards compatibility.
-  """
-  @deprecated "Use `Sagents.AgentServer.notify_middleware/3` instead."
-  @spec send_middleware_message(String.t(), term(), term()) :: :ok
-  def send_middleware_message(agent_id, middleware_id, message) do
-    notify_middleware(agent_id, middleware_id, message)
-  end
+  Events are delivered as `{:agent, event}` messages via direct `send/2`.
+  The producer monitors the subscriber so departure is
+  cleaned up automatically — but subscribers should also `Process.monitor/1`
+  the returned `server_pid` to detect server death.
 
-  @doc """
-  Subscribe to events from this AgentServer.
-
-  The calling process will receive messages for all events broadcast by this server.
-
-  Returns `:ok` on success or `{:error, reason}` if PubSub is not configured.
+  Returns `{:ok, server_pid, monitor_ref}` on success, or
+  `{:error, :process_not_found}` if no AgentServer is running for `agent_id`.
 
   ## Examples
 
-      AgentServer.subscribe("my-agent-1")
+      {:ok, _pid, _ref} = AgentServer.subscribe("my-agent-1")
   """
-  @spec subscribe(String.t()) :: :ok | {:error, term()}
+  @spec subscribe(String.t()) ::
+          {:ok, pid(), reference()} | {:error, :process_not_found}
   def subscribe(agent_id) do
-    try do
-      case GenServer.call(get_name(agent_id), :get_pubsub_info) do
-        nil ->
-          {:error, :no_pubsub}
-
-        {pubsub, pubsub_name, topic} ->
-          # subscribe the client process executing this request to the pubsub
-          # topic the server is using for broadcasting events
-          # Use Sagents.PubSub for automatic deduplication
-          Sagents.PubSub.subscribe(pubsub, pubsub_name, topic)
-      end
-    catch
-      :exit, _ ->
-        {:error, :process_not_found}
-    end
+    Publisher.subscribe(get_name(agent_id), :main)
   end
 
   @doc """
-  Unsubscribe from events from this AgentServer.
+  Unsubscribe the calling process from main events.
 
-  The calling process will stop receiving messages broadcast by this server.
-
-  Returns `:ok` on success or `{:error, reason}` if PubSub is not configured.
-
-  ## Examples
-
-      AgentServer.unsubscribe("my-agent-1")
+  Always returns `:ok`.
   """
-  @spec unsubscribe(String.t()) :: :ok | {:error, term()}
+  @spec unsubscribe(String.t()) :: :ok
   def unsubscribe(agent_id) do
-    try do
-      case GenServer.call(get_name(agent_id), :get_pubsub_info) do
-        nil ->
-          {:error, :no_pubsub}
-
-        {pubsub, pubsub_name, topic} ->
-          # unsubscribe the client process from the pubsub topic
-          # Use Sagents.PubSub for proper cleanup
-          Sagents.PubSub.unsubscribe(pubsub, pubsub_name, topic)
-      end
-    catch
-      :exit, _ ->
-        # Process doesn't exist, so already unsubscribed (treat as success)
-        :ok
-    end
+    Publisher.unsubscribe(get_name(agent_id), :main)
   end
 
   @doc """
-  Subscribe to debug events from this AgentServer.
+  Subscribe the calling process to debug events.
 
-  The calling process will receive messages for all debug events broadcast by this server.
-  Debug events provide additional debugging insight into what the agent is doing, such as
-  middleware state updates.
+  Debug events are delivered as `{:agent, {:debug, event}}` messages.
+  These provide additional insight into middleware state, sub-agent activity,
+  and similar diagnostic data not surfaced on the main channel.
 
-  Returns `:ok` on success or `{:error, reason}` if debug PubSub is not configured.
+  Returns `{:ok, server_pid, monitor_ref}` on success, or
+  `{:error, :process_not_found}` if no AgentServer is running.
 
   ## Examples
 
-      AgentServer.subscribe_debug("my-agent-1")
+      {:ok, _pid, _ref} = AgentServer.subscribe_debug("my-agent-1")
   """
-  @spec subscribe_debug(String.t()) :: :ok | {:error, term()}
+  @spec subscribe_debug(String.t()) ::
+          {:ok, pid(), reference()} | {:error, :process_not_found}
   def subscribe_debug(agent_id) do
-    try do
-      case GenServer.call(get_name(agent_id), :get_debug_pubsub_info) do
-        nil ->
-          {:error, :no_debug_pubsub}
-
-        {debug_pubsub, debug_pubsub_name, debug_topic} ->
-          # subscribe the client process executing this request to the debug pubsub
-          # topic the server is using for broadcasting debug events
-          # Use Sagents.PubSub for automatic deduplication
-          Sagents.PubSub.subscribe(debug_pubsub, debug_pubsub_name, debug_topic)
-      end
-    catch
-      :exit, _ ->
-        {:error, :process_not_found}
-    end
+    Publisher.subscribe(get_name(agent_id), :debug)
   end
 
   @doc """
-  Unsubscribe from debug events from this AgentServer.
+  Unsubscribe the calling process from debug events.
 
-  The calling process will stop receiving debug messages broadcast by this server.
-
-  Returns `:ok` on success or `{:error, reason}` if debug PubSub is not configured.
-
-  ## Examples
-
-      AgentServer.unsubscribe_debug("my-agent-1")
+  Always returns `:ok`.
   """
-  @spec unsubscribe_debug(String.t()) :: :ok | {:error, term()}
+  @spec unsubscribe_debug(String.t()) :: :ok
   def unsubscribe_debug(agent_id) do
-    try do
-      case GenServer.call(get_name(agent_id), :get_debug_pubsub_info) do
-        nil ->
-          {:error, :no_debug_pubsub}
-
-        {debug_pubsub, debug_pubsub_name, debug_topic} ->
-          # unsubscribe the client process from the debug pubsub topic
-          # Use Sagents.PubSub for proper cleanup
-          Sagents.PubSub.unsubscribe(debug_pubsub, debug_pubsub_name, debug_topic)
-      end
-    catch
-      :exit, _ ->
-        # Process doesn't exist, so already unsubscribed (treat as success)
-        :ok
-    end
+    Publisher.unsubscribe(get_name(agent_id), :debug)
   end
 
   @doc """
@@ -644,9 +572,6 @@ defmodule Sagents.AgentServer do
   Designed to make it easier for middleware to publish debug messages to the
   Agent's debug PubSub. Debug events are useful for development and debugging
   but separate from user-facing events.
-
-  A debug PubSub message is only broadcast if the AgentServer is configured
-  with debug_pubsub.
 
   ## Standardized Middleware Action Pattern
 
@@ -1214,7 +1139,6 @@ defmodule Sagents.AgentServer do
   - `:agent_id` - The runtime identifier for this agent (required)
   - `:agent` - Agent struct from code (REQUIRED)
   - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` (default: nil)
-  - `:debug_pubsub` - Optional separate PubSub for debug events as `{module(), atom()}` or `nil` (default: nil)
   - `:name` - Server name registration (optional, defaults to `get_name(agent_id)`)
   - `:inactivity_timeout` - Timeout in milliseconds (default: 300_000)
   - `:shutdown_delay` - Delay in milliseconds (default: 5000)
@@ -1311,13 +1235,15 @@ defmodule Sagents.AgentServer do
     # Ensure agent_id is set in the state
     state = %{state | agent_id: agent.agent_id}
 
-    # Get pubsub configuration as {module(), atom()} tuple or nil
-    # Expected format: pubsub: {Phoenix.PubSub, :my_app_pubsub}
-    pubsub = Keyword.get(opts, :pubsub)
-
-    # Get debug_pubsub configuration as {module(), atom()} tuple or nil
-    # Expected format: debug_pubsub: {Phoenix.PubSub, :my_debug_pubsub}
-    debug_pubsub = Keyword.get(opts, :debug_pubsub)
+    # The :pubsub option is only used for presence wiring (subscribing
+    # to presence_diff broadcasts from Phoenix.Presence). Per-agent events are
+    # delivered directly to subscriber pids via Sagents.Publisher.
+    # Accepted shapes: nil | {module(), atom()} (the module is unused).
+    pubsub_name =
+      case Keyword.get(opts, :pubsub) do
+        {_module, name} when is_atom(name) -> name
+        nil -> nil
+      end
 
     # allow a nil value to disable the timeout
     inactivity_timeout = Keyword.get(opts, :inactivity_timeout, 300_000)
@@ -1337,9 +1263,6 @@ defmodule Sagents.AgentServer do
       else
         nil
       end
-
-    topic = "agent_server:#{agent.agent_id}"
-    debug_topic = if debug_pubsub, do: "agent_server:debug:#{agent.agent_id}", else: nil
 
     # Build list of MiddlewareEntry structs
     middleware_entries = build_middleware_entries(agent.middleware)
@@ -1364,14 +1287,22 @@ defmodule Sagents.AgentServer do
     # When set, agent will track presence on "agent_server:presence" topic
     presence_module = Keyword.get(opts, :presence_module)
 
+    # Subscribers seeded at start time. Enrolled before init/1 returns, so
+    # they receive every event broadcast from handle_continue (notably
+    # :status_changed :idle and :node_transferred after a Horde restore).
+    # This eliminates the race that PubSub's detached topics used to mask.
+    initial_subscribers = Keyword.get(opts, :initial_subscribers, [])
+
+    publisher_state =
+      Publisher.State.new([:main, :debug])
+      |> Publisher.State.seed(initial_subscribers)
+
     server_state = %ServerState{
       agent: updated_agent,
       state: state,
       status: :idle,
-      pubsub: pubsub,
-      topic: topic,
-      debug_pubsub: debug_pubsub,
-      debug_topic: debug_topic,
+      publisher: publisher_state,
+      pubsub_name: pubsub_name,
       interrupt_data: nil,
       error: nil,
       inactivity_timeout: inactivity_timeout,
@@ -1438,34 +1369,6 @@ defmodule Sagents.AgentServer do
     subscribe_to_presence_topic(server_state)
 
     {:noreply, server_state}
-  end
-
-  @impl true
-  def handle_call(:get_pubsub_info, _from, server_state) do
-    result =
-      case server_state.pubsub do
-        {pubsub, pubsub_name} ->
-          {pubsub, pubsub_name, server_state.topic}
-
-        nil ->
-          nil
-      end
-
-    {:reply, result, server_state}
-  end
-
-  @impl true
-  def handle_call(:get_debug_pubsub_info, _from, server_state) do
-    result =
-      case server_state.debug_pubsub do
-        {debug_pubsub, debug_pubsub_name} ->
-          {debug_pubsub, debug_pubsub_name, server_state.debug_topic}
-
-        nil ->
-          nil
-      end
-
-    {:reply, result, server_state}
   end
 
   @impl true
@@ -1858,25 +1761,14 @@ defmodule Sagents.AgentServer do
   end
 
   @impl true
-  def handle_info({:DOWN, _ref, :process, _pid, :normal}, server_state) do
-    # Task process exited normally, already handled in handle_info above
-    {:noreply, server_state}
-  end
+  def handle_info({:DOWN, ref, :process, pid, reason}, server_state) do
+    case Publisher.handle_down(server_state.publisher, ref, pid) do
+      {:matched, new_pub} ->
+        # A subscriber pid went away; clean it up.
+        {:noreply, %{server_state | publisher: new_pub}}
 
-  @impl true
-  def handle_info({:DOWN, _ref, :process, _pid, reason}, server_state) do
-    # Task crashed or was killed
-    # If status is already :cancelled, this is expected (brutal_kill side effect)
-    if server_state.status == :cancelled do
-      {:noreply, Map.delete(server_state, :task)}
-    else
-      # Unexpected crash
-      Logger.error("Agent execution task crashed: #{inspect(reason)}")
-
-      new_state = %{server_state | status: :error, error: reason}
-      broadcast_event(new_state, {:status_changed, :error, reason})
-
-      {:noreply, Map.delete(new_state, :task)}
+      :no_match ->
+        handle_task_down(reason, server_state)
     end
   end
 
@@ -2076,6 +1968,26 @@ defmodule Sagents.AgentServer do
   defp wait_for_task_completion(nil, _max_wait_ms), do: :ok
 
   ## Private Functions
+
+  defp handle_task_down(:normal, server_state) do
+    # Task process exited normally, already handled by the {ref, result} clause.
+    {:noreply, server_state}
+  end
+
+  defp handle_task_down(reason, server_state) do
+    # Task crashed or was killed.
+    # If status is already :cancelled, this is expected (brutal_kill side effect).
+    if server_state.status == :cancelled do
+      {:noreply, Map.delete(server_state, :task)}
+    else
+      Logger.error("Agent execution task crashed: #{inspect(reason)}")
+
+      new_state = %{server_state | status: :error, error: reason}
+      broadcast_event(new_state, {:status_changed, :error, reason})
+
+      {:noreply, Map.delete(new_state, :task)}
+    end
+  end
 
   # Stop the parent AgentSupervisor asynchronously to avoid deadlock.
   # We can't call it synchronously because the supervisor would try to stop us
@@ -2435,8 +2347,8 @@ defmodule Sagents.AgentServer do
   defp subscribe_to_presence_topic(%ServerState{presence_config: %{enabled: false}}), do: :ok
 
   defp subscribe_to_presence_topic(%ServerState{} = server_state) do
-    case {server_state.pubsub, server_state.presence_config} do
-      {{_pubsub_mod, pubsub_name}, %{topic: topic}} ->
+    case {server_state.pubsub_name, server_state.presence_config} do
+      {pubsub_name, %{topic: topic}} when is_atom(pubsub_name) and not is_nil(pubsub_name) ->
         Phoenix.PubSub.subscribe(pubsub_name, topic)
 
         Logger.debug(
@@ -2861,37 +2773,18 @@ defmodule Sagents.AgentServer do
     "Sorry, I encountered an error: #{inspect(reason)}"
   end
 
+  # Direct send/2 fan-out to main-channel subscribers. Wraps events in
+  # `{:agent, event}` so consumers can pattern-match on origin.
   defp broadcast_event(%ServerState{} = server_state, event) do
-    case server_state.pubsub do
-      {pubsub, pubsub_name} ->
-        # Use "broadcast_from" to avoid sending to self
-        # Wrap event in {:agent, event} tuple for easier routing by consumers
-        pubsub.broadcast_from(pubsub_name, self(), server_state.topic, {:agent, event})
-
-      nil ->
-        # No PubSub configured
-        :ok
-    end
+    Publisher.broadcast(server_state.publisher, :main, {:agent, event})
+    :ok
   end
 
-  # Does not broadcast if debug_pubsub is `nil`
+  # Direct send/2 fan-out to debug-channel subscribers. The outer `:agent` tag
+  # identifies the producer; the inner `:debug` tag distinguishes the channel.
   defp broadcast_debug_event(%ServerState{} = server_state, event) do
-    case server_state.debug_pubsub do
-      {debug_pubsub, debug_pubsub_name} ->
-        # Use "broadcast_from" to avoid sending to self
-        # Wrap debug events with {:agent, {:debug, event}} for consistent routing
-        # The outer :agent wrapper identifies the source, inner :debug identifies the category
-        debug_pubsub.broadcast_from(
-          debug_pubsub_name,
-          self(),
-          server_state.debug_topic,
-          {:agent, {:debug, event}}
-        )
-
-      nil ->
-        # No debug PubSub configured
-        :ok
-    end
+    Publisher.broadcast(server_state.publisher, :debug, {:agent, {:debug, event}})
+    :ok
   end
 
   ## Inactivity Timer Management

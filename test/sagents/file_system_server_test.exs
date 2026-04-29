@@ -649,14 +649,11 @@ defmodule Sagents.FileSystemServerTest do
     end
   end
 
-  describe "PubSub events" do
+  describe "subscriber events (direct send)" do
     setup do
-      # Use the shared :test_pubsub started in test_helper.exs
-      pubsub_name = :test_pubsub
       agent_id = "pubsub_test_agent_#{System.unique_integer([:positive])}"
 
       on_exit(fn ->
-        # Cleanup any running FileSystemServer
         try do
           case FileSystemServer.whereis({:agent, agent_id}) do
             nil -> :ok
@@ -669,109 +666,74 @@ defmodule Sagents.FileSystemServerTest do
         end
       end)
 
-      %{agent_id: agent_id, pubsub_name: pubsub_name}
-    end
-
-    test "subscribe returns error when pubsub not configured", %{agent_id: agent_id} do
-      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
-
-      assert {:error, :no_pubsub} = FileSystemServer.subscribe({:agent, agent_id})
+      %{agent_id: agent_id}
     end
 
     test "subscribe returns error when process not found" do
       assert {:error, :process_not_found} = FileSystemServer.subscribe({:agent, "nonexistent"})
     end
 
-    test "unsubscribe returns error when pubsub not configured", %{agent_id: agent_id} do
+    test "unsubscribe is a no-op when process not found" do
+      assert :ok = FileSystemServer.unsubscribe({:agent, "nonexistent"})
+    end
+
+    test "subscribe returns server pid and monitor ref", %{agent_id: agent_id} do
+      {:ok, server_pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+
+      assert {:ok, ^server_pid, ref} = FileSystemServer.subscribe({:agent, agent_id})
+      assert is_reference(ref)
+    end
+
+    test "broadcasts file_updated on write", %{agent_id: agent_id} do
       {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
-      assert {:error, :no_pubsub} = FileSystemServer.unsubscribe({:agent, agent_id})
-    end
+      {:ok, _pid, _ref} = FileSystemServer.subscribe({:agent, agent_id})
 
-    test "unsubscribe returns error when process not found" do
-      assert {:error, :process_not_found} = FileSystemServer.unsubscribe({:agent, "nonexistent"})
-    end
-
-    test "broadcasts file_updated on write", %{agent_id: agent_id, pubsub_name: pubsub_name} do
-      {:ok, _pid} =
-        FileSystemServer.start_link(
-          scope_key: {:agent, agent_id},
-          pubsub: {Phoenix.PubSub, pubsub_name}
-        )
-
-      # Subscribe to events
-      :ok = FileSystemServer.subscribe({:agent, agent_id})
-
-      # Write a file
       {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "content")
 
-      # Should receive wrapped file_updated event with path
       assert_receive {:file_system, {:file_updated, path}}, 100
       assert path == "/test.txt"
     end
 
-    test "broadcasts file_deleted on delete", %{agent_id: agent_id, pubsub_name: pubsub_name} do
-      {:ok, _pid} =
-        FileSystemServer.start_link(
-          scope_key: {:agent, agent_id},
-          pubsub: {Phoenix.PubSub, pubsub_name}
-        )
+    test "broadcasts file_deleted on delete", %{agent_id: agent_id} do
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
-      # Write a file first
       {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "content")
 
-      # Subscribe to events
-      :ok = FileSystemServer.subscribe({:agent, agent_id})
+      {:ok, _pid, _ref} = FileSystemServer.subscribe({:agent, agent_id})
 
-      # Delete the file
       :ok = FileSystemServer.delete_file({:agent, agent_id}, "/test.txt")
 
-      # Should receive wrapped file_deleted event with path
       assert_receive {:file_system, {:file_deleted, path}}, 100
       assert path == "/test.txt"
     end
 
-    test "broadcasts correct path on write", %{agent_id: agent_id, pubsub_name: pubsub_name} do
-      {:ok, _pid} =
-        FileSystemServer.start_link(
-          scope_key: {:agent, agent_id},
-          pubsub: {Phoenix.PubSub, pubsub_name}
-        )
+    test "broadcasts correct path on write", %{agent_id: agent_id} do
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
-      # Write some files first
       {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, "/z.txt", "z")
       {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, "/a.txt", "a")
 
-      # Subscribe to events
-      :ok = FileSystemServer.subscribe({:agent, agent_id})
+      {:ok, _pid, _ref} = FileSystemServer.subscribe({:agent, agent_id})
 
-      # Write another file
       {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, "/m.txt", "m")
 
-      # Should receive wrapped event with the specific path
       assert_receive {:file_system, {:file_updated, path}}, 100
       assert path == "/m.txt"
     end
 
-    test "can unsubscribe from events", %{agent_id: agent_id, pubsub_name: pubsub_name} do
-      {:ok, _pid} =
-        FileSystemServer.start_link(
-          scope_key: {:agent, agent_id},
-          pubsub: {Phoenix.PubSub, pubsub_name}
-        )
+    test "can unsubscribe from events", %{agent_id: agent_id} do
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
-      # Subscribe and then unsubscribe
-      :ok = FileSystemServer.subscribe({:agent, agent_id})
+      {:ok, _pid, _ref} = FileSystemServer.subscribe({:agent, agent_id})
       :ok = FileSystemServer.unsubscribe({:agent, agent_id})
 
-      # Write a file
       {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "content")
 
-      # Should NOT receive event after unsubscribe
       refute_receive {:file_system, _}, 50
     end
 
-    test "does not broadcast on write error", %{agent_id: agent_id, pubsub_name: pubsub_name} do
+    test "does not broadcast on write error", %{agent_id: agent_id} do
       defmodule ReadOnlyPersistence do
         @behaviour Sagents.FileSystem.Persistence
 
@@ -791,31 +753,54 @@ defmodule Sagents.FileSystemServerTest do
       {:ok, _pid} =
         FileSystemServer.start_link(
           scope_key: {:agent, agent_id},
-          configs: [config],
-          pubsub: {Phoenix.PubSub, pubsub_name}
+          configs: [config]
         )
 
-      # Subscribe to events
-      :ok = FileSystemServer.subscribe({:agent, agent_id})
+      {:ok, _pid, _ref} = FileSystemServer.subscribe({:agent, agent_id})
 
-      # Try to write to readonly - should fail
       {:error, _} =
         FileSystemServer.write_file({:agent, agent_id}, "/ReadOnly/test.txt", "content")
 
-      # Should NOT receive event on error
       refute_receive {:file_system, _}, 50
     end
 
-    test "topic includes scope_key in name", %{agent_id: agent_id, pubsub_name: pubsub_name} do
-      {:ok, pid} =
+    test "initial_subscribers receive events without a subscribe-after-start race",
+         %{agent_id: agent_id} do
+      {:ok, _pid} =
         FileSystemServer.start_link(
           scope_key: {:agent, agent_id},
-          pubsub: {Phoenix.PubSub, pubsub_name}
+          initial_subscribers: [{:main, self()}]
         )
 
-      # Access internal state to verify topic
-      state = :sys.get_state(pid)
-      assert state.topic == "filesystem:{:agent, \"#{agent_id}\"}"
+      # No explicit subscribe call — the seeded subscriber should already be enrolled.
+      {:ok, _entry} =
+        FileSystemServer.write_file({:agent, agent_id}, "/seeded.txt", "content")
+
+      assert_receive {:file_system, {:file_updated, "/seeded.txt"}}, 100
+    end
+
+    test "subscriber crash auto-cleans subscription", %{agent_id: agent_id} do
+      {:ok, server_pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+
+      sub =
+        spawn(fn ->
+          FileSystemServer.subscribe({:agent, agent_id})
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      # Synchronize: wait until the server has processed the subscribe call
+      _ = :sys.get_state(server_pid)
+      assert Sagents.Publisher.State.count(:sys.get_state(server_pid).publisher) == 1
+
+      Process.exit(sub, :kill)
+
+      # Synchronize again: a follow-up call serializes after the :DOWN handler
+      _ = :sys.get_state(server_pid)
+      _ = :sys.get_state(server_pid)
+      assert Sagents.Publisher.State.count(:sys.get_state(server_pid).publisher) == 0
     end
   end
 

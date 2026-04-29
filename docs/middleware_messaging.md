@@ -119,7 +119,7 @@ sequenceDiagram
     participant AS as AgentServer
     participant M as Middleware
     participant T as Async Task
-    participant PS as PubSub
+    participant SUB as Debug Subscribers
 
     Note over LV,M: Flow 1: External notification
     LV->>AS: notify_middleware(agent_id, middleware_id, message)
@@ -134,7 +134,7 @@ sequenceDiagram
     T->>AS: notify_middleware(agent_id, middleware_id, result)
     AS->>M: handle_message(result, state, config)
     M-->>AS: {:ok, updated_state}
-    AS->>PS: Broadcast debug event (state update)
+    AS->>SUB: Deliver debug state-update event via Sagents.Publisher
 ```
 
 ### Middleware Lifecycle with Messaging
@@ -171,7 +171,7 @@ stateDiagram-v2
         RouteMessage --> HandleMessage: handle_message callback
         HandleMessage --> UpdateState: Modify state
         UpdateState --> Broadcast: Broadcast requested
-        Broadcast --> [*]: PubSub notified
+        Broadcast --> [*]: Subscribers notified via Sagents.Publisher
     }
 ```
 
@@ -970,10 +970,9 @@ end
 
 **Solutions:**
 1. Ensure you're calling `AgentServer.publish_event_from/2` from the async task (not from `handle_message/3`)
-2. Verify the AgentServer was started with PubSub configured
-3. Check subscribers are properly subscribed using `AgentServer.subscribe/1`
-4. Verify `agent_id` is correct when calling `publish_event_from/2`
-5. Look for broadcast errors in logs
+2. Check subscribers are properly subscribed using `AgentServer.subscribe/1` and that the call returned `{:ok, _, _}` (rather than `{:error, :process_not_found}`)
+3. Verify `agent_id` is correct when calling `publish_event_from/2` — the producer is looked up under that name
+4. Look for broadcast errors in logs
 
 ### Tasks Hanging or Not Completing
 

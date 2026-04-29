@@ -100,9 +100,6 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
       agent = create_test_agent(agent_id: agent_id)
       conversation_id = "conv-123"
 
-      # Subscribe to events
-      Phoenix.PubSub.subscribe(pubsub, "agent_server:#{agent_id}")
-
       {:ok, _pid} =
         AgentServer.start_link(
           agent: agent,
@@ -110,6 +107,8 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
           display_message_persistence: Sagents.TestDisplayMessagePersistence,
           pubsub: {Phoenix.PubSub, pubsub}
         )
+
+      {:ok, _server, _ref} = AgentServer.subscribe(agent_id)
 
       # Add a user message
       message = Message.new_user!("Test message")
@@ -127,9 +126,6 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
     } do
       agent = create_test_agent(agent_id: agent_id)
 
-      # Subscribe to events
-      Phoenix.PubSub.subscribe(pubsub, "agent_server:#{agent_id}")
-
       {:ok, _pid} =
         AgentServer.start_link(
           agent: agent,
@@ -137,6 +133,8 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
           display_message_persistence: Sagents.TestDisplayMessagePersistence,
           pubsub: {Phoenix.PubSub, pubsub}
         )
+
+      {:ok, _server, _ref} = AgentServer.subscribe(agent_id)
 
       message = Message.new_user!("Test")
       :ok = AgentServer.add_message(agent_id, message)

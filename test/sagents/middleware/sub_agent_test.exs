@@ -138,6 +138,78 @@ defmodule Sagents.Middleware.SubAgentTest do
     end
   end
 
+  describe "debug_summary/1" do
+    test "returns slim summary that omits the heavy agent_map" do
+      config1 = build_subagent_config("agent1", "First agent")
+      config2 = build_subagent_config("agent2", "Second agent")
+
+      opts = [
+        agent_id: "parent",
+        model: test_model(),
+        middleware: [],
+        subagents: [config1, config2]
+      ]
+
+      {:ok, middleware_config} = SubAgentMiddleware.init(opts)
+      summary = SubAgentMiddleware.debug_summary(middleware_config)
+
+      # Heavy field is dropped
+      refute Map.has_key?(summary, :agent_map)
+
+      # Slim fields are present
+      assert is_list(summary.subagents)
+      assert "agent1" in summary.subagents
+      assert "agent2" in summary.subagents
+
+      # general-purpose is annotated rather than rendered as a raw agent
+      assert Enum.any?(summary.subagents, &String.contains?(&1, "general-purpose"))
+      assert Enum.any?(summary.subagents, &String.contains?(&1, "dynamic tool inheritance"))
+
+      # Small descriptive fields pass through
+      assert summary.descriptions["agent1"] == "First agent"
+      assert summary.descriptions["agent2"] == "Second agent"
+      assert is_list(summary.block_middleware)
+      assert is_map(summary.until_tool_map)
+      assert summary.has_use_instructions == false
+    end
+
+    test "produces dramatically smaller output than raw inspect" do
+      # Build a config with 5 subagents — each agent_map entry is a full Agent
+      # struct with model + middleware. Without debug_summary the inspect output
+      # is huge; with it, the output is bounded by the slim shape.
+      configs =
+        for i <- 1..5 do
+          build_subagent_config("agent_#{i}", "Agent number #{i}")
+        end
+
+      opts = [
+        agent_id: "parent",
+        model: test_model(),
+        middleware: [],
+        subagents: configs
+      ]
+
+      {:ok, middleware_config} = SubAgentMiddleware.init(opts)
+
+      raw = inspect(middleware_config, limit: :infinity, printable_limit: :infinity)
+      summary_str = inspect(SubAgentMiddleware.debug_summary(middleware_config))
+
+      # The summary should be at least an order of magnitude smaller. In practice
+      # it's typically 50-100x smaller, but we use a conservative bound to avoid
+      # flakiness if the Agent struct shrinks.
+      assert byte_size(summary_str) * 10 < byte_size(raw),
+             "debug_summary should shrink output by >10x. raw=#{byte_size(raw)} summary=#{byte_size(summary_str)}"
+    end
+
+    test "callback is exported on the module" do
+      # Mirror the live debugger's check: ensure_loaded? + function_exported?.
+      # `function_exported?` alone returns false on unloaded modules, which is
+      # why the production guard combines both calls.
+      assert Code.ensure_loaded?(SubAgentMiddleware)
+      assert function_exported?(SubAgentMiddleware, :debug_summary, 1)
+    end
+  end
+
   describe "system_prompt/1" do
     test "returns guidance for using SubAgents when called with nil config" do
       prompt = SubAgentMiddleware.system_prompt(nil)

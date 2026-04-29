@@ -67,11 +67,7 @@ defmodule Sagents.AgentCancelSubAgentTest do
     # Start the SubAgentsDynamicSupervisor that the SubAgent middleware needs.
     {:ok, _sup} = SubAgentsDynamicSupervisor.start_link(agent_id: agent_id)
 
-    # Subscribe to both the main agent topic (tool events) and the debug topic
-    # (sub-agent events). Tool-call cancel goes out on the main topic; sub-agent
-    # cancel on the debug topic.
-    Phoenix.PubSub.subscribe(:test_pubsub, "agent_server:#{agent_id}")
-    Phoenix.PubSub.subscribe(:test_pubsub, "agent_server:debug:#{agent_id}")
+    # Subscribe later (after AgentServer starts) via the new direct transport.
 
     test_pid = self()
 
@@ -128,10 +124,11 @@ defmodule Sagents.AgentCancelSubAgentTest do
       AgentServer.start_link(
         agent: agent,
         initial_state: initial_state,
-        name: AgentServer.get_name(agent_id),
-        pubsub: {Phoenix.PubSub, :test_pubsub},
-        debug_pubsub: {Phoenix.PubSub, :test_pubsub}
+        name: AgentServer.get_name(agent_id)
       )
+
+    {:ok, _server, _ref_main} = AgentServer.subscribe(agent_id)
+    {:ok, _server, _ref_debug} = AgentServer.subscribe_debug(agent_id)
 
     assert :ok = AgentServer.execute(agent_id)
 

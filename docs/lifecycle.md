@@ -48,6 +48,9 @@ state = State.new!(%{
 {:ok, pid} = AgentServer.start_link(
   agent: agent,
   initial_state: state,
+  # `:pubsub` is optional — only used to wire `Phoenix.Presence`
+  # `presence_diff` broadcasts. Per-agent events are delivered
+  # directly to subscriber pids via `Sagents.Publisher` regardless.
   pubsub: {Phoenix.PubSub, :my_pubsub}
 )
 ```

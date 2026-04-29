@@ -212,6 +212,14 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
       |> String.split(".")
       |> List.last()
 
+    # Infer the host-agnostic subscriber-session module (sibling of Coordinator).
+    subscriber_session_module = infer_subscriber_session_module(config.context_module)
+
+    subscriber_session_alias =
+      subscriber_session_module
+      |> String.split(".")
+      |> List.last()
+
     # Prepare bindings for helper template
     binding = [
       module: config.helper_module,
@@ -219,7 +227,10 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
       conversations_alias: conversations_alias,
       coordinator_module: coordinator_module,
       coordinator_alias: coordinator_alias,
-      app: config.app
+      subscriber_session_module: subscriber_session_module,
+      subscriber_session_alias: subscriber_session_alias,
+      app: config.app,
+      app_module: config.app_module
     ]
 
     # Load and evaluate template
@@ -300,6 +311,26 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
              {:noreply, AgentLiveHelpers.handle_llm_deltas(socket, deltas)}
            end
 
+           # Subscription recovery — required for crash and Horde-migration handling.
+           def handle_info({:DOWN, ref, :process, _pid, reason}, socket) do
+             {:noreply, AgentLiveHelpers.handle_publisher_down(socket, ref, reason)}
+           end
+
+           def handle_info(
+                 %Phoenix.Socket.Broadcast{event: "presence_diff", payload: payload},
+                 socket
+               ) do
+             {:noreply, AgentLiveHelpers.handle_presence_diff(socket, payload)}
+           end
+
+           # In mount/3, subscribe to the agent presence topic so presence_diff
+           # broadcasts can fulfill any pending subscription:
+           #
+           #   if connected?(socket) do
+           #     Phoenix.PubSub.subscribe(#{config.app_module}.PubSub,
+           #       Sagents.Subscriber.presence_topic())
+           #   end
+
            # ... see generated file for all available handlers
 
       Key features of the generated helpers:
@@ -356,5 +387,13 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
     base_module = hd(parts)
 
     "#{base_module}.Agents.Coordinator"
+  end
+
+  defp infer_subscriber_session_module(context_module) do
+    # Convert MyApp.Conversations -> MyApp.Agents.AgentSubscriberSession
+    parts = String.split(context_module, ".")
+    base_module = hd(parts)
+
+    "#{base_module}.Agents.AgentSubscriberSession"
   end
 end

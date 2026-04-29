@@ -26,9 +26,9 @@ defmodule Sagents.FileSystemServer do
     - UUID string: `"550e8400-e29b-41d4-a716-446655440000"`
     - Database ID: `"12345"`
   - `:configs` - List of FileSystemConfig structs (optional, default: [])
-  - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` (optional, default: nil)
-    Example: `{Phoenix.PubSub, :my_app_pubsub}`
-    When configured, broadcasts `{:files_updated, file_list}` after write/delete operations.
+
+  Subscribers receive events via direct `send/2`. Use
+  `FileSystemServer.subscribe/1` from the subscribing process to enroll
 
   ## Examples
 
@@ -55,12 +55,14 @@ defmodule Sagents.FileSystemServer do
   """
 
   use GenServer
+  use Sagents.Publisher, state_field: :publisher
   require Logger
 
   alias Sagents.FileSystem.FileSystemState
   alias Sagents.FileSystem.FileSystemConfig
   alias Sagents.FileSystem.FileEntry
   alias Sagents.ProcessRegistry
+  alias Sagents.Publisher
 
   # ======================================================================
   # Client API
@@ -76,6 +78,10 @@ defmodule Sagents.FileSystemServer do
     - UUID: `"550e8400-e29b-41d4-a716-446655440000"`
     - Database ID: `12345` or `"12345"`
   - `:configs` - List of FileSystemConfig structs (optional, default: [])
+  - `:initial_subscribers` - List of `{channel, pid}` tuples seeded as
+    subscribers before `init/1` returns. The only valid channel today is
+    `:main`. Use this when the caller wants subscribe + start to be
+    atomic. Default: `[]`.
 
   ## Examples
 
@@ -415,16 +421,23 @@ defmodule Sagents.FileSystemServer do
   end
 
   @doc """
-  Subscribe to file change events for a filesystem scope.
+  Subscribe the calling process to file change events for a filesystem scope.
 
-  Events broadcast (wrapped in `{:file_system, event}` tuple):
+  Events delivered (wrapped in `{:file_system, event}` tuple):
   - `{:file_system, {:file_updated, path}}` - File was created or updated at path
   - `{:file_system, {:file_deleted, path}}` - File was deleted at path
+  - `{:file_system, {:file_moved, old_path, new_path}}` - File was moved
+
+  Returns `{:ok, server_pid, monitor_ref}` on success — the subscriber may
+  `Process.monitor/1` the returned `server_pid` to detect server death.
+
+  Returns `{:error, :process_not_found}` if no FileSystemServer is running
+  for the given scope.
 
   ## Examples
 
       # Subscribe to user's filesystem
-      :ok = FileSystemServer.subscribe({:user, 123})
+      {:ok, _pid, _ref} = FileSystemServer.subscribe({:user, 123})
 
       # Receive events
       receive do
@@ -432,39 +445,20 @@ defmodule Sagents.FileSystemServer do
         {:file_system, {:file_deleted, path}} -> IO.puts("File deleted: \#{path}")
       end
   """
-  @spec subscribe(term()) :: :ok | {:error, :no_pubsub | :process_not_found}
+  @spec subscribe(term()) ::
+          {:ok, pid(), reference()} | {:error, :process_not_found}
   def subscribe(scope_key) do
-    try do
-      case GenServer.call(get_name(scope_key), :get_pubsub_info) do
-        nil ->
-          {:error, :no_pubsub}
-
-        {pubsub, pubsub_name, topic} ->
-          pubsub.subscribe(pubsub_name, topic)
-      end
-    catch
-      :exit, _ ->
-        {:error, :process_not_found}
-    end
+    Publisher.subscribe(get_name(scope_key), :main)
   end
 
   @doc """
-  Unsubscribe from file change events for a filesystem scope.
-  """
-  @spec unsubscribe(term()) :: :ok | {:error, :no_pubsub | :process_not_found}
-  def unsubscribe(scope_key) do
-    try do
-      case GenServer.call(get_name(scope_key), :get_pubsub_info) do
-        nil ->
-          {:error, :no_pubsub}
+  Unsubscribe the calling process from file change events.
 
-        {pubsub, pubsub_name, topic} ->
-          pubsub.unsubscribe(pubsub_name, topic)
-      end
-    catch
-      :exit, _ ->
-        {:error, :process_not_found}
-    end
+  Always returns `:ok`.
+  """
+  @spec unsubscribe(term()) :: :ok
+  def unsubscribe(scope_key) do
+    Publisher.unsubscribe(get_name(scope_key), :main)
   end
 
   # ============================================================================
@@ -480,7 +474,12 @@ defmodule Sagents.FileSystemServer do
       {:ok, state} ->
         scope_key = state.scope_key
         Logger.debug("FileSystemServer started for scope #{inspect(scope_key)}")
-        {:ok, state}
+
+        # Seed any subscribers passed at start time so they receive every
+        # subsequent event without a subscribe-after-start race.
+        initial_subscribers = Keyword.get(opts, :initial_subscribers, [])
+        publisher = Publisher.State.seed(state.publisher, initial_subscribers)
+        {:ok, %{state | publisher: publisher}}
 
       {:error, reason} ->
         {:stop, reason}
@@ -592,17 +591,6 @@ defmodule Sagents.FileSystemServer do
   end
 
   @impl true
-  def handle_call(:get_pubsub_info, _from, state) do
-    case state.pubsub do
-      nil ->
-        {:reply, nil, state}
-
-      {pubsub, pubsub_name} ->
-        {:reply, {pubsub, pubsub_name, state.topic}, state}
-    end
-  end
-
-  @impl true
   def handle_call({:move_file, old_path, new_path}, _from, state) do
     case FileSystemState.move_file(state, old_path, new_path) do
       {:ok, moved_entries, new_state} ->
@@ -646,6 +634,17 @@ defmodule Sagents.FileSystemServer do
   end
 
   @impl true
+  def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+    case Publisher.handle_down(state.publisher, ref, pid) do
+      {:matched, new_pub} ->
+        {:noreply, %{state | publisher: new_pub}}
+
+      :no_match ->
+        {:noreply, state}
+    end
+  end
+
+  @impl true
   def handle_info({:persist_file, path}, state) do
     new_state = FileSystemState.persist_file(state, path)
     {:noreply, new_state}
@@ -662,16 +661,11 @@ defmodule Sagents.FileSystemServer do
   # Private Helpers
   # ============================================================================
 
-  # Broadcast file changes to subscribers
-  # change_info is a tuple like {:file_updated, path} or {:file_deleted, path}
-  # Events are wrapped as {:file_system, change_info} for easier pattern matching
+  # Broadcast file changes to subscribers via direct send/2.
+  # change_info is a tuple like {:file_updated, path} or {:file_deleted, path}.
+  # Events are wrapped as {:file_system, change_info} for easier pattern matching.
   defp broadcast_file_change(state, change_info) do
-    case state.pubsub do
-      {pubsub, pubsub_name} ->
-        pubsub.broadcast_from(pubsub_name, self(), state.topic, {:file_system, change_info})
-
-      nil ->
-        :ok
-    end
+    Publisher.broadcast(state.publisher, :main, {:file_system, change_info})
+    :ok
   end
 end

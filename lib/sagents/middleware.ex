@@ -342,6 +342,21 @@ defmodule Sagents.Middleware do
               | {:interrupt, State.t(), interrupt_data :: map()}
               | {:error, term()}
 
+  @doc """
+  Optional. Returns a debugger-friendly representation of this middleware's
+  runtime config, suitable for rendering in the live debugger's Middleware
+  tab.
+
+  Use this when your config holds large structures (compiled agents, caches,
+  big maps) that would dominate the inspect output and slow down the debugger
+  UI. Keep the result small — this is for human reading.
+
+  Return either a map (rendered as a key/value config table) or a string
+  (rendered verbatim in a code block). If not implemented, the debugger falls
+  back to inspecting the raw config map with bounded limits.
+  """
+  @callback debug_summary(middleware_config()) :: map() | String.t()
+
   @optional_callbacks [
     init: 1,
     system_prompt: 1,
@@ -352,7 +367,8 @@ defmodule Sagents.Middleware do
     state_schema: 0,
     on_server_start: 2,
     callbacks: 1,
-    handle_resume: 5
+    handle_resume: 5,
+    debug_summary: 1
   ]
 
   @doc """

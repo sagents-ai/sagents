@@ -309,17 +309,13 @@ defmodule Sagents.AgentServerMiddlewareMessagingTest do
       agent = create_test_agent(middleware: middleware_specs)
       agent_id = agent.agent_id
 
-      # Start with PubSub and debug PubSub enabled
       {:ok, server_pid} =
         AgentServer.start_link(
           agent: agent,
-          name: AgentServer.get_name(agent_id),
-          pubsub: {Phoenix.PubSub, :langchain_pubsub},
-          debug_pubsub: {Phoenix.PubSub, :langchain_pubsub}
+          name: AgentServer.get_name(agent_id)
         )
 
-      # Subscribe to agent debug events
-      Phoenix.PubSub.subscribe(:langchain_pubsub, "agent_server:debug:#{agent_id}")
+      {:ok, _server, _ref} = AgentServer.subscribe_debug(agent_id)
 
       # Send message that updates state
       send(

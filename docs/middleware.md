@@ -471,7 +471,7 @@ defmodule MyApp.Middleware.AsyncEnrichment do
 
       # Route the result back to THIS middleware via AgentServer
       # The AgentServer will call our handle_message/3 with this data
-      AgentServer.send_middleware_message(agent_id, middleware_id, {:enrichment_ready, result})
+      AgentServer.notify_middleware(agent_id, middleware_id, {:enrichment_ready, result})
     end)
   end
 
@@ -491,7 +491,7 @@ end
 
 ### Key Points
 
-- **Message Routing**: `AgentServer.send_middleware_message/3` routes the message to the specific middleware that sent it, using the `middleware_id` (typically `__MODULE__`)
+- **Message Routing**: `AgentServer.notify_middleware/3` routes the message to the specific middleware that sent it, using the `middleware_id` (typically `__MODULE__`)
 - **Persistent State**: Updates in `handle_message` are persisted to the agent's state, surviving process restarts if auto-save is configured
 - **Non-Blocking**: The agent doesn't wait for async work—it continues executing and responding to users
 - **Event Broadcasting**: Use `publish_event_from/2` to notify external subscribers (like LiveViews) when async work completes

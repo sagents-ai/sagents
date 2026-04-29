@@ -79,6 +79,56 @@ defmodule Sagents.AgentServerTest do
     end
   end
 
+  describe "initial_subscribers" do
+    test "delivers the initial :status_changed :idle event without a subscribe race" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent_id),
+          initial_subscribers: [{:main, self()}]
+        )
+
+      # The initial idle broadcast comes from handle_continue, AFTER init
+      # returns. With initial_subscribers it cannot be missed by the caller.
+      assert_receive {:agent, {:status_changed, :idle, nil}}, 200
+    end
+
+    test "delivers debug events to a debug-channel initial subscriber" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent_id),
+          initial_subscribers: [{:debug, self()}]
+        )
+
+      :ok = AgentServer.publish_debug_event_from(agent_id, :hello_debug)
+      assert_receive {:agent, {:debug, :hello_debug}}, 200
+    end
+
+    test "main and debug subscribers can be seeded together" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent_id),
+          initial_subscribers: [{:main, self()}, {:debug, self()}]
+        )
+
+      assert_receive {:agent, {:status_changed, :idle, nil}}, 200
+
+      :ok = AgentServer.publish_debug_event_from(agent_id, :hi)
+      assert_receive {:agent, {:debug, :hi}}, 200
+    end
+  end
+
   describe "on_server_start middleware errors" do
     test "logs error when middleware on_server_start fails" do
       # Define a middleware module that fails on on_server_start
@@ -734,7 +784,7 @@ defmodule Sagents.AgentServerTest do
         )
 
       # Subscribe to events
-      :ok = AgentServer.subscribe(agent_id)
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id)
 
       {:ok, agent: agent, agent_id: agent_id, pubsub_name: pubsub_name}
     end
@@ -893,12 +943,11 @@ defmodule Sagents.AgentServerTest do
           agent: agent,
           initial_state: initial_state,
           name: AgentServer.get_name(agent_id),
-          pubsub: {Phoenix.PubSub, pubsub_name},
-          debug_pubsub: {Phoenix.PubSub, pubsub_name}
+          pubsub: {Phoenix.PubSub, pubsub_name}
         )
 
       # Subscribe to both main and debug channels
-      :ok = AgentServer.subscribe(agent_id)
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id)
       AgentServer.subscribe_debug(agent_id)
 
       {:ok, agent: agent, agent_id: agent_id}
@@ -1057,25 +1106,22 @@ defmodule Sagents.AgentServerTest do
   end
 
   describe "publish_debug_event_from/2" do
-    test "broadcasts debug event to debug PubSub topic" do
+    test "broadcasts debug event to subscribers on the :debug channel" do
       agent_id = generate_test_agent_id()
       pubsub_name = :"test_pubsub_#{agent_id}"
       {:ok, _} = start_supervised({Phoenix.PubSub, name: pubsub_name})
 
-      # Create agent with debug PubSub enabled
       {:ok, agent} =
         Agent.new(%{
           agent_id: agent_id,
           model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"})
         })
 
-      # Start AgentServer with debug_pubsub
       {:ok, _pid} =
         AgentServer.start_link(
           agent: agent,
           initial_state: State.new!(),
-          pubsub: {Phoenix.PubSub, pubsub_name},
-          debug_pubsub: {Phoenix.PubSub, pubsub_name}
+          pubsub: {Phoenix.PubSub, pubsub_name}
         )
 
       # Subscribe to debug events
@@ -1092,7 +1138,7 @@ defmodule Sagents.AgentServerTest do
       AgentServer.stop(agent_id)
     end
 
-    test "returns :ok when debug_pubsub is not configured" do
+    test "returns :ok when no subscribers are on the :debug channel" do
       agent_id = generate_test_agent_id()
       pubsub_name = :"test_pubsub_#{agent_id}"
       {:ok, _} = start_supervised({Phoenix.PubSub, name: pubsub_name})
@@ -1103,13 +1149,11 @@ defmodule Sagents.AgentServerTest do
           model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"})
         })
 
-      # Start without debug_pubsub
       {:ok, _pid} =
         AgentServer.start_link(
           agent: agent,
           initial_state: State.new!(),
           pubsub: {Phoenix.PubSub, pubsub_name}
-          # No debug_pubsub configured
         )
 
       # Should not crash, just return :ok
@@ -1488,7 +1532,7 @@ defmodule Sagents.AgentServerTest do
         )
 
       # Subscribe to events
-      :ok = AgentServer.subscribe(agent_id)
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id)
 
       # Monitor the process
       _ref = Process.monitor(pid)

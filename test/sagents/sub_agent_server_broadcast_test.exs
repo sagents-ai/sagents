@@ -19,40 +19,14 @@ defmodule Sagents.SubAgentServerBroadcastTest do
   setup :set_mimic_global
   setup :verify_on_exit!
 
-  setup do
-    # Start PubSub for testing
-    pubsub_name = :"test_pubsub_#{System.unique_integer([:positive])}"
-    debug_pubsub_name = :"test_debug_pubsub_#{System.unique_integer([:positive])}"
-
-    {:ok, _} =
-      Phoenix.PubSub.Supervisor.start_link(name: pubsub_name, adapter_name: Phoenix.PubSub.PG2)
-
-    {:ok, _} =
-      Phoenix.PubSub.Supervisor.start_link(
-        name: debug_pubsub_name,
-        adapter_name: Phoenix.PubSub.PG2
-      )
-
-    %{
-      pubsub_name: pubsub_name,
-      debug_pubsub_name: debug_pubsub_name
-    }
-  end
-
-  # Helper to create parent agent with debug pubsub
-  defp start_parent_agent(context) do
+  # Helper: start the parent agent and subscribe the test process to its debug
+  # channel via the new direct-subscription transport.
+  defp start_parent_agent(_context) do
     parent_agent = create_test_agent()
 
-    {:ok, _pid} =
-      AgentServer.start_link(
-        agent: parent_agent,
-        pubsub: {Phoenix.PubSub, context.pubsub_name},
-        debug_pubsub: {Phoenix.PubSub, context.debug_pubsub_name}
-      )
+    {:ok, _pid} = AgentServer.start_link(agent: parent_agent)
 
-    # Subscribe to parent's debug topic
-    debug_topic = "agent_server:debug:#{parent_agent.agent_id}"
-    Phoenix.PubSub.subscribe(context.debug_pubsub_name, debug_topic)
+    {:ok, _server_pid, _ref} = AgentServer.subscribe_debug(parent_agent.agent_id)
 
     parent_agent
   end
@@ -333,49 +307,32 @@ defmodule Sagents.SubAgentServerBroadcastTest do
     end
   end
 
-  describe "no-op when parent has no debug_pubsub" do
-    test "subagent starts without error when parent lacks debug_pubsub", context do
-      # Start parent WITHOUT debug_pubsub
+  describe "no-op when no one is subscribed to the parent's debug channel" do
+    test "subagent starts without error when no debug subscriber is attached", _context do
       parent_agent = create_test_agent()
 
-      {:ok, _pid} =
-        AgentServer.start_link(
-          agent: parent_agent,
-          pubsub: {Phoenix.PubSub, context.pubsub_name}
-          # No debug_pubsub configured
-        )
-
-      # Subscribe to debug topic anyway (shouldn't receive anything)
-      debug_topic = "agent_server:debug:#{parent_agent.agent_id}"
-      Phoenix.PubSub.subscribe(context.debug_pubsub_name, debug_topic)
+      {:ok, _pid} = AgentServer.start_link(agent: parent_agent)
 
       subagent = create_subagent(parent_agent.agent_id)
       {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
 
-      # Should NOT receive any events (parent has no debug_pubsub)
+      # No subscription, so the test process should never receive these events.
       refute_receive {:agent, {:debug, {:subagent, _, _}}}, 200
     end
 
-    test "subagent executes without error when parent lacks debug_pubsub", context do
-      # Start parent WITHOUT debug_pubsub
+    test "subagent executes without error when no debug subscriber is attached", _context do
       parent_agent = create_test_agent()
 
-      {:ok, _pid} =
-        AgentServer.start_link(
-          agent: parent_agent,
-          pubsub: {Phoenix.PubSub, context.pubsub_name}
-        )
+      {:ok, _pid} = AgentServer.start_link(agent: parent_agent)
 
       subagent = create_subagent(parent_agent.agent_id)
       {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
 
-      # Mock ChatAnthropic.call
       ChatAnthropic
       |> stub(:call, fn _model, _messages, _callbacks ->
         {:ok, [Message.new_assistant!("Done")]}
       end)
 
-      # Execute should still work
       {:ok, result} = SubAgentServer.execute(subagent.id)
       assert result == "Done"
     end
