@@ -8,7 +8,7 @@ Sagents is built on three core principles:
 
 1. **OTP-Native**: Every agent is a supervised GenServer process, leveraging Erlang/OTP's battle-tested concurrency primitives
 2. **Composable**: Capabilities are added through middleware
-3. **Observable**: Real-time events flow through PubSub for UI reactivity and debugging
+3. **Observable**: Real-time events flow directly from each agent to its subscribers via `Sagents.Publisher` (no Phoenix.PubSub topic in the path) for UI reactivity and debugging
 
 ## Component Overview
 
@@ -21,14 +21,12 @@ Sagents is built on three core principles:
 │  └──────┬───────┘   └──────┬───────┘   └──────────┬───────────┘ │
 └─────────┼──────────────────┼──────────────────────┼─────────────┘
           │                  │                      │
+          │ AgentServer.subscribe(agent_id)         │
+          │ (registers via Sagents.Publisher;       │
+          │  events delivered to subscriber pids    │
+          │  by direct send/2 — no PubSub topic)    │
           ▼                  ▼                      ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                         Phoenix.PubSub                          │
-│         Real-time events: status, messages, todos, etc.         │
-└─────────────────────────────────────────────────────────────────┘
-          ▲                  ▲                      ▲
-          │                  │                      │
-┌─────────┴──────────────────┴──────────────────────┴─────────────┐
 │                        AgentSupervisor                          │
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │                       AgentServer                           ││
@@ -112,7 +110,7 @@ The `AgentServer` is a GenServer that:
 
 1. **Manages lifecycle** - Starts, stops, handles timeouts
 2. **Coordinates execution** - Runs the middleware/LLM loop
-3. **Broadcasts events** - Publishes to PubSub subscribers
+3. **Broadcasts events** - Delivers to subscriber pids via `Sagents.Publisher`
 4. **Handles interrupts** - Pauses for HITL (Human In The Loop) and resumes
 
 ```elixir
@@ -460,7 +458,7 @@ The LLM can then decide how to proceed (retry, ask user, etc.).
 
 - Each agent is independent - no contention between conversations
 - SubAgents run in parallel under the same supervisor
-- PubSub broadcasts are async and don't block execution
+- Event delivery via `Sagents.Publisher` is non-blocking `send/2` per subscriber and doesn't block execution
 
 ### Startup Time
 

@@ -409,24 +409,15 @@ Files registered at a path that doesn't match any `FileSystemConfig` live in mem
 
 ## Real-Time File Change Notifications
 
-Subscribe to the `FileSystemServer`'s PubSub topic to receive events when the agent creates, edits, or deletes files. This is useful for updating a file browser in your UI.
-
-Requires the server to be started with a PubSub configuration:
-
-```elixir
-{:ok, _pid} = FileSystem.ensure_filesystem(
-  scope_key,
-  [fs_config],
-  pubsub: {Phoenix.PubSub, MyApp.PubSub}
-)
-```
-
-Then subscribe in your LiveView:
+Subscribe to a `FileSystemServer` to receive events when the agent creates, edits,
+or deletes files. This is useful for updating a file browser in your UI. Events
+are delivered directly to the subscriber pid via `Sagents.Publisher` — no
+Phoenix.PubSub configuration required.
 
 ```elixir
 # In mount/3 (connected socket only)
 if connected?(socket) do
-  FileSystemServer.subscribe(scope_key)
+  {:ok, _server_pid, _ref} = FileSystemServer.subscribe(scope_key)
 end
 
 # Handle events
@@ -439,6 +430,11 @@ def handle_info({:file_system, {:file_deleted, path}}, socket) do
   {:noreply, update_file_list(socket)}
 end
 ```
+
+`FileSystemServer.subscribe/1` returns `{:ok, server_pid, monitor_ref}` on
+success or `{:error, :process_not_found}` if no FileSystemServer is running for
+that scope. The producer monitors the subscriber so departure cleans up
+automatically.
 
 ## Reference: agents_demo
 

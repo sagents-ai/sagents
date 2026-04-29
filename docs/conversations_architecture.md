@@ -125,7 +125,7 @@ The dual-view pattern solves this by keeping the agent's working memory (State) 
 1. **Performance**: Load only display messages for UI without deserializing full agent state
 2. **Independent evolution**: Agent state can be summarized, compacted, or rewritten by middleware without affecting what users see
 3. **Flexibility**: Show thinking blocks, tool execution status, images - things the LLM doesn't need in its context
-4. **Streaming**: Progressive UI updates as messages arrive via PubSub
+4. **Streaming**: Progressive UI updates as messages arrive via direct event subscriptions
 5. **History preservation**: Keep complete display history even when agent state is compressed to reduce token usage
 
 ### Example: Summarization Without User Impact
@@ -451,7 +451,7 @@ The conversations architecture separates concerns:
 
 This separation enables:
 - Fast UI queries without deserializing agent state
-- Progressive message streaming with PubSub
+- Progressive message streaming via direct subscriber delivery (`Sagents.Publisher`)
 - Rich content types (thinking, images, tool status) not needed by LLM
 - Flexibility to update agent configuration without migrating stored data
 
