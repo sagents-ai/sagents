@@ -289,6 +289,23 @@ defmodule Sagents.Middleware.SubAgent do
     end
   end
 
+  @impl true
+  def debug_summary(config) do
+    subagents =
+      Enum.map(config.agent_map, fn
+        {name, :dynamic} -> "#{name} (general-purpose, dynamic tool inheritance)"
+        {name, _agent_struct} -> name
+      end)
+
+    %{
+      subagents: subagents,
+      descriptions: config.descriptions,
+      block_middleware: config.block_middleware,
+      until_tool_map: config.until_tool_map,
+      has_use_instructions: not Enum.empty?(Map.get(config, :use_instructions_map, %{}))
+    }
+  end
+
   defp has_use_instructions?(config) when is_map(config) do
     config
     |> Map.get(:use_instructions_map, %{})
