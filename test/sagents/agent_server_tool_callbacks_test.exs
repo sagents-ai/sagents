@@ -20,9 +20,6 @@ defmodule Sagents.AgentServerToolCallbacksTest do
 
   # Helper to start agent with tools
   defp start_agent_with_tools(agent_id, tools) do
-    # Subscribe to PubSub first
-    Phoenix.PubSub.subscribe(:test_pubsub, "agent_server:#{agent_id}")
-
     model =
       ChatAnthropic.new!(%{
         model: "claude-sonnet-4-6",
@@ -42,9 +39,11 @@ defmodule Sagents.AgentServerToolCallbacksTest do
     {:ok, _pid} =
       AgentSupervisor.start_link(
         name: AgentSupervisor.get_name(agent_id),
-        agent: agent,
-        pubsub: {Phoenix.PubSub, :test_pubsub}
+        agent: agent
       )
+
+    # Subscribe via the new direct transport now that the agent is up.
+    {:ok, _server, _ref} = AgentServer.subscribe(agent_id)
 
     agent_id
   end

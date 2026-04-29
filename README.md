@@ -813,7 +813,7 @@ See [Conversations Architecture](docs/conversations_architecture.md) for the com
 
 - [Conversations Architecture](docs/conversations_architecture.md) - How the dual-view pattern works with agent state and display messages
 - [Lifecycle Management](docs/lifecycle.md) - Process supervision, timeouts, and shutdown
-- [PubSub & Presence](docs/pubsub_presence.md) - Real-time events and viewer tracking
+- [Subscriptions & Presence](docs/subscriptions_and_presence.md) - Real-time events, agent-discovery presence, and viewer-presence shutdown
 - [Middleware Development](docs/middleware.md) - Building custom middleware
 - [Observability](docs/observability.md) - Middleware-based callbacks for OpenTelemetry, metrics, and logging
 - [State Persistence](docs/persistence.md) - Saving and restoring conversations

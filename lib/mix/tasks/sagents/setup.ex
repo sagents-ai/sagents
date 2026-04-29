@@ -93,11 +93,15 @@ defmodule Mix.Tasks.Sagents.Setup do
     agent_persistence_path = generate_agent_persistence(config)
     display_message_persistence_path = generate_display_message_persistence(config)
 
+    # Generate AgentSubscriberSession (host-agnostic subscriber-side state model)
+    agent_subscriber_session_path = generate_agent_subscriber_session(config)
+
     # Print all generated files
     all_files = [
       coordinator_path,
       agent_persistence_path,
-      display_message_persistence_path | persistence_files
+      display_message_persistence_path,
+      agent_subscriber_session_path | persistence_files
     ]
 
     print_generated_files(all_files)
@@ -146,6 +150,7 @@ defmodule Mix.Tasks.Sagents.Setup do
       factory_module: opts[:factory] || "#{app_module(app)}.Agents.Factory",
       coordinator_module: opts[:coordinator] || "#{app_module(app)}.Agents.Coordinator",
       agent_persistence_module: "#{app_module(app)}.Agents.AgentPersistence",
+      agent_subscriber_session_module: "#{app_module(app)}.Agents.AgentSubscriberSession",
       display_message_persistence_module: "#{app_module(app)}.Agents.DisplayMessagePersistence",
       pubsub_module: opts[:pubsub] || "#{app_module(app)}.PubSub",
       presence_module: opts[:presence] || "#{app_module(app)}Web.Presence"
@@ -158,6 +163,7 @@ defmodule Mix.Tasks.Sagents.Setup do
       module_to_path(config.factory_module),
       module_to_path(config.coordinator_module),
       module_to_path(config.agent_persistence_module),
+      module_to_path(config.agent_subscriber_session_module),
       module_to_path(config.display_message_persistence_module),
       module_to_path(config.context_module),
       module_to_path("#{config.context_module}.Conversation"),
@@ -290,6 +296,37 @@ defmodule Mix.Tasks.Sagents.Setup do
     content = EEx.eval_file(template_path, binding)
 
     file_path = module_to_path(config.display_message_persistence_module)
+    File.mkdir_p!(Path.dirname(file_path))
+    File.write!(file_path, content)
+
+    file_path
+  end
+
+  defp generate_agent_subscriber_session(config) do
+    conversations_alias =
+      config.context_module
+      |> String.split(".")
+      |> List.last()
+
+    coordinator_alias =
+      config.coordinator_module
+      |> String.split(".")
+      |> List.last()
+
+    binding = [
+      module: config.agent_subscriber_session_module,
+      conversations_module: config.context_module,
+      conversations_alias: conversations_alias,
+      coordinator_module: config.coordinator_module,
+      coordinator_alias: coordinator_alias
+    ]
+
+    template_path =
+      Application.app_dir(:sagents, "priv/templates/agent_subscriber_session.ex.eex")
+
+    content = EEx.eval_file(template_path, binding)
+
+    file_path = module_to_path(config.agent_subscriber_session_module)
     File.mkdir_p!(Path.dirname(file_path))
     File.write!(file_path, content)
 

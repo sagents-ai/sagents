@@ -579,19 +579,17 @@ defmodule Sagents.SubAgentServer do
     }
   end
 
-  # Broadcast an event via the parent AgentServer's debug topic.
+  # Broadcast an event on the parent AgentServer's :debug channel.
   # Events are wrapped as {:subagent, subagent_id, event} and the AgentServer
   # will wrap them as {:agent, {:debug, {:subagent, ...}}} for consistent routing.
-  #
-  # This is a no-op if the parent AgentServer doesn't have debug_pubsub configured.
+  # Reaches only subscribers enrolled on the parent's :debug channel via
+  # `Sagents.Publisher`; with zero such subscribers the broadcast is a no-op.
   defp broadcast_subagent_event(%ServerState{subagent: subagent}, event) do
     parent_id = subagent.parent_agent_id
     subagent_id = subagent.id
 
-    # Wrap event with subagent identification
     wrapped_event = {:subagent, subagent_id, event}
 
-    # Use parent's debug broadcast - this is a no-op if parent has no debug_pubsub
     AgentServer.publish_debug_event_from(parent_id, wrapped_event)
   end
 
