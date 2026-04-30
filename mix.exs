@@ -43,7 +43,7 @@ defmodule Sagents.MixProject do
   defp deps do
     [
       # Core dependency - the LangChain library
-      {:langchain, ">= 0.8.0"},
+      {:langchain, ">= 0.8.5"},
       # {:langchain, path: "../my_langchain"},
 
       # Required dependencies
@@ -102,7 +102,8 @@ defmodule Sagents.MixProject do
           Sagents.Middleware.SubAgent,
           Sagents.Middleware.Summarization,
           Sagents.Middleware.ConversationTitle,
-          Sagents.Middleware.PatchToolCalls
+          Sagents.Middleware.PatchToolCalls,
+          Sagents.Middleware.ProcessContext
         ],
         SubAgents: [
           Sagents.SubAgent,

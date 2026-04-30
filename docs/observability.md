@@ -169,7 +169,8 @@ The `callbacks/1` function returns a map of callback keys to handler functions. 
 | `:on_message_processing_error` | `fn chain, message -> any()` | Error while processing a message |
 | `:on_error_message_created` | `fn chain, message -> any()` | Automated error response message created |
 | `:on_tool_call_identified` | `fn chain, tool_call, function -> any()` | Tool call detected during streaming |
-| `:on_tool_execution_started` | `fn chain, tool_call, function -> any()` | Tool begins executing |
+| `:on_tool_execution_started` | `fn chain, tool_call, function -> any()` | Tool begins executing (fires in the parent chain process, before any per-tool async Task is spawned) |
+| `:on_tool_pre_execution` | `fn chain, tool_call, function -> any()` | Fires inside the process that runs the tool, immediately before invocation. For `async: true` tools this is the spawned `Task.async/1`; for sync tools and HITL-resumed tools it is the chain's own process. Use this for code that depends on per-process state (OpenTelemetry context, Sentry scope, tenancy, Logger metadata) |
 | `:on_tool_execution_completed` | `fn chain, tool_call, tool_result -> any()` | Tool finished successfully |
 | `:on_tool_execution_failed` | `fn chain, tool_call, error -> any()` | Tool execution errored |
 | `:on_tool_response_created` | `fn chain, message -> any()` | Tool response message created |
@@ -372,3 +373,79 @@ defmodule MyApp.Middleware.ObservabilityTest do
   end
 end
 ```
+
+## Propagating Caller Context Across Process Boundaries
+
+Observability that depends on per-process state — OpenTelemetry trace context, Sentry context, request-scoped logger metadata, multi-tenant context — runs into a structural problem: a Sagents agent crosses three process boundaries during a single invocation, and per-process state does not cross any of them automatically.
+
+The boundaries:
+
+1. **Caller → AgentServer GenServer.** The agent's lifecycle hooks run inside a supervised GenServer, not the process that created the agent.
+2. **AgentServer → chain Task.** Each LLM turn spawns a `Task` for the chain run.
+3. **Chain Task → per-tool async Task.** `LangChain.Function`s declared with `async: true` run in fresh `Task.async/1` processes.
+
+Without explicit propagation, an OpenTelemetry span started by your tool runs detached from the parent trace, a Sentry exception captured during tool execution arrives without user/request context, and a tenant-scoped DB query in a tool raises because `Process.get(:org_id)` returns `nil`.
+
+### `Sagents.Middleware.ProcessContext`
+
+The built-in `Sagents.Middleware.ProcessContext` middleware closes all three boundaries with one configuration block. Add it as the **first** middleware in your stack so its `before_model/2` runs before any other middleware that might query the Repo or open a span.
+
+```elixir
+{:ok, agent} = Sagents.Agent.new(%{
+  model: model,
+  middleware: [
+    {Sagents.Middleware.ProcessContext,
+      keys: [:sentry_context],
+      propagators: [
+        {&OpenTelemetry.get_current/0, &OpenTelemetry.attach/1},
+        {&MyApp.Tenancy.get_context/0, &MyApp.Tenancy.set_context/1}
+      ]},
+    # ... your other middleware (Observability, TodoList, etc.)
+  ]
+})
+```
+
+Two configuration options, both optional, freely combined:
+
+- **`:keys`** — list of process-dictionary keys (atoms). Each key has its value captured via `Process.get/1` in the caller's process at `init/1` time, then re-applied with `Process.put/2` on the receiving side of every boundary. Use for state that genuinely lives in the process dict, like `:sentry_context`.
+- **`:propagators`** — list of `{capture_fn, apply_fn}` pairs. `capture_fn` is 0-arity, called once at `init/1` in the caller's process. `apply_fn` is 1-arity, called on the receiving side of each boundary with the captured value. Use for state that lives somewhere other than the process dict — OpenTelemetry's context stash, ETS-backed contexts, application-specific tenancy modules.
+
+The propagator pairs are read like English at the call site: `{&OpenTelemetry.get_current/0, &OpenTelemetry.attach/1}` says "capture the current OTel context, re-apply it on the other side." There is no hidden behavior — the middleware does exactly what the pair specifies.
+
+### Refreshing the snapshot for long-lived agents
+
+`init/1` captures once, at agent construction time. For agents that handle a single request and are then discarded — a fresh agent per LiveView mount, per Coordinator session, per Oban job — that one capture is the only one you need.
+
+For long-lived agents that handle many user messages over time — a conversation-scoped `AgentServer` reused across hours of user interaction, for example — the captured snapshot goes stale. The OTel trace ID, the Sentry context, the active tenant might all be different by the time message #50 arrives.
+
+`update/1` refreshes it. The middleware already has the spec from `init/1`, so the caller only supplies the `agent_id`. Capture functions run in the *caller of* `update/1` against its current process dictionary, then the new snapshot replaces the stored snapshot in the agent's `state.metadata`:
+
+```elixir
+# In a LiveView handle_event, an Oban worker, a Phoenix controller — anywhere
+# a new request boundary is crossed before relaying a message to the agent:
+def handle_event("send_message", %{"text" => text}, socket) do
+  Sagents.Middleware.ProcessContext.update(socket.assigns.agent_id)
+  Sagents.AgentServer.add_message(socket.assigns.agent_id, Message.new_user!(text))
+  {:noreply, socket}
+end
+```
+
+Both the `update/1` call and the `add_message/2` call go through the same AgentServer mailbox in order, so the refresh always lands before the next execute begins.
+
+`update/1` returns:
+
+- `:ok` on success
+- `{:error, :not_found}` if no AgentServer is running for that `agent_id`
+- `{:error, :no_process_context_middleware}` if the agent is running but doesn't have `ProcessContext` in its middleware stack
+
+### Important: within-execute consistency
+
+A single execute_loop is one logical request — one user message resolved by potentially many LLM turns and tool calls. **Within that loop, the snapshot is intentionally frozen.** An `update/1` call arriving mid-execute does not retarget in-flight tools; the chain captured its `custom_context` snapshot when the loop began, and per-tool callbacks see *that* snapshot.
+
+This is the right behavior. A single request should see one consistent context for its duration — interleaving partial OTel contexts or two different tenant scopes inside one logical operation would be a correctness disaster, not a feature. Refresh between requests, not during one.
+
+If you genuinely need to retarget mid-flight (rare), the right tool is to interrupt the agent (`Sagents.Agent.resume/3` after an interrupt), update the context, and resume.
+
+### Sub-agent propagation
+
+`ProcessContext` is just another middleware, and middleware stacks are inherited by sub-agents by default (see *Sub-Agent Propagation* above). Configure it once at the top-level agent and every sub-agent spawned by `Sagents.Middleware.SubAgent` inherits the same propagation behaviour and the same `update/1` plumbing automatically.

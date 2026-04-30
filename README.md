@@ -236,6 +236,7 @@ Sagents includes several pre-built middleware components:
 | **PatchToolCalls** | Fix dangling tool calls from interrupted conversations |
 | **ConversationTitle** | Auto-generate conversation titles from first user message |
 | **DebugLog** | Local dev tool — writes per-conversation structured logs (messages, tool calls, state changes) to dedicated files for debugging |
+| **ProcessContext** | Propagates caller-process state (OpenTelemetry trace context, Sentry context, tenant scope, request-scoped logger metadata) across the Caller → AgentServer → chain Task → per-tool async Task boundaries |
 
 ### FileSystem Middleware
 
