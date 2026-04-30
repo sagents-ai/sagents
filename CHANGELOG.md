@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.8.0-rc.2
+
+Adds a new `ProcessContext` middleware that propagates caller-process state (OpenTelemetry trace context, Sentry context, request-scoped Logger metadata, tenant scope, etc.) across the three Erlang process boundaries an agent invocation crosses: Caller → AgentServer GenServer, AgentServer → chain Task, and chain Task → per-tool async Task. Bumps the `langchain` floor to `>= 0.8.5` to pick up the new `:on_tool_pre_execution` callback the middleware depends on.
+
+No breaking changes from `v0.8.0-rc.1`. See the v0.8.0-rc.1 entry below for upgrading from `v0.7.0`.
+
+### Added
+- `Sagents.Middleware.ProcessContext` middleware. Captures caller-process state once at `init/1` time and re-applies it on the receiving side of every process boundary. Two complementary configuration shapes that combine freely: `:keys` (list of process-dictionary keys for plain `Process.get` / `Process.put` propagation, e.g. `:sentry_context`) and `:propagators` (list of `{capture_fn, apply_fn}` pairs for state that lives behind a getter/setter API, e.g. `{&OpenTelemetry.get_current/0, &OpenTelemetry.attach/1}`). For long-lived conversation-scoped `AgentServer` processes, `ProcessContext.update/1` refreshes the snapshot between `add_message` calls without interleaving contexts inside a single execute loop. [#82](https://github.com/sagents-ai/sagents/pull/82)
+- `docs/observability.md` "Propagating Caller Context Across Process Boundaries" section. Explains the three-boundary problem, both configuration shapes, the `update/1` refresh pattern, the within-execute consistency rule, and sub-agent inheritance. Also adds the new `:on_tool_pre_execution` callback to the LangChain callback reference table. [#82](https://github.com/sagents-ai/sagents/pull/82)
+- `ProcessContext` row in the README built-in middleware table. [#82](https://github.com/sagents-ai/sagents/pull/82)
+
+### Changed
+- Bumped `langchain` dependency to `>= 0.8.5`. The new `ProcessContext` middleware relies on the `:on_tool_pre_execution` callback added in that release (it is the only callback that fires *inside* the per-tool async process, which is what makes propagation across boundary 3 correct). [#82](https://github.com/sagents-ai/sagents/pull/82)
+
 ## v0.8.0-rc.1
 
 Replaces `Phoenix.PubSub` with direct, monitored point-to-point delivery for agent and file-system events, renames the SubAgent middleware's external `subagent_type` argument to `task_name` (with automatic v1→v2 state migration), adds an optional `debug_summary/1` middleware callback so the live debugger can render large configs without hanging, and ships a friendlier UI message for malformed streaming deltas.
