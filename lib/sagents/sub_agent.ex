@@ -176,6 +176,10 @@ defmodule Sagents.SubAgent do
   - `:parent_metadata` - Parent's state metadata map to inherit (optional).
     Dynamic, middleware-managed data (e.g., `conversation_title`) that tools
     access via `context.state.metadata`. Defaults to `%{}`.
+  - `:parent_runtime` - Parent's `state.runtime` map to inherit (optional).
+    Process-local middleware state such as captured `ProcessContext` snapshots.
+    Inherited so sub-agents continue to see the parent's propagated tenant /
+    OTel / Sentry context. Defaults to `%{}`.
   - `:scope` - Scope struct to inherit from the parent (optional). Propagated to
     the SubAgent's `custom_context.scope` so sub-agent tools and persistence callbacks
     see the same tenant context as the parent. Defaults to `agent_config.scope`.
@@ -218,6 +222,10 @@ defmodule Sagents.SubAgent do
   - `:parent_metadata` - Parent's state metadata map to inherit (optional).
     Dynamic, middleware-managed data (e.g., `conversation_title`) that tools
     access via `context.state.metadata`. Defaults to `%{}`.
+  - `:parent_runtime` - Parent's `state.runtime` map to inherit (optional).
+    Process-local middleware state such as captured `ProcessContext` snapshots.
+    Inherited so sub-agents continue to see the parent's propagated tenant /
+    OTel / Sentry context. Defaults to `%{}`.
   - `:scope` - Scope struct to inherit from the parent (optional). Propagated to
     the SubAgent's `custom_context.scope` so sub-agent tools and persistence callbacks
     see the same tenant context as the parent. Defaults to `compiled_agent.scope`.
@@ -270,6 +278,7 @@ defmodule Sagents.SubAgent do
     parent_agent_id = Keyword.fetch!(opts, :parent_agent_id)
     parent_tool_context = Keyword.get(opts, :parent_tool_context, %{})
     parent_metadata = Keyword.get(opts, :parent_metadata, %{})
+    parent_runtime = Keyword.get(opts, :parent_runtime, %{})
     # Scope propagates from parent to SubAgent so sub-agent tools and callbacks
     # see the same tenant context. Fall back to the compiled/config agent's own
     # `:scope` field if the caller didn't pass one (e.g., direct new_from_compiled).
@@ -279,8 +288,15 @@ defmodule Sagents.SubAgent do
 
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
 
-    # SubAgent gets its own state but inherits parent's metadata snapshot.
-    subagent_state = State.new!(%{agent_id: sub_agent_id, metadata: parent_metadata})
+    # SubAgent gets its own state but inherits the parent's metadata snapshot
+    # and runtime context. The runtime carries process-local middleware state
+    # like ProcessContext snapshots.
+    subagent_state =
+      State.new!(%{
+        agent_id: sub_agent_id,
+        metadata: parent_metadata,
+        runtime: parent_runtime
+      })
 
     # Merge parent_tool_context into custom_context (same pattern as
     # Agent.build_chain). Internal keys always take precedence on collision.
