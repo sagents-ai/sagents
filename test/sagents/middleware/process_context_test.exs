@@ -403,4 +403,138 @@ defmodule Sagents.Middleware.ProcessContextTest do
       AgentServer.stop(agent_id)
     end
   end
+
+  describe "persistence: snapshot lives in state.runtime, not state.metadata" do
+    # Regression: the captured snapshot contains tuples and closures that
+    # JSON cannot encode. It must live in state.runtime (virtual) so it never
+    # reaches the serialized payload that ends up in JSONB.
+    test "AgentServer.export_state/1 produces a JSON-encodable payload" do
+      Process.put(:test_marker, "orgA")
+
+      agent_id = "test-#{:erlang.unique_integer([:positive])}"
+
+      capture_fn = fn -> :captured_value end
+      apply_fn = fn _value -> :ok end
+
+      agent =
+        build_agent(
+          agent_id,
+          [
+            {ProcessContext, keys: [:test_marker], propagators: [{capture_fn, apply_fn}]}
+          ],
+          []
+        )
+
+      start_agent_supervised(agent)
+
+      # Synchronize so on_server_start has fully run and the snapshot is in
+      # the AgentServer's state.runtime.
+      _ = AgentServer.get_state(agent_id)
+
+      exported = AgentServer.export_state(agent_id)
+
+      # The serialized payload has no runtime key (it is virtual) and no
+      # ProcessContext entry leaked into metadata.
+      refute Map.has_key?(exported["state"], "runtime")
+      refute Map.has_key?(exported["state"]["metadata"] || %{}, to_string(ProcessContext))
+
+      # And the whole payload encodes cleanly to JSON for JSONB storage.
+      assert {:ok, _json} = Jason.encode(exported)
+
+      AgentServer.stop(agent_id)
+    end
+
+    test "the live snapshot still drives propagation (not regressed by the move)" do
+      # Sanity: after the metadata→runtime move, the snapshot must still
+      # flow through every boundary. We re-prove boundary 3 (per-tool async
+      # Task) here as a regression guard.
+      Process.put(:test_marker, "orgA")
+
+      agent_id = "test-#{:erlang.unique_integer([:positive])}"
+      tool = marker_reader_tool("async_reader", true)
+
+      agent =
+        build_agent(
+          agent_id,
+          [{ProcessContext, keys: [:test_marker]}],
+          [tool]
+        )
+
+      expect_tool_call_then_done("async_reader")
+      start_agent_supervised(agent)
+
+      AgentServer.add_message(agent_id, Message.new_user!("Read"))
+
+      assert_receive {:tool_saw, "async_reader", "orgA", _}, 500
+      assert_receive {:agent, {:status_changed, :idle, _}}, 500
+
+      AgentServer.stop(agent_id)
+    end
+  end
+
+  describe "sub-agent inheritance" do
+    # Sub-agents cross another process boundary (parent chain → SubAgentServer).
+    # The parent's state.runtime must be copied into the sub-agent's fresh State
+    # so its own on_server_start sees the captured snapshot and can re-apply it
+    # at every boundary the sub-agent crosses.
+    alias Sagents.SubAgent, as: SubAgentStruct
+
+    test "SubAgent.new_from_config/1 copies parent_runtime into the sub-agent's State" do
+      Process.put(:test_marker, "orgA")
+
+      {:ok, %{snapshot: snapshot}} =
+        ProcessContext.init(
+          keys: [:test_marker],
+          propagators: [{fn -> :v end, fn _ -> :ok end}]
+        )
+
+      parent_runtime = %{ProcessContext => snapshot}
+
+      {:ok, agent_config} =
+        Agent.new(
+          %{
+            agent_id: "sub",
+            model: ChatAnthropic.new!(%{model: "claude-sonnet-4-6", api_key: "test_key"}),
+            base_system_prompt: "Sub agent",
+            middleware: [{ProcessContext, keys: [:test_marker]}]
+          },
+          replace_default_middleware: true
+        )
+
+      subagent =
+        SubAgentStruct.new_from_config(
+          parent_agent_id: "parent",
+          instructions: "do work",
+          agent_config: agent_config,
+          parent_runtime: parent_runtime
+        )
+
+      sub_state = subagent.chain.custom_context.state
+      assert sub_state.runtime == parent_runtime
+      # And metadata is independent — empty by default, not contaminated.
+      assert sub_state.metadata == %{}
+    end
+
+    test "parent_runtime defaults to %{} when not provided (non-ProcessContext callers)" do
+      {:ok, agent_config} =
+        Agent.new(
+          %{
+            agent_id: "sub",
+            model: ChatAnthropic.new!(%{model: "claude-sonnet-4-6", api_key: "test_key"}),
+            base_system_prompt: "Sub agent",
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
+
+      subagent =
+        SubAgentStruct.new_from_config(
+          parent_agent_id: "parent",
+          instructions: "do work",
+          agent_config: agent_config
+        )
+
+      assert subagent.chain.custom_context.state.runtime == %{}
+    end
+  end
 end

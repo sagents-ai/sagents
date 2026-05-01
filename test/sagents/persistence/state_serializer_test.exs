@@ -792,4 +792,43 @@ defmodule Sagents.Persistence.StateSerializerTest do
       assert calc_call.arguments == %{"expression" => "1+1"}
     end
   end
+
+  describe "state.runtime is excluded from serialization" do
+    # Regression: ProcessContext (and any other middleware that stashes
+    # process-local data) writes to state.runtime, a virtual field. The
+    # serializer must not see it, so non-serializable values like 2-tuples
+    # and captured closures cannot leak into JSONB.
+    test "ProcessContext snapshot in state.runtime never reaches the serialized payload" do
+      alias Sagents.Middleware.ProcessContext
+
+      Process.put(:test_marker, "orgA")
+
+      capture_fn = fn -> :captured_value end
+      apply_fn = fn _value -> :ok end
+
+      {:ok, %{snapshot: snapshot}} =
+        ProcessContext.init(
+          keys: [:test_marker],
+          propagators: [{capture_fn, apply_fn}]
+        )
+
+      state =
+        State.new!(%{
+          messages: [Message.new_user!("hi")],
+          metadata: %{"keep_me" => "in_metadata"},
+          runtime: %{ProcessContext => snapshot}
+        })
+
+      serialized = StateSerializer.serialize_state(state)
+
+      # metadata round-trips normally
+      assert serialized["metadata"] == %{"keep_me" => "in_metadata"}
+
+      # runtime is virtual — it's not in the serialized output at all
+      refute Map.has_key?(serialized, "runtime")
+
+      # And the JSONB-bound payload encodes cleanly
+      assert {:ok, _json} = Jason.encode(serialized)
+    end
+  end
 end

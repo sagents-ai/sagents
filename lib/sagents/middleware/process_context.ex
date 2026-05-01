@@ -68,8 +68,18 @@ defmodule Sagents.Middleware.ProcessContext do
   Use `update/1` to refresh it. The middleware already has the spec from
   `init/1`, so the caller only supplies the `agent_id`. Capture functions run
   in the *caller of* `update/1`, then the new snapshot replaces the stored
-  snapshot in the agent's `state.metadata` and is used for every subsequent
+  snapshot in the agent's `state.runtime` and is used for every subsequent
   boundary crossing.
+
+  ## Snapshot lives in `state.runtime`
+
+  The captured snapshot intentionally contains non-serializable values
+  (closures, OTel context tokens, PIDs, tuples). It is therefore stored under
+  `state.runtime[ProcessContext]`, a virtual field that `StateSerializer`
+  never persists. After process restart the snapshot is gone and
+  `on_server_start/2` re-captures from the new caller process — which is the
+  correct semantic, since a stale OTel/Sentry/tenant token would be wrong to
+  re-apply anyway.
 
       # In a LiveView, before relaying a new user message to the agent:
       Sagents.Middleware.ProcessContext.update(agent_id)
@@ -111,11 +121,12 @@ defmodule Sagents.Middleware.ProcessContext do
   @impl true
   def on_server_start(state, config) do
     # One-time bootstrap: copy the init-time capture from config into
-    # state.metadata. From here on, state.metadata is the only place the
-    # snapshot lives. If state.metadata already has a snapshot (restored
-    # from persisted state, or an update/1 message that landed before
-    # on_server_start), preserve it.
-    state = ensure_snapshot_in_metadata(state, config)
+    # state.runtime. From here on, state.runtime is the only place the
+    # snapshot lives. If state.runtime already has a snapshot (e.g. an
+    # update/1 message that landed before on_server_start), preserve it.
+    # Note: state.runtime is virtual and never restored from persistence,
+    # so a freshly-restored agent always falls through to the config copy.
+    state = ensure_snapshot_in_runtime(state, config)
     apply_snapshot(state)
     {:ok, state}
   end
@@ -134,8 +145,8 @@ defmodule Sagents.Middleware.ProcessContext do
 
   @impl true
   def handle_message({:update_context, %{keys: _, propagators: _} = snapshot}, state, _config) do
-    metadata = Map.put(state.metadata || %{}, ProcessContext, snapshot)
-    {:ok, %{state | metadata: metadata}}
+    runtime = Map.put(state.runtime || %{}, ProcessContext, snapshot)
+    {:ok, %{state | runtime: runtime}}
   end
 
   def handle_message(_message, state, _config), do: {:ok, state}
@@ -205,24 +216,24 @@ defmodule Sagents.Middleware.ProcessContext do
     }
   end
 
-  # state.metadata is the single source of truth for the live snapshot.
+  # state.runtime is the single source of truth for the live snapshot.
   # Bootstrap (`config.snapshot`) is copied in once by `on_server_start/2`;
   # all other reads — including the LangChain callback that fires inside the
-  # per-tool Task — go through state.metadata only.
-  defp ensure_snapshot_in_metadata(state, config) do
-    case state.metadata do
+  # per-tool Task — go through state.runtime only.
+  defp ensure_snapshot_in_runtime(state, config) do
+    case state.runtime do
       %{ProcessContext => _} ->
         state
 
-      metadata ->
-        %{state | metadata: Map.put(metadata || %{}, ProcessContext, config.snapshot)}
+      runtime ->
+        %{state | runtime: Map.put(runtime || %{}, ProcessContext, config.snapshot)}
     end
   end
 
   defp apply_snapshot(nil), do: :ok
 
   defp apply_snapshot(state) do
-    case state.metadata do
+    case state.runtime do
       %{ProcessContext => snapshot} -> do_apply(snapshot)
       _ -> :ok
     end

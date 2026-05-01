@@ -59,6 +59,11 @@ defmodule Sagents.State do
     field :messages, {:array, :any}, default: [], virtual: true
     field :todos, {:array, :map}, default: []
     field :metadata, :map, default: %{}
+    # Runtime-only middleware state. Virtual: never persisted, never JSON-encoded.
+    # Use this for values that are inherently process-local or non-serializable —
+    # captured closures, OTel/Sentry context tokens, PIDs, refs, tuples — that
+    # only make sense within the lifetime of a single OS process.
+    field :runtime, :map, default: %{}, virtual: true
     # Interrupt data for HumanInTheLoop middleware
     field :interrupt_data, :map, default: nil, virtual: true
   end
@@ -82,7 +87,7 @@ defmodule Sagents.State do
   """
   def new(attrs \\ %{}) do
     %State{}
-    |> cast(attrs, [:agent_id, :messages, :todos, :metadata, :interrupt_data])
+    |> cast(attrs, [:agent_id, :messages, :todos, :metadata, :runtime, :interrupt_data])
     |> apply_action(:insert)
   end
 
@@ -156,6 +161,7 @@ defmodule Sagents.State do
       messages: merge_messages(left.messages, right.messages),
       todos: merge_todos(left.todos, right.todos),
       metadata: deep_merge_maps(left.metadata, right.metadata),
+      runtime: merge_runtime(left.runtime, right.runtime),
       interrupt_data: right.interrupt_data || left.interrupt_data
     }
   end
@@ -196,6 +202,16 @@ defmodule Sagents.State do
   defp deep_merge_maps(left, _right) when is_map(left), do: left
   defp deep_merge_maps(_left, right) when is_map(right), do: right
   defp deep_merge_maps(_left, _right), do: %{}
+
+  # Runtime entries are shallow merged. A namespacing strategy used by
+  # ProcessContext is to store the data under the module as the key.
+  defp merge_runtime(left, right) when is_map(left) and is_map(right) do
+    Map.merge(left, right)
+  end
+
+  defp merge_runtime(left, _right) when is_map(left), do: left
+  defp merge_runtime(_left, right) when is_map(right), do: right
+  defp merge_runtime(_left, _right), do: %{}
 
   @doc """
   Add a message to the state.
@@ -369,7 +385,8 @@ defmodule Sagents.State do
       agent_id: state.agent_id,
       messages: [],
       todos: [],
-      metadata: %{}
+      metadata: %{},
+      runtime: %{}
     }
   end
 
