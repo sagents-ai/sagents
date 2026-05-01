@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.8.0-rc.3
+
+No breaking changes from `v0.8.0-rc.2`. See the v0.8.0-rc.1 entry below for upgrading from `v0.7.0`.
+
+### Added
+- `Sagents.State.runtime` virtual field for middleware to stash process-local values that must never be persisted. Includes `merge_runtime/2` for shallow, module-namespaced merges. Sub-agent state inherits parent `runtime` so inherited middleware can re-apply propagators across the sub-agent process boundary. [#84](https://github.com/sagents-ai/sagents/pull/84)
+
+### Changed
+- `Sagents.Middleware.ProcessContext` now stores its snapshot under `state.runtime[ProcessContext]` instead of `state.metadata[ProcessContext]`. After a process restart the snapshot is gone and `on_server_start/2` re-captures from the new caller — the correct semantic, since stale OTel/tenant tokens from a dead process should not be re-applied. [#84](https://github.com/sagents-ai/sagents/pull/84)
+
 ## v0.8.0-rc.2
 
 Adds a new `ProcessContext` middleware that propagates caller-process state (OpenTelemetry trace context, Sentry context, request-scoped Logger metadata, tenant scope, etc.) across the three Erlang process boundaries an agent invocation crosses: Caller → AgentServer GenServer, AgentServer → chain Task, and chain Task → per-tool async Task. Bumps the `langchain` floor to `>= 0.8.5` to pick up the new `:on_tool_pre_execution` callback the middleware depends on.
