@@ -309,7 +309,9 @@ defmodule Sagents.SubAgent do
         # can extract it cleanly (same as Agent.build_chain).
         tool_context: parent_tool_context,
         # First-class scope channel, same canonical key as Agent.build_chain.
-        scope: scope
+        scope: scope,
+        # Direct to the parent agent id.
+        agent_id: parent_agent_id
       })
 
     chain =

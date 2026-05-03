@@ -57,6 +57,27 @@ defmodule Sagents.SubAgentToolContextTest do
       assert is_list(ctx.parent_middleware)
     end
 
+    test "SubAgent context.agent_id is the parent_agent_id (subscribers live there)" do
+      agent = bare_agent()
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "parent-with-subscribers",
+          instructions: "Do work",
+          agent_config: agent
+        )
+
+      ctx = subagent.chain.custom_context
+
+      # context.agent_id routes tool-published events to the entity that
+      # actually has subscribers — the parent. SubAgents run as Tasks and
+      # have no subscribers of their own.
+      assert ctx.agent_id == "parent-with-subscribers"
+      # The sub-agent's own runtime id remains accessible via state.
+      assert is_binary(ctx.state.agent_id)
+      refute ctx.state.agent_id == "parent-with-subscribers"
+    end
+
     test "internal keys take precedence over parent_tool_context on collision" do
       agent = bare_agent()
 
@@ -96,11 +117,20 @@ defmodule Sagents.SubAgentToolContextTest do
 
       assert %State{} = ctx.state
       assert is_list(ctx.parent_middleware)
-      # Only internal keys present (including :tool_context which holds the empty map,
-      # and :scope which defaults to nil when no scope is supplied).
-      assert Map.keys(ctx) |> Enum.sort() == [:parent_middleware, :scope, :state, :tool_context]
+      # Only internal keys present (including :tool_context which holds the
+      # empty map, :scope which defaults to nil when no scope is supplied,
+      # and :agent_id which routes back to the parent AgentServer because
+      # SubAgents have no subscribers of their own).
+      assert Map.keys(ctx) |> Enum.sort() ==
+               [:agent_id, :parent_middleware, :scope, :state, :tool_context]
+
       assert ctx.tool_context == %{}
       assert ctx.scope == nil
+      # context.agent_id is the parent's id (the entity with subscribers),
+      # not the sub-agent's own runtime id. Tools that need the sub-agent's
+      # id can still read it from ctx.state.agent_id.
+      assert ctx.agent_id == "parent-3"
+      refute ctx.agent_id == ctx.state.agent_id
     end
   end
 
