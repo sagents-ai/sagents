@@ -1739,6 +1739,20 @@ defmodule Sagents.AgentServer do
     end
   end
 
+  # Sync `server_state.state` to the post-middleware state and broadcast it.
+  # Makes middleware-injected messages visible mid-turn via `get_state/1`.
+  # Dropped if the run was superseded or cancelled.
+  @impl true
+  def handle_cast({:after_middleware_broadcast, exec_seq, prepared_state}, server_state) do
+    if exec_seq == server_state.execution_seq and server_state.status == :running do
+      new_server_state = %{server_state | state: prepared_state}
+      broadcast_debug_event(new_server_state, {:after_middleware_state, prepared_state})
+      {:noreply, new_server_state}
+    else
+      {:noreply, server_state}
+    end
+  end
+
   @impl true
   def handle_cast(:touch, server_state) do
     # Reset the inactivity timer to keep the agent alive
@@ -2024,11 +2038,11 @@ defmodule Sagents.AgentServer do
     server_name = get_name(agent_id)
 
     %{
-      # Sagents-specific callback (NOT a LangChain key).
-      # Fired by Agent.fire_callback/3 after before_model hooks, before LLM call.
-      # Broadcasts the prepared state (with middleware modifications) on the debug channel.
+      # Sagents-only callback. Fires after before_model hooks, before the LLM call.
+      # Casts to the GenServer so the broadcast uses the live publisher state
+      # (subscribers that joined mid-turn) instead of the closure's snapshot.
       on_after_middleware: fn prepared_state ->
-        broadcast_debug_event(server_state, {:after_middleware_state, prepared_state})
+        safe_cast(server_name, {:after_middleware_broadcast, exec_seq, prepared_state})
       end,
 
       # Callback for streaming deltas (tokens as they arrive)

@@ -78,6 +78,97 @@ defmodule Sagents.AgentServerDebugPubSubTest do
     end
   end
 
+  describe "after_middleware_broadcast" do
+    # The on_after_middleware callback closure runs in the execution Task and
+    # would normally broadcast against a frozen snapshot of subscribers. Routing
+    # through the GenServer (this cast) ensures subscribers that joined AFTER
+    # execute started — e.g. a debugger that opened mid-turn — still receive
+    # the post-middleware state. Reconciling server_state.state with
+    # prepared_state also makes mid-turn `get_state/1` reflect middleware
+    # injections (e.g. a foundation-document preamble).
+
+    test "broadcasts :after_middleware_state to debug subscribers and reconciles state" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} = AgentServer.start_link(agent: agent)
+
+      # Force the server into :running with a known execution_seq so the
+      # cast's gate matches.
+      :sys.replace_state(AgentServer.get_pid(agent_id), fn server_state ->
+        %{server_state | status: :running, execution_seq: 1}
+      end)
+
+      {:ok, _pid, _ref} = AgentServer.subscribe_debug(agent_id)
+
+      injected_user = Message.new_user!("synthetic kickoff")
+      injected_assistant = Message.new_assistant!("synthetic reference dump")
+      real_user = Message.new_user!("real first message")
+
+      prepared_state =
+        State.new!(%{messages: [injected_user, injected_assistant, real_user]})
+
+      GenServer.cast(
+        AgentServer.get_pid(agent_id),
+        {:after_middleware_broadcast, 1, prepared_state}
+      )
+
+      assert_receive {:agent, {:debug, {:after_middleware_state, broadcast_state}}}, 200
+      assert length(broadcast_state.messages) == 3
+
+      # Reconciliation: get_state now returns prepared_state's messages,
+      # not the empty pre-middleware list. This is what makes mid-turn
+      # snapshots correct for newly-arrived debugger views.
+      reconciled = AgentServer.get_state(agent_id)
+      assert length(reconciled.messages) == 3
+    end
+
+    test "drops cast when execution_seq is stale" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} = AgentServer.start_link(agent: agent)
+
+      :sys.replace_state(AgentServer.get_pid(agent_id), fn server_state ->
+        %{server_state | status: :running, execution_seq: 5}
+      end)
+
+      {:ok, _pid, _ref} = AgentServer.subscribe_debug(agent_id)
+
+      stale_state = State.new!(%{messages: [Message.new_user!("from old run")]})
+
+      GenServer.cast(
+        AgentServer.get_pid(agent_id),
+        {:after_middleware_broadcast, 1, stale_state}
+      )
+
+      refute_receive {:agent, {:debug, {:after_middleware_state, _}}}, 100
+
+      # State unchanged.
+      assert AgentServer.get_state(agent_id).messages == []
+    end
+
+    test "drops cast when status is not :running" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} = AgentServer.start_link(agent: agent)
+
+      # Server starts in :idle.
+      {:ok, _pid, _ref} = AgentServer.subscribe_debug(agent_id)
+
+      prepared_state = State.new!(%{messages: [Message.new_user!("ignored")]})
+
+      GenServer.cast(
+        AgentServer.get_pid(agent_id),
+        {:after_middleware_broadcast, 0, prepared_state}
+      )
+
+      refute_receive {:agent, {:debug, {:after_middleware_state, _}}}, 100
+      assert AgentServer.get_state(agent_id).messages == []
+    end
+  end
+
   describe "debug events with state restoration" do
     test "debug subscriptions work after restoring from persisted state" do
       agent = create_test_agent()
