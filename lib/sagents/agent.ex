@@ -771,7 +771,11 @@ defmodule Sagents.Agent do
             tool_context: agent.tool_context || %{},
             # First-class scope channel: tool functions read `context.scope`. If
             # tool_context contained `:scope`, it's overridden here.
-            scope: agent.scope
+            scope: agent.scope,
+            # First-class agent identity channel: tool functions read
+            # `context.agent_id` to publish events back through their
+            # AgentServer (e.g. `Sagents.AgentServer.publish_event_from/2`).
+            agent_id: state.agent_id
           }
         )
     }
