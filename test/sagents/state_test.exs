@@ -511,4 +511,125 @@ defmodule Sagents.StateTest do
       assert cleaned.messages == []
     end
   end
+
+  describe "clean_stale_interrupts/2 (middleware-aware)" do
+    alias LangChain.Message.ToolResult
+    alias Sagents.Middleware
+
+    defp build_interrupt_state(interrupt_data) do
+      result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Waiting...",
+          is_interrupt: true,
+          interrupt_data: interrupt_data
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [result]})
+      State.new!(%{messages: [tool_msg]})
+    end
+
+    test "empty middleware list demotes every interrupt (preserves prior behaviour)" do
+      state = build_interrupt_state(%{type: :ask_user_question, question: "?"})
+      cleaned = State.clean_stale_interrupts(state, [])
+
+      [tool_msg] = cleaned.messages
+      [result] = tool_msg.tool_results
+      refute result.is_interrupt
+      assert result.is_error
+      assert is_nil(result.interrupt_data)
+    end
+
+    test "preserves :ask_user_question when AskUserQuestion is in the middleware list" do
+      state = build_interrupt_state(%{type: :ask_user_question, question: "?"})
+      ask_entry = Middleware.init_middleware(Sagents.Middleware.AskUserQuestion)
+
+      cleaned = State.clean_stale_interrupts(state, [ask_entry])
+
+      [tool_msg] = cleaned.messages
+      [result] = tool_msg.tool_results
+      assert result.is_interrupt
+      refute result.is_error
+      assert result.interrupt_data == %{type: :ask_user_question, question: "?"}
+    end
+
+    test "demotes :subagent_hitl even when AskUserQuestion is in the list" do
+      state = build_interrupt_state(%{type: :subagent_hitl, sub_agent_id: "sa-1"})
+      ask_entry = Middleware.init_middleware(Sagents.Middleware.AskUserQuestion)
+
+      cleaned = State.clean_stale_interrupts(state, [ask_entry])
+
+      [tool_msg] = cleaned.messages
+      [result] = tool_msg.tool_results
+      refute result.is_interrupt
+      assert result.is_error
+      assert result.content =~ "interrupted"
+      assert result.content =~ "sub-agent"
+    end
+
+    test "demotes when interrupt_data is nil regardless of middleware (decode-failed path)" do
+      result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Waiting...",
+          is_interrupt: true,
+          interrupt_data: nil
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [result]})
+      state = State.new!(%{messages: [tool_msg]})
+      ask_entry = Middleware.init_middleware(Sagents.Middleware.AskUserQuestion)
+
+      cleaned = State.clean_stale_interrupts(state, [ask_entry])
+
+      [tool_msg] = cleaned.messages
+      [result] = tool_msg.tool_results
+      refute result.is_interrupt
+      assert result.is_error
+      # The "incompatible data" demotion message
+      assert result.content =~ "incompatible"
+    end
+
+    test "preserves :multiple_interrupts when every sub-interrupt is restorable" do
+      data = %{
+        type: :multiple_interrupts,
+        interrupts: [
+          %{type: :ask_user_question, question: "a"},
+          %{type: :ask_user_question, question: "b"}
+        ]
+      }
+
+      state = build_interrupt_state(data)
+      ask_entry = Middleware.init_middleware(Sagents.Middleware.AskUserQuestion)
+
+      cleaned = State.clean_stale_interrupts(state, [ask_entry])
+
+      [tool_msg] = cleaned.messages
+      [result] = tool_msg.tool_results
+      assert result.is_interrupt
+      assert result.interrupt_data == data
+    end
+
+    test "demotes :multiple_interrupts wholesale if any sub-interrupt is not restorable" do
+      data = %{
+        type: :multiple_interrupts,
+        interrupts: [
+          %{type: :ask_user_question, question: "a"},
+          %{type: :subagent_hitl, sub_agent_id: "sa-1"}
+        ]
+      }
+
+      state = build_interrupt_state(data)
+      ask_entry = Middleware.init_middleware(Sagents.Middleware.AskUserQuestion)
+
+      cleaned = State.clean_stale_interrupts(state, [ask_entry])
+
+      [tool_msg] = cleaned.messages
+      [result] = tool_msg.tool_results
+      refute result.is_interrupt
+      assert result.is_error
+    end
+  end
 end

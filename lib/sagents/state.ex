@@ -129,8 +129,11 @@ defmodule Sagents.State do
     - `{:error, reason}` - Deserialization failed
   """
   def from_serialized(agent_id, data) when is_binary(agent_id) and is_map(data) do
-    # StateSerializer.deserialize_state/2 already applies clean_stale_interrupts/1.
-    Sagents.Persistence.StateSerializer.deserialize_state(agent_id, data)
+    # No agent in scope here, so we can't consult middleware on restoring serialized interrupt_data. Fall back to the default of demoting every interrupted tool result.
+    case Sagents.Persistence.StateSerializer.deserialize_state(agent_id, data) do
+      {:ok, state} -> {:ok, clean_stale_interrupts(state, [])}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @doc """
@@ -389,36 +392,42 @@ defmodule Sagents.State do
   end
 
   @doc """
-  Replace any stale interrupt placeholder tool results with error messages.
+  Replace stale interrupt placeholder tool results with error messages,
+  consulting the agent's middleware to decide which interrupts can be
+  restored from cold start.
 
-  Called after loading state from the database. Interrupted tool results
-  reference sub-agent processes that no longer exist, so they must be
-  converted to error results before the LLM sees them.
+  Called after loading state from the database. For each interrupted tool
+  result the decision is:
 
-  This is idempotent — if there are no stale interrupts, it's a no-op.
+  - `interrupt_data == nil` (decode failed, never persisted, or written by
+    older code) → demote to error result.
+  - `interrupt_data` shape is `:multiple_interrupts` → demote *unless* every
+    sub-interrupt is itself claimed by some middleware. Partial restore is a
+    footgun: a resumed agent would dispatch responses that don't all have
+    valid targets.
+  - No middleware in `middleware_entries` says `restorable_interrupt?` for
+    the data → demote.
+  - Otherwise → keep `is_interrupt: true` and `interrupt_data` intact.
+
+  Demoted results carry a clear message so the LLM can see the call failed
+  on the next turn and recover gracefully. Two messages are used to
+  distinguish the failure modes (process-bound vs incompatible data) for
+  debugging. Both are equivalent to the model.
+
+  An empty `middleware_entries` list demotes every interrupt — preserving
+  pre-restorable behaviour for callers that don't have an agent in scope
+  (e.g. `from_serialized/2`).
+
+  Idempotent: a state with no interrupted tool results is unchanged.
   """
-  @spec clean_stale_interrupts(t()) :: t()
-  def clean_stale_interrupts(%State{} = state) do
+  @spec clean_stale_interrupts(t(), [Sagents.MiddlewareEntry.t()]) :: t()
+  def clean_stale_interrupts(%State{} = state, middleware_entries \\ [])
+      when is_list(middleware_entries) do
     cleaned_messages =
       Enum.map(state.messages, fn message ->
         case message do
           %LangChain.Message{role: :tool, tool_results: results} when is_list(results) ->
-            cleaned_results =
-              Enum.map(results, fn
-                %LangChain.Message.ToolResult{is_interrupt: true} = tr ->
-                  %{
-                    tr
-                    | content:
-                        "Tool execution was interrupted and could not be resumed " <>
-                          "(agent was restarted). The sub-agent's work was lost.",
-                      is_interrupt: false,
-                      is_error: true
-                  }
-
-                other ->
-                  other
-              end)
-
+            cleaned_results = Enum.map(results, &maybe_demote(&1, middleware_entries))
             %{message | tool_results: cleaned_results}
 
           other ->
@@ -427,5 +436,70 @@ defmodule Sagents.State do
       end)
 
     %{state | messages: cleaned_messages}
+  end
+
+  defp maybe_demote(
+         %LangChain.Message.ToolResult{is_interrupt: true, interrupt_data: nil} = tr,
+         _middleware
+       ) do
+    demote(tr, :incompatible)
+  end
+
+  defp maybe_demote(
+         %LangChain.Message.ToolResult{is_interrupt: true, interrupt_data: data} = tr,
+         middleware
+       )
+       when is_map(data) do
+    if interrupt_restorable?(data, middleware) do
+      tr
+    else
+      demote(tr, :process_bound)
+    end
+  end
+
+  defp maybe_demote(other, _middleware), do: other
+
+  # `:multiple_interrupts` is restorable if *every* sub-interrupt is
+  # claimed by some middleware. Sub-agents and ask_user questions can mix in
+  # the same wrapper, so partial restore would silently drop some questions.
+  defp interrupt_restorable?(%{type: :multiple_interrupts, interrupts: subs}, middleware)
+       when is_list(subs) do
+    Enum.all?(subs, &any_middleware_claims?(&1, middleware))
+  end
+
+  defp interrupt_restorable?(data, middleware) when is_map(data) do
+    any_middleware_claims?(data, middleware)
+  end
+
+  defp interrupt_restorable?(_data, _middleware), do: false
+
+  defp any_middleware_claims?(data, middleware) when is_map(data) do
+    Enum.any?(middleware, &Sagents.Middleware.apply_restorable_interrupt?(&1, data))
+  end
+
+  defp any_middleware_claims?(_data, _middleware), do: false
+
+  defp demote(tr, :process_bound) do
+    %{
+      tr
+      | content:
+          "Tool execution was interrupted and could not be resumed " <>
+            "(agent was restarted). The sub-agent's work was lost.",
+        is_interrupt: false,
+        is_error: true,
+        interrupt_data: nil
+    }
+  end
+
+  defp demote(tr, :incompatible) do
+    %{
+      tr
+      | content:
+          "Tool execution was interrupted and could not be resumed " <>
+            "(saved data was incompatible with current code).",
+        is_interrupt: false,
+        is_error: true,
+        interrupt_data: nil
+    }
   end
 end

@@ -947,4 +947,18 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
                )
     end
   end
+
+  describe "restorable_interrupt?/1" do
+    alias Sagents.Middleware.AskUserQuestion
+
+    test "returns true for :ask_user_question type" do
+      assert AskUserQuestion.restorable_interrupt?(%{type: :ask_user_question, question: "hi"})
+    end
+
+    test "returns false for unrelated types" do
+      refute AskUserQuestion.restorable_interrupt?(%{type: :subagent_hitl})
+      refute AskUserQuestion.restorable_interrupt?(%{type: :multiple_interrupts, interrupts: []})
+      refute AskUserQuestion.restorable_interrupt?(%{})
+    end
+  end
 end

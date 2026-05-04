@@ -1243,6 +1243,11 @@ defmodule Sagents.AgentServer do
       {:ok, state} ->
         # Update agent_id to match the runtime identifier
         agent = %{agent | agent_id: agent_id}
+        # Apply stale-interrupt sweep with the agent's middleware so
+        # restorable interrupts (e.g. ask_user) survive cold start while
+        # process-bound interrupts (e.g. sub-agent HITL) get demoted.
+        # `agent.middleware` is already initialized to MiddlewareEntry structs.
+        state = State.clean_stale_interrupts(state, agent.middleware)
         build_server_state(agent, state, Keyword.put(opts, :restored, true))
 
       {:error, reason} ->
@@ -1669,6 +1674,9 @@ defmodule Sagents.AgentServer do
 
     case StateSerializer.deserialize_state(agent_id, persisted_state["state"]) do
       {:ok, state} ->
+        # Sweep stale interrupts using the running agent's middleware.
+        state = State.clean_stale_interrupts(state, server_state.agent.middleware)
+
         # Update only the state, keep existing agent from code
         # This function is for updating state in a running agent server
         updated_server_state = %{

@@ -63,6 +63,67 @@ defmodule Sagents.Middleware do
 
   - Module name: `MyMiddleware`
   - Tuple with options: `{MyMiddleware, [enabled: true]}`
+
+  ## Restorable interrupts
+
+  When an agent is interrupted (e.g. an `ask_user` question, a HITL approval
+  request, a sub-agent waiting on the user), the active `ToolResult` carries
+  `is_interrupt: true` plus a payload in the (virtual) `interrupt_data` field.
+
+  Persistence rounds that payload through JSONB. `interrupt_data` is encoded
+  opaquely as a Base64 binary alongside the rest of the tool result and decoded
+  on the way back. Because the data is just bytes to the storage layer, the
+  framework needs middleware help to decide whether each persisted interrupt
+  is *safe to resume* after a process restart.
+
+  Implement `c:restorable_interrupt?/1` if your middleware can resume one of
+  its own interrupt types from a cold start. The framework calls each
+  middleware's callback at state-load time; if no middleware claims the data,
+  the interrupted tool result is converted to an error result so the LLM sees
+  a recoverable failure and conversation continues.
+
+  ### Convention
+
+  Middleware "owns" an interrupt type by pattern-matching on the `:type`
+  atom that it puts into `interrupt_data`. Pattern-match on that same atom
+  in `restorable_interrupt?/1`:
+
+      def restorable_interrupt?(%{type: :ask_user_question}), do: true
+      def restorable_interrupt?(_), do: false
+
+  The default is `false` (conservative — opting in is a deliberate decision).
+
+  ### When NOT to opt in
+
+  Only opt in if your middleware's resume path requires *no* in-memory context
+  beyond what is in `interrupt_data` itself. Specifically: no GenServer
+  references, no PIDs, no monitors, no ETS handles. If the original process
+  is gone, can the data alone tell the middleware what to do? If yes, opt in.
+  If no, leave the default and let the framework demote.
+
+  Example: `Sagents.Middleware.SubAgent` deliberately does *not* implement
+  this callback — its interrupts reference a sub-agent process that is gone
+  with the BEAM, so demotion is the only correct behaviour.
+
+  ### Schema evolution
+
+  If you change the shape of your `interrupt_data` map, old persisted rows
+  may either:
+
+  1. Fail to decode (unknown atoms — Erlang's `binary_to_term(_, [:safe])`
+     refuses to materialize atoms it doesn't already know).
+  2. Decode but fail at resume time because the shape no longer matches.
+
+  Both failures are caught and converted to an error result. The conversation
+  continues, the LLM re-asks if needed. **This is the intended failure mode.**
+  Do not work around it with `:unsafe` decoding (would re-introduce atom-table
+  exhaustion as a DoS vector).
+
+  ### Data-only restriction
+
+  Anything you place in `interrupt_data` should be *data*, not *behaviour*:
+  atoms, strings, numbers, lists, maps, tuples are fine. Functions, PIDs,
+  references, ports — never. None of those round-trip through serialization.
   """
   alias Sagents.State
   alias Sagents.MiddlewareEntry
@@ -343,6 +404,30 @@ defmodule Sagents.Middleware do
               | {:error, term()}
 
   @doc """
+  Return `true` if this middleware can resume an interrupted tool call from
+  the given `interrupt_data` after a process restart (no in-memory context
+  required), or `false` otherwise.
+
+  Called at state-load time for every `LangChain.Message.ToolResult` with
+  `is_interrupt: true`. The framework asks each middleware in the agent's
+  middleware list; if no middleware says `true`, the interrupt is converted
+  to an error result and the LLM is told the prior call could not be resumed.
+
+  Default: `false` (every middleware must opt in).
+
+  Recommended pattern — pattern-match on the middleware's own `:type` value
+  in `interrupt_data` and return `true` only for that type:
+
+      def restorable_interrupt?(%{type: :ask_user_question}), do: true
+      def restorable_interrupt?(_), do: false
+
+  See the "Restorable interrupts" section in the module documentation for
+  the full guidance, including the data-only restriction and schema
+  evolution caveats.
+  """
+  @callback restorable_interrupt?(interrupt_data :: map()) :: boolean()
+
+  @doc """
   Optional. Returns a debugger-friendly representation of this middleware's
   runtime config, suitable for rendering in the live debugger's Middleware
   tab.
@@ -368,6 +453,7 @@ defmodule Sagents.Middleware do
     on_server_start: 2,
     callbacks: 1,
     handle_resume: 5,
+    restorable_interrupt?: 1,
     debug_summary: 1
   ]
 
@@ -636,4 +722,30 @@ defmodule Sagents.Middleware do
       UndefinedFunctionError -> {:cont, state}
     end
   end
+
+  @doc """
+  Ask a middleware whether it can resume the given `interrupt_data` from a
+  cold start. Returns `false` if the callback isn't implemented, returns
+  `false` if the callback raises (a buggy middleware must not crash the load
+  path), and otherwise returns the callback's boolean result.
+
+  ## Parameters
+
+  - `entry` - MiddlewareEntry struct with module and config
+  - `interrupt_data` - The decoded interrupt data map from the tool result
+  """
+  @spec apply_restorable_interrupt?(Sagents.MiddlewareEntry.t(), map()) :: boolean()
+  def apply_restorable_interrupt?(%MiddlewareEntry{module: module}, interrupt_data)
+      when is_map(interrupt_data) do
+    try do
+      module.restorable_interrupt?(interrupt_data) == true
+    rescue
+      UndefinedFunctionError -> false
+      _ -> false
+    catch
+      _, _ -> false
+    end
+  end
+
+  def apply_restorable_interrupt?(_entry, _interrupt_data), do: false
 end
