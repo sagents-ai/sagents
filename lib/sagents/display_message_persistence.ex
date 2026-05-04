@@ -151,5 +151,49 @@ defmodule Sagents.DisplayMessagePersistence do
               context :: callback_context()
             ) :: {:ok, term()} | {:error, :not_found | term()}
 
-  @optional_callbacks [resolve_tool_result: 4]
+  @typedoc """
+  Attributes for a synthetic display message produced by middleware (not by an
+  LLM). The shape mirrors the fields a typical implementation will write to
+  its display-message store.
+  """
+  @type synthetic_message_attrs :: %{
+          required(:message_type) => String.t(),
+          required(:content_type) => String.t(),
+          required(:content) => map(),
+          optional(:metadata) => map()
+        }
+
+  @doc """
+  Persist a synthetic display message originated by middleware.
+
+  Used for transcript entries that should appear in the conversation but do
+  not correspond to a `LangChain.Message` — for example, the user's answer
+  to an `ask_user` question, or a "user cancelled" notification.
+
+  AgentServer invokes this callback in response to
+  `Sagents.AgentServer.save_synthetic_message_from/2` and broadcasts the
+  saved record as `{:display_message_saved, msg}` so LiveViews stream it in
+  via the same path used for LLM-generated display messages.
+
+  Optional callback — middleware that uses this feature is responsible for
+  ensuring the configured persistence module implements it.
+
+  ## Parameters
+
+  - `scope` — Integrator-defined scope struct (or `nil`). Use to filter DB writes.
+  - `attrs` — Map with `:message_type`, `:content_type`, `:content` (and optionally `:metadata`).
+  - `context` — Map with `:agent_id` and `:conversation_id`.
+
+  ## Returns
+
+  - `{:ok, display_message}` — Persisted record, broadcast as `{:display_message_saved, msg}`.
+  - `{:error, reason}` — Persistence failed (logged, does not affect agent).
+  """
+  @callback save_synthetic_message(
+              scope :: term() | nil,
+              attrs :: synthetic_message_attrs(),
+              context :: callback_context()
+            ) :: {:ok, term()} | {:error, term()}
+
+  @optional_callbacks [resolve_tool_result: 4, save_synthetic_message: 3]
 end

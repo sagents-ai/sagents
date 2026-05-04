@@ -62,4 +62,24 @@ defmodule Sagents.TestDisplayMessagePersistenceForwarding do
   def update_tool_status(_scope, _status, _tool_info, _context) do
     {:error, :not_found}
   end
+
+  @impl true
+  def save_synthetic_message(scope, attrs, context) do
+    pid = :persistent_term.get({__MODULE__, :test_pid})
+    send(pid, {:saved_synthetic_message, scope, attrs, context})
+
+    case :persistent_term.get({__MODULE__, :synthetic_response}, :ok) do
+      :ok -> {:ok, %{id: "synthetic-#{System.unique_integer([:positive])}", attrs: attrs}}
+      {:error, _} = err -> err
+      :raise -> raise "Simulated synthetic persistence error"
+    end
+  end
+
+  def set_synthetic_response(response) do
+    :persistent_term.put({__MODULE__, :synthetic_response}, response)
+  end
+
+  def clear_synthetic_response do
+    :persistent_term.erase({__MODULE__, :synthetic_response})
+  end
 end

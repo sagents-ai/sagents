@@ -567,6 +567,27 @@ defmodule Sagents.AgentServer do
   end
 
   @doc """
+  Persist a synthetic display message and broadcast it to subscribers.
+
+  Designed for middleware that needs to record user-facing transcript entries
+  that do not correspond to an LLM message (for example, a user's answer to an
+  `ask_user` question, or a "user cancelled" notification).
+
+  The attrs map should contain at minimum `:message_type`, `:content_type`, and
+  `:content`. AgentServer routes the request to the configured
+  `Sagents.DisplayMessagePersistence` implementation and broadcasts the saved
+  record via `{:display_message_saved, msg}`.
+
+  No-op if the AgentServer was not configured with both
+  `display_message_persistence` and `conversation_id`, or if the configured
+  persistence module does not implement `save_synthetic_message/3`.
+  """
+  @spec save_synthetic_message_from(String.t(), map()) :: :ok
+  def save_synthetic_message_from(agent_id, attrs) when is_map(attrs) do
+    GenServer.cast(get_name(agent_id), {:save_synthetic_message, attrs})
+  end
+
+  @doc """
   Request the AgentServer to publish a specific debug PubSub message or event.
 
   Designed to make it easier for middleware to publish debug messages to the
@@ -1715,6 +1736,12 @@ defmodule Sagents.AgentServer do
     {:noreply, server_state}
   end
 
+  @impl true
+  def handle_cast({:save_synthetic_message, attrs}, server_state) do
+    maybe_save_synthetic_and_broadcast(server_state, attrs)
+    {:noreply, server_state}
+  end
+
   # Rolling-state turn update: append the completed message to the live state so
   # `get_state/1`, debuggers, and persistence all observe turn-level progress
   # before Agent.execute/3 returns. Out-of-order casts (from a cancelled or
@@ -2754,6 +2781,44 @@ defmodule Sagents.AgentServer do
     else
       # No persistence configured — just broadcast the message event
       broadcast_event(server_state, {:llm_message, message})
+    end
+  end
+
+  # Persist a middleware-originated synthetic display message via the configured
+  # DisplayMessagePersistence module and broadcast the saved record. Skipped
+  # silently if persistence is unconfigured or the optional callback isn't
+  # implemented.
+  defp maybe_save_synthetic_and_broadcast(server_state, attrs) do
+    cond do
+      is_nil(server_state.display_message_persistence) or is_nil(server_state.conversation_id) ->
+        :ok
+
+      not function_exported?(
+        server_state.display_message_persistence,
+        :save_synthetic_message,
+        3
+      ) ->
+        Logger.warning(
+          "Synthetic display message requested but #{inspect(server_state.display_message_persistence)} does not implement save_synthetic_message/3"
+        )
+
+      true ->
+        module = server_state.display_message_persistence
+        scope = current_scope(server_state)
+        context = callback_context(server_state)
+
+        try do
+          case module.save_synthetic_message(scope, attrs, context) do
+            {:ok, display_msg} ->
+              broadcast_event(server_state, {:display_message_saved, display_msg})
+
+            {:error, reason} ->
+              Logger.error("Synthetic display message persistence failed: #{inspect(reason)}")
+          end
+        rescue
+          exception ->
+            Logger.error("Synthetic display message persistence raised: #{inspect(exception)}")
+        end
     end
   end
 
