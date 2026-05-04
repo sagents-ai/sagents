@@ -157,7 +157,10 @@ defmodule Sagents.Persistence.StateSerializer do
       end
 
     case State.new(%{agent_id: agent_id, messages: messages, todos: todos, metadata: metadata}) do
-      {:ok, state} -> {:ok, state}
+      # Always sanitize stale interrupts. `interrupt_data` on a ToolResult is
+      # a virtual field, so any persisted `is_interrupt: true` result loses
+      # its data on round-trip and would crash the chain on the next run.
+      {:ok, state} -> {:ok, State.clean_stale_interrupts(state)}
       {:error, changeset} -> {:error, {:invalid_state, changeset}}
     end
   end

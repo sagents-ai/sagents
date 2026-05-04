@@ -246,6 +246,52 @@ defmodule Sagents.Persistence.StateSerializerTest do
       assert tool_call.arguments["expression"] == "2 + 2"
     end
 
+    test "sanitizes stale interrupted tool results on deserialize" do
+      # interrupt_data is a virtual field, so a persisted is_interrupt: true
+      # tool result loses its data on round-trip. clean_stale_interrupts/1
+      # must be applied automatically so the next chain run does not crash on
+      # nil interrupt_data inside extract_interrupt_data/1.
+      serialized = %{
+        "version" => 1,
+        "state" => %{
+          "messages" => [
+            %{
+              "role" => "tool",
+              "content" => nil,
+              "status" => "complete",
+              "tool_results" => [
+                %{
+                  "type" => "function",
+                  "tool_call_id" => "call-1",
+                  "name" => "ask_user",
+                  "content" => "Waiting for user response...",
+                  "is_interrupt" => true
+                }
+              ]
+            }
+          ],
+          "todos" => [],
+          "metadata" => %{}
+        },
+        "agent_config" => %{
+          "model" => %{
+            "module" => "Elixir.LangChain.ChatModels.ChatOpenAI",
+            "model" => "gpt-4"
+          },
+          "middleware" => []
+        },
+        "serialized_at" => "2025-11-29T10:30:00Z"
+      }
+
+      {:ok, state} = StateSerializer.deserialize_server_state("agent-123", serialized)
+
+      assert [tool_message] = state.messages
+      assert [result] = tool_message.tool_results
+      refute result.is_interrupt
+      assert result.is_error
+      assert result.content =~ "interrupted"
+    end
+
     test "handles missing version field" do
       serialized = %{
         "state" => %{

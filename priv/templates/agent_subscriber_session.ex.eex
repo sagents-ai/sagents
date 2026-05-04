@@ -100,7 +100,13 @@ defmodule <%= module %> do
 
   @doc """
   Status changed to :interrupted (waiting for human input).
+
+  Returns an empty changes map when `interrupt_data` is `nil` (e.g. an agent
+  whose status is `:interrupted` but whose interrupt payload hasn't been
+  populated yet). Callers can apply the result unconditionally.
   """
+  def handle_status_interrupted(nil), do: %{}
+
   def handle_status_interrupted(interrupt_data) do
     Map.merge(
       %{loading: false, agent_status: :interrupted, interrupt_data: interrupt_data},
