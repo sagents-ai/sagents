@@ -480,6 +480,35 @@ defmodule Sagents.AgentServerTest do
       assert info.error == "Something went wrong"
     end
 
+    test "transitions to :error when execution task crashes", %{agent: agent, agent_id: agent_id} do
+      # Simulates the BadMapError-style crash inside the execution task
+      # (e.g. langchain's check_tool_interrupts raising on stale state). The
+      # AgentServer must transition cleanly to :error so the user sees a real
+      # failure they can retry — not get stuck in :running with a dead task,
+      # and not silently absorb the EXIT signal.
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      Agent
+      |> expect(:execute, fn ^agent, _state, _opts ->
+        raise BadMapError, term: nil
+      end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      assert :ok = AgentServer.execute(agent_id)
+
+      # Give the crash a moment to propagate through DOWN/EXIT.
+      Process.sleep(100)
+
+      assert AgentServer.get_status(agent_id) == :error
+    end
+
     test "handles 3-tuple {:ok, state, extra} from until_tool completion", %{
       agent: agent,
       agent_id: agent_id

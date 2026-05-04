@@ -784,4 +784,167 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
       assert content_text(result_2.content) =~ "cancelled"
     end
   end
+
+  describe "user_facing_attrs/2" do
+    defp question(overrides) do
+      Map.merge(
+        %{
+          type: :ask_user_question,
+          response_type: :single_select,
+          options: [
+            %{label: "PostgreSQL", value: "postgresql"},
+            %{label: "MongoDB", value: "mongodb"}
+          ],
+          allow_other: false,
+          allow_cancel: true,
+          context: nil,
+          tool_call_id: "call_1"
+        },
+        overrides
+      )
+    end
+
+    test "single_select renders the chosen option's label" do
+      response = %{type: :answer, selected: ["postgresql"]}
+
+      assert {:ok, attrs} = AskUserQuestion.user_facing_attrs(response, question(%{}))
+
+      assert attrs == %{
+               message_type: "user",
+               content_type: "text",
+               content: %{"text" => "PostgreSQL"}
+             }
+    end
+
+    test "single_select with special 'other' renders 'Other' + typed text" do
+      q = question(%{allow_other: true})
+      response = %{type: :answer, selected: ["other"], other_text: "DuckDB please"}
+
+      assert {:ok, attrs} = AskUserQuestion.user_facing_attrs(response, q)
+      assert attrs.content == %{"text" => "Other:  \nDuckDB please"}
+      assert attrs.message_type == "user"
+    end
+
+    test "single_select 'other' is rejected when allow_other is false" do
+      response = %{type: :answer, selected: ["other"], other_text: "x"}
+
+      assert {:error, :other_not_allowed} =
+               AskUserQuestion.user_facing_attrs(response, question(%{allow_other: false}))
+    end
+
+    test "single_select treats 'other' as a regular value when it's a real option" do
+      q =
+        question(%{
+          options: [
+            %{label: "Yes", value: "yes"},
+            %{label: "Other Brand", value: "other"}
+          ]
+        })
+
+      response = %{type: :answer, selected: ["other"]}
+
+      assert {:ok, attrs} = AskUserQuestion.user_facing_attrs(response, q)
+      assert attrs.content == %{"text" => "Other Brand"}
+    end
+
+    test "multi_select joins labels with ', '" do
+      q =
+        question(%{
+          response_type: :multi_select,
+          options: [
+            %{label: "Auth", value: "auth"},
+            %{label: "Billing", value: "billing"},
+            %{label: "Notifications", value: "notif"}
+          ]
+        })
+
+      response = %{type: :answer, selected: ["auth", "notif"]}
+
+      assert {:ok, attrs} = AskUserQuestion.user_facing_attrs(response, q)
+      assert attrs.content == %{"text" => "Auth, Notifications"}
+    end
+
+    test "multi_select with 'other' appends a new line + typed text" do
+      q =
+        question(%{
+          response_type: :multi_select,
+          allow_other: true,
+          options: [
+            %{label: "Auth", value: "auth"},
+            %{label: "Billing", value: "billing"}
+          ]
+        })
+
+      response = %{
+        type: :answer,
+        selected: ["auth", "other"],
+        other_text: "audit logging"
+      }
+
+      assert {:ok, attrs} = AskUserQuestion.user_facing_attrs(response, q)
+      assert attrs.content == %{"text" => "Auth  \nOther:  \naudit logging"}
+    end
+
+    test "multi_select 'other' alone (no regular selections) renders without leading CSV" do
+      q =
+        question(%{
+          response_type: :multi_select,
+          allow_other: true,
+          options: [%{label: "A", value: "a"}, %{label: "B", value: "b"}]
+        })
+
+      response = %{type: :answer, selected: ["other"], other_text: "neither"}
+
+      assert {:ok, attrs} = AskUserQuestion.user_facing_attrs(response, q)
+      assert attrs.content == %{"text" => "Other:  \nneither"}
+    end
+
+    test "multi_select rejects 'other' when allow_other is false" do
+      q =
+        question(%{
+          response_type: :multi_select,
+          allow_other: false,
+          options: [%{label: "A", value: "a"}]
+        })
+
+      response = %{type: :answer, selected: ["a", "other"], other_text: "x"}
+
+      assert {:error, :other_not_allowed} = AskUserQuestion.user_facing_attrs(response, q)
+    end
+
+    test "freeform renders the user's typed text" do
+      q = question(%{response_type: :freeform, options: []})
+      response = %{type: :answer, other_text: "Use jsonb columns."}
+
+      assert {:ok, attrs} = AskUserQuestion.user_facing_attrs(response, q)
+      assert attrs.content == %{"text" => "Use jsonb columns."}
+      assert attrs.message_type == "user"
+    end
+
+    test "freeform with empty text errors" do
+      q = question(%{response_type: :freeform, options: []})
+
+      assert {:error, :empty_freeform} =
+               AskUserQuestion.user_facing_attrs(%{type: :answer, other_text: ""}, q)
+    end
+
+    test "cancel produces a notification message" do
+      assert {:ok, attrs} =
+               AskUserQuestion.user_facing_attrs(%{type: :cancel}, question(%{}))
+
+      assert attrs == %{
+               message_type: "system",
+               content_type: "notification",
+               content: %{"text" => "User cancelled"}
+             }
+    end
+
+    test "cancel is rejected when allow_cancel is false" do
+      assert {:error, :cancellation_not_allowed} =
+               AskUserQuestion.user_facing_attrs(
+                 %{type: :cancel},
+                 question(%{allow_cancel: false})
+               )
+    end
+  end
 end

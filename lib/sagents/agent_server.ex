@@ -1821,6 +1821,29 @@ defmodule Sagents.AgentServer do
   end
 
   @impl true
+  def handle_info({:EXIT, pid, reason}, server_state) do
+    # Task.async/1 both links and monitors, so a crashing execution task
+    # delivers both {:EXIT, pid, reason} (via link, because we trap exits)
+    # and {:DOWN, ref, :process, pid, reason} (via monitor). The DOWN path
+    # already routes to handle_task_down/2 and transitions the agent to
+    # :error. If for some reason that path didn't run yet (race), make sure
+    # the EXIT also drives the same transition so the agent never gets
+    # stuck in :running with a dead task.
+    case server_state.task do
+      %Task{pid: ^pid} ->
+        if server_state.status in [:error, :cancelled] do
+          {:noreply, server_state}
+        else
+          handle_task_down(reason, server_state)
+        end
+
+      _ ->
+        # Some other linked process exited; nothing for us to do here.
+        {:noreply, server_state}
+    end
+  end
+
+  @impl true
   def handle_info({:llm_deltas, _deltas}, server_state) do
     # Deltas are broadcast via on_llm_new_delta callback in build_pubsub_callbacks
     # No need to process them here - the client (chat_live.ex) will handle merging

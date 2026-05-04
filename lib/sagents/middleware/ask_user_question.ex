@@ -58,6 +58,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
 
   @behaviour Sagents.Middleware
 
+  alias Sagents.AgentServer
   alias Sagents.State
   alias LangChain.Function
   alias LangChain.Message.ToolResult
@@ -102,13 +103,13 @@ defmodule Sagents.Middleware.AskUserQuestion do
 
   # Resolve: resume_data is a response map. Process the user's answer.
   def handle_resume(
-        _agent,
+        agent,
         %State{interrupt_data: %{type: :ask_user_question}} = state,
         response,
         _config,
         _opts
       ) do
-    resolve_single_question(state, state.interrupt_data, response)
+    resolve_single_question(agent, state, state.interrupt_data, response)
   end
 
   # Multiple interrupts where ALL are ask_user questions.
@@ -128,7 +129,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
   end
 
   def handle_resume(
-        _agent,
+        agent,
         %State{interrupt_data: %{type: :multiple_interrupts, interrupts: interrupts}} = state,
         responses,
         _config,
@@ -136,7 +137,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
       )
       when is_list(responses) do
     if Enum.all?(interrupts, &(&1.type == :ask_user_question)) do
-      resolve_multiple_questions(state, interrupts, responses)
+      resolve_multiple_questions(agent, state, interrupts, responses)
     else
       {:cont, state}
     end
@@ -144,7 +145,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
 
   def handle_resume(_agent, state, _resume_data, _config, _opts), do: {:cont, state}
 
-  defp resolve_single_question(state, question_data, response) do
+  defp resolve_single_question(agent, state, question_data, response) do
     case process_response(response, question_data) do
       {:ok, tool_result_content} ->
         new_tool_result =
@@ -155,6 +156,8 @@ defmodule Sagents.Middleware.AskUserQuestion do
             is_interrupt: false
           })
 
+        save_user_facing_message(agent, question_data, response)
+
         {:ok, State.replace_tool_result(state, question_data.tool_call_id, new_tool_result)}
 
       {:error, reason} ->
@@ -162,7 +165,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
     end
   end
 
-  defp resolve_multiple_questions(state, interrupts, responses) do
+  defp resolve_multiple_questions(agent, state, interrupts, responses) do
     # Build a map of tool_call_id -> response for lookup
     responses_by_id = Map.new(responses, fn r -> {r.tool_call_id, r} end)
 
@@ -183,6 +186,8 @@ defmodule Sagents.Middleware.AskUserQuestion do
                 is_interrupt: false
               })
 
+            save_user_facing_message(agent, question_data, response)
+
             {:cont,
              {:ok,
               State.replace_tool_result(acc_state, question_data.tool_call_id, new_tool_result)}}
@@ -193,6 +198,29 @@ defmodule Sagents.Middleware.AskUserQuestion do
       end
     end)
   end
+
+  # Fire a synthetic display message so the user's answer (or cancellation)
+  # appears in the conversation transcript. Skipped when called outside a live
+  # AgentServer context (nil agent in unit tests, missing agent_id, or a cast
+  # to a registered name that isn't currently alive).
+  defp save_user_facing_message(nil, _question_data, _response), do: :ok
+
+  defp save_user_facing_message(%{agent_id: agent_id}, question_data, response)
+       when is_binary(agent_id) do
+    case user_facing_attrs(response, question_data) do
+      {:ok, attrs} ->
+        try do
+          AgentServer.save_synthetic_message_from(agent_id, attrs)
+        catch
+          :exit, _ -> :ok
+        end
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp save_user_facing_message(_agent, _question_data, _response), do: :ok
 
   # -- Tool definition --
 
@@ -514,6 +542,113 @@ defmodule Sagents.Middleware.AskUserQuestion do
       _ ->
         {:error, "freeform 'other_text' must be a string"}
     end
+  end
+
+  # -- User-facing display formatting --
+  #
+  # Produces synthetic display message attrs from a user response. Uses option
+  # *labels* (what the user saw), unlike `process_response/2` which builds the
+  # LLM-facing text from option *values*.
+
+  @doc false
+  @spec user_facing_attrs(map(), map()) :: {:ok, map()} | {:error, term()}
+  def user_facing_attrs(%{type: :cancel}, %{allow_cancel: true}) do
+    {:ok, notification_attrs("User cancelled")}
+  end
+
+  def user_facing_attrs(%{type: :cancel}, _question_data) do
+    {:error, :cancellation_not_allowed}
+  end
+
+  def user_facing_attrs(%{type: :answer} = response, %{response_type: :freeform}) do
+    case Map.get(response, :other_text) do
+      text when is_binary(text) and byte_size(text) > 0 -> {:ok, user_text_attrs(text)}
+      _ -> {:error, :empty_freeform}
+    end
+  end
+
+  def user_facing_attrs(%{type: :answer} = response, %{response_type: :single_select} = q) do
+    case Map.get(response, :selected, []) do
+      [value] when is_binary(value) ->
+        cond do
+          special_other?(value, q.options) and not Map.get(q, :allow_other, false) ->
+            {:error, :other_not_allowed}
+
+          special_other?(value, q.options) ->
+            other_text = Map.get(response, :other_text, "")
+            {:ok, user_text_attrs("Other:  \n#{other_text}")}
+
+          true ->
+            {:ok, user_text_attrs(lookup_label(q.options, value))}
+        end
+
+      _ ->
+        {:error, :invalid_single_select}
+    end
+  end
+
+  def user_facing_attrs(%{type: :answer} = response, %{response_type: :multi_select} = q) do
+    case Map.get(response, :selected, []) do
+      selected when is_list(selected) and selected != [] ->
+        has_other? = Enum.any?(selected, &special_other?(&1, q.options))
+
+        cond do
+          has_other? and not Map.get(q, :allow_other, false) ->
+            {:error, :other_not_allowed}
+
+          true ->
+            regular = Enum.reject(selected, &special_other?(&1, q.options))
+            labels_csv = regular |> Enum.map(&lookup_label(q.options, &1)) |> Enum.join(", ")
+
+            text =
+              if has_other? do
+                other_text = Map.get(response, :other_text, "")
+
+                case labels_csv do
+                  "" -> "Other:  \n#{other_text}"
+                  csv -> "#{csv}  \nOther:  \n#{other_text}"
+                end
+              else
+                labels_csv
+              end
+
+            {:ok, user_text_attrs(text)}
+        end
+
+      _ ->
+        {:error, :invalid_multi_select}
+    end
+  end
+
+  def user_facing_attrs(_response, _question_data), do: {:error, :invalid_response}
+
+  defp lookup_label(options, value) do
+    case Enum.find(options, &(&1.value == value)) do
+      %{label: label} when is_binary(label) -> label
+      _ -> value
+    end
+  end
+
+  # The special "Other" sentinel only applies when "other" is NOT a regular
+  # option value -- otherwise the LLM provided "other" as a real choice.
+  defp special_other?(value, options) do
+    value == "other" and not Enum.any?(options, &(&1.value == "other"))
+  end
+
+  defp user_text_attrs(text) do
+    %{
+      message_type: "user",
+      content_type: "text",
+      content: %{"text" => text}
+    }
+  end
+
+  defp notification_attrs(text) do
+    %{
+      message_type: "system",
+      content_type: "notification",
+      content: %{"text" => text}
+    }
   end
 
   # -- System prompt --

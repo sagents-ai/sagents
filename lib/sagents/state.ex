@@ -129,10 +129,8 @@ defmodule Sagents.State do
     - `{:error, reason}` - Deserialization failed
   """
   def from_serialized(agent_id, data) when is_binary(agent_id) and is_map(data) do
-    case Sagents.Persistence.StateSerializer.deserialize_state(agent_id, data) do
-      {:ok, state} -> {:ok, clean_stale_interrupts(state)}
-      error -> error
-    end
+    # StateSerializer.deserialize_state/2 already applies clean_stale_interrupts/1.
+    Sagents.Persistence.StateSerializer.deserialize_state(agent_id, data)
   end
 
   @doc """
