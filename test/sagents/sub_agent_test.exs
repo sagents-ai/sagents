@@ -433,7 +433,7 @@ defmodule Sagents.SubAgentTest do
       # Should have an error on initial_messages field (Ecto returns "is invalid" for type mismatch)
       assert errors[:initial_messages]
       assert is_list(errors[:initial_messages])
-      assert length(errors[:initial_messages]) > 0
+      assert errors[:initial_messages] != []
     end
 
     test "accepts empty list for initial_messages" do

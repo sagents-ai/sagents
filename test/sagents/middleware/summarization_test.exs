@@ -305,7 +305,7 @@ defmodule Sagents.Middleware.SummarizationTest do
 
       # Should keep the system message
       assert {:ok, result_state} = Summarization.before_model(state, config)
-      assert length(result_state.messages) >= 1
+      assert result_state.messages != []
       assert List.first(result_state.messages).role == :system
     end
 
