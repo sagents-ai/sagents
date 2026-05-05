@@ -13,42 +13,41 @@ defmodule Sagents do
 
   ## Quick Start
 
-      alias Sagents
+      alias Sagents.{Agent, State}
       alias LangChain.ChatModels.ChatAnthropic
 
       # Create an agent
-      {:ok, agent} = Sagents.new(
+      {:ok, agent} = Agent.new(%{
         model: ChatAnthropic.new!(%{model: "claude-sonnet-4-6"}),
         system_prompt: "You are a helpful assistant."
-      )
+      })
 
-      # Execute with messages
-      {:ok, result} = Sagents.execute(agent, [
-        %{role: "user", content: "Hello!"}
-      ])
+      # Execute with a State
+      state = State.new!(%{messages: [%{role: "user", content: "Hello!"}]})
+      {:ok, result} = Agent.execute(agent, state)
 
   ## Middleware Composition
 
   Sagents uses a middleware pattern for extensibility:
 
       # Use default middleware (TODO, Filesystem, SubAgent, etc.)
-      {:ok, agent} = Sagents.new(
+      {:ok, agent} = Agent.new(%{
         model: model,
         middleware: [MyCustomMiddleware]
-      )
+      })
 
       # Customize default middleware
-      {:ok, agent} = Sagents.new(
+      {:ok, agent} = Agent.new(%{
         model: model,
         filesystem_opts: [long_term_memory: true]
-      )
+      })
 
       # Provide complete middleware stack
-      {:ok, agent} = Sagents.new(
+      {:ok, agent} = Agent.new(%{
         model: model,
         replace_default_middleware: true,
         middleware: [MyMiddleware1, MyMiddleware2]
-      )
+      })
 
   ## Creating Custom Middleware
 
@@ -87,107 +86,15 @@ defmodule Sagents do
 
   Agent state flows through middleware and execution:
 
-      state = State.new!(%{
+      state = Sagents.State.new!(%{
         messages: [%{role: "user", content: "Hello"}],
         files: %{"/notes.txt" => "content"},
         metadata: %{session_id: "123"}
       })
 
-      {:ok, result_state} = Sagents.execute(agent, state)
+      {:ok, result_state} = Sagents.Agent.execute(agent, state)
 
-  See `Sagents.State` for state management functions.
+  See `Sagents.Agent` for agent creation and execution, and `Sagents.State` for
+  state management functions.
   """
-
-  alias Sagents.Agent, as: Agent
-  alias Sagents.State, as: State
-
-  @doc """
-  Create a new Agent with default middleware stack.
-
-  This is a convenience function that delegates to `Sagents.Agent.new/1` with
-  sensible defaults for common use cases.
-
-  ## Options
-
-  All options from `Sagents.Agent.new/1` are supported. Common options:
-
-  - `:model` - LangChain ChatModel struct (required)
-  - `:system_prompt` - Base system instructions
-  - `:tools` - Additional tools beyond middleware
-  - `:middleware` - Extra middleware (appended to defaults)
-  - `:replace_default_middleware` - Use only provided middleware (default: false)
-  - `:name` - Agent name for identification
-
-  ## Examples
-
-      # Basic agent
-      {:ok, agent} = Sagents.new(
-        model: ChatAnthropic.new!(%{model: "claude-sonnet-4-6"}),
-        system_prompt: "You are helpful."
-      )
-
-      # With custom tools
-      {:ok, agent} = Sagents.new(
-        model: model,
-        tools: [calculator_tool, search_tool]
-      )
-
-      # With custom middleware
-      {:ok, agent} = Sagents.new(
-        model: model,
-        middleware: [LoggingMiddleware, MetricsMiddleware]
-      )
-  """
-  @spec new(keyword() | map()) ::
-          {:ok, Agent.t()} | {:error, Ecto.Changeset.t()}
-  def new(opts \\ [])
-  def new(opts) when is_list(opts), do: opts |> Map.new() |> Agent.new()
-  def new(%{} = attrs), do: Agent.new(attrs)
-
-  @doc """
-  Create a new Agent, raising on error.
-
-  See `new/1` for options.
-  """
-  @spec new!(keyword() | map()) :: Agent.t() | no_return()
-  def new!(opts \\ [])
-  def new!(opts) when is_list(opts), do: opts |> Map.new() |> Agent.new!()
-  def new!(%{} = attrs), do: Agent.new!(attrs)
-
-  @doc """
-  Execute an agent with the given state.
-
-  ## Examples
-
-      # Execute with State struct
-      state = State.new!(%{messages: [%{role: "user", content: "Hello"}]})
-      {:ok, result_state} = Sagents.execute(agent, state)
-
-      # Execute with message list (convenience)
-      {:ok, result_state} = Sagents.execute(agent, [
-        %{role: "user", content: "Hello"}
-      ])
-  """
-  def execute(agent, %State{} = state) do
-    Agent.execute(agent, state)
-  end
-
-  def execute(agent, messages) when is_list(messages) do
-    state = State.new!(%{messages: messages})
-    Agent.execute(agent, state)
-  end
-
-  @doc """
-  Execute an agent asynchronously.
-
-  Returns a Task that can be awaited.
-
-  ## Examples
-
-      task = Sagents.execute_async(agent, messages)
-      {:ok, result_state} = Task.await(task)
-  """
-  def execute_async(agent, state_or_messages) do
-    Task.async(fn -> execute(agent, state_or_messages) end)
-  end
 end
