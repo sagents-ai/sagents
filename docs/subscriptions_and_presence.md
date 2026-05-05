@@ -59,8 +59,7 @@ automatically. **It does not install the reverse monitor for you** — if you
 want to detect producer death (e.g., to re-subscribe after a crash), call
 `Process.monitor(server_pid)` on the returned pid yourself.
 
-`AgentServer.unsubscribe/1` and `unsubscribe_debug/1` always return `:ok`,
-even if the producer is no longer running.
+`AgentServer.unsubscribe/1` always returns `:ok`, even if the producer is no longer running.
 
 `FileSystemServer.subscribe/1` and `unsubscribe/1` follow the same shape —
 events arrive as `{:file_system, event}`.
