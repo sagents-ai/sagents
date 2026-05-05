@@ -724,7 +724,7 @@ AgentServer broadcasts events on topic `"agent_server:#{agent_id}"`:
 
 ### Debug Events (separate topic)
 
-Subscribe with `AgentServer.subscribe_debug(agent_id)` on topic `"agent_server:debug:#{agent_id}"`:
+Subscribe with `AgentServer.subscribe(agent_id, :debug)`:
 
 - `{:agent, {:debug, {:agent_state_update, state}}}` - Full state snapshot
 - `{:agent, {:debug, {:middleware_action, module, data}}}` - Middleware events
