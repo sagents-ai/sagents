@@ -850,20 +850,22 @@ defmodule Sagents.Middleware.FileSystem do
     limit = get_arg(args, "limit") || 2000
 
     # Validate path
-    with {:ok, normalized_path} <- validate_path(file_path) do
-      # Read file using FileSystemServer (handles lazy loading automatically)
-      case FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
-        {:ok, entry} ->
-          format_file_content(entry.content || "", normalized_path, start_line, limit)
+    case validate_path(file_path) do
+      {:ok, normalized_path} ->
+        # Read file using FileSystemServer (handles lazy loading automatically)
+        case FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
+          {:ok, entry} ->
+            format_file_content(entry.content || "", normalized_path, start_line, limit)
 
-        {:error, :enoent} ->
-          {:error, "File not found: #{normalized_path}"}
+          {:error, :enoent} ->
+            {:error, "File not found: #{normalized_path}"}
 
-        {:error, reason} ->
-          {:error, "Failed to read file: #{inspect(reason)}"}
-      end
-    else
-      {:error, reason} -> {:error, reason}
+          {:error, reason} ->
+            {:error, "Failed to read file: #{inspect(reason)}"}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   rescue
     e ->
@@ -892,27 +894,29 @@ defmodule Sagents.Middleware.FileSystem do
       {:error, "Both file_path and content are required"}
     else
       # Validate path
-      with {:ok, normalized_path} <- validate_path(file_path) do
-        # Check if file already exists (overwrite protection)
-        if FileSystemServer.file_exists?(config.filesystem_scope, normalized_path) do
-          {:error,
-           "File already exists: #{normalized_path}. Use replace_file_text or replace_file_lines to modify existing files."}
-        else
-          # Write file using FileSystemServer
-          case FileSystemServer.write_file(
-                 config.filesystem_scope,
-                 normalized_path,
-                 content
-               ) do
-            {:ok, entry} ->
-              {:ok, Jason.encode!(FileEntry.to_llm_map(entry))}
+      case validate_path(file_path) do
+        {:ok, normalized_path} ->
+          # Check if file already exists (overwrite protection)
+          if FileSystemServer.file_exists?(config.filesystem_scope, normalized_path) do
+            {:error,
+             "File already exists: #{normalized_path}. Use replace_file_text or replace_file_lines to modify existing files."}
+          else
+            # Write file using FileSystemServer
+            case FileSystemServer.write_file(
+                   config.filesystem_scope,
+                   normalized_path,
+                   content
+                 ) do
+              {:ok, entry} ->
+                {:ok, Jason.encode!(FileEntry.to_llm_map(entry))}
 
-            {:error, reason} ->
-              {:error, "Failed to create file: #{inspect(reason)}"}
+              {:error, reason} ->
+                {:error, "Failed to create file: #{inspect(reason)}"}
+            end
           end
-        end
-      else
-        {:error, reason} -> {:error, reason}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   rescue
@@ -930,27 +934,29 @@ defmodule Sagents.Middleware.FileSystem do
       {:error, "file_path, old_string, and new_string are required"}
     else
       # Validate path
-      with {:ok, normalized_path} <- validate_path(file_path) do
-        # Read current content using FileSystemServer
-        case FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
-          {:ok, entry} ->
-            perform_text_replacement(
-              config.filesystem_scope,
-              normalized_path,
-              entry.content || "",
-              old_string,
-              new_string,
-              replace_all
-            )
+      case validate_path(file_path) do
+        {:ok, normalized_path} ->
+          # Read current content using FileSystemServer
+          case FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
+            {:ok, entry} ->
+              perform_text_replacement(
+                config.filesystem_scope,
+                normalized_path,
+                entry.content || "",
+                old_string,
+                new_string,
+                replace_all
+              )
 
-          {:error, :enoent} ->
-            {:error, "File not found: #{normalized_path}"}
+            {:error, :enoent} ->
+              {:error, "File not found: #{normalized_path}"}
 
-          {:error, reason} ->
-            {:error, "Failed to read file: #{inspect(reason)}"}
-        end
-      else
-        {:error, reason} -> {:error, reason}
+            {:error, reason} ->
+              {:error, "Failed to read file: #{inspect(reason)}"}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   rescue
@@ -965,17 +971,19 @@ defmodule Sagents.Middleware.FileSystem do
       {:error, "file_path is required"}
     else
       # Validate path
-      with {:ok, normalized_path} <- validate_path(file_path) do
-        # Delete file using FileSystemServer
-        case FileSystemServer.delete_file(config.filesystem_scope, normalized_path) do
-          :ok ->
-            {:ok, "File deleted successfully: #{normalized_path}"}
+      case validate_path(file_path) do
+        {:ok, normalized_path} ->
+          # Delete file using FileSystemServer
+          case FileSystemServer.delete_file(config.filesystem_scope, normalized_path) do
+            :ok ->
+              {:ok, "File deleted successfully: #{normalized_path}"}
 
-          {:error, reason} ->
-            {:error, "Failed to delete file: #{inspect(reason)}"}
-        end
-      else
-        {:error, reason} -> {:error, reason}
+            {:error, reason} ->
+              {:error, "Failed to delete file: #{inspect(reason)}"}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   rescue

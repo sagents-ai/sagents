@@ -113,24 +113,26 @@ defmodule Sagents.FileSystem.FileEntry do
   - `:mime_type` - Override the metadata mime type (default `"text/markdown"`).
   """
   def new_file(path, content, opts \\ []) do
-    with {:ok, metadata} <- FileMetadata.new(content, opts) do
-      attrs = %{
-        path: path,
-        content: content,
-        loaded: true,
-        dirty_content: true
-      }
+    case FileMetadata.new(content, opts) do
+      {:ok, metadata} ->
+        attrs = %{
+          path: path,
+          content: content,
+          loaded: true,
+          dirty_content: true
+        }
 
-      %FileEntry{}
-      |> internal_changeset(attrs)
-      |> put_embed(:metadata, metadata)
-      |> apply_action(:insert)
-      |> case do
-        {:ok, entry} -> {:ok, entry}
-        {:error, changeset} -> {:error, Utils.changeset_error_to_string(changeset)}
-      end
-    else
-      {:error, _changeset} = error -> error
+        %FileEntry{}
+        |> internal_changeset(attrs)
+        |> put_embed(:metadata, metadata)
+        |> apply_action(:insert)
+        |> case do
+          {:ok, entry} -> {:ok, entry}
+          {:error, changeset} -> {:error, Utils.changeset_error_to_string(changeset)}
+        end
+
+      {:error, _changeset} = error ->
+        error
     end
   end
 
