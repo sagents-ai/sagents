@@ -620,12 +620,7 @@ defmodule Sagents.SubAgentServer do
       end
 
     # Get messages for token usage extraction only
-    messages =
-      if subagent.chain do
-        subagent.chain.messages
-      else
-        []
-      end
+    messages = subagent.chain.messages
 
     # Extract token usage from the last assistant message
     token_usage = extract_token_usage(messages)

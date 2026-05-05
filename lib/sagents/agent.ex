@@ -913,9 +913,6 @@ defmodule Sagents.Agent do
 
       {:error, _chain, %LangChainError{} = reason} ->
         {:error, reason}
-
-      {:error, _chain, reason} ->
-        {:error, reason}
     end
   end
 

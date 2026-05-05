@@ -426,7 +426,7 @@ defmodule Sagents.Middleware.HumanInTheLoop do
               {:error, "No tool calls found in state"}
 
             %{tool_calls: all_tool_calls} ->
-              interrupt_data = state.interrupt_data || %{}
+              interrupt_data = state.interrupt_data
               hitl_tool_call_ids = Map.get(interrupt_data, :hitl_tool_call_ids, [])
               action_requests = Map.get(interrupt_data, :action_requests, [])
 

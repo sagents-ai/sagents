@@ -25,3 +25,6 @@ sagents-*.tar
 # local dev environment variables
 .envrc
 .env
+
+# Dialyzer PLT files
+/priv/plts/

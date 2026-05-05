@@ -424,7 +424,7 @@ defmodule Sagents.Middleware.FileSystem do
   @impl true
   def state_schema do
     # Files are stored in state.files as %{file_path => content}
-    []
+    nil
   end
 
   # Tool builders
