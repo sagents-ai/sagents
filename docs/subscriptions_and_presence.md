@@ -34,13 +34,13 @@ These are explained below.
 
 ## Subscriber-Side APIs
 
-### Direct: `AgentServer.subscribe/1` and `subscribe_debug/1`
+### Direct: `AgentServer.subscribe/1`
 
 The raw producer-side API:
 
 ```elixir
 {:ok, server_pid, monitor_ref} = AgentServer.subscribe("conversation-123")
-{:ok, server_pid, monitor_ref} = AgentServer.subscribe_debug("conversation-123")
+{:ok, server_pid, monitor_ref} = AgentServer.subscribe("conversation-123", :debug)
 
 # Returns {:error, :process_not_found} if no AgentServer is running
 # under that agent_id.
@@ -325,7 +325,7 @@ Fired when a display message has been persisted to the database (requires
 
 ### Debug events
 
-Available on the `:debug` channel after `AgentServer.subscribe_debug/1`.
+Available on the `:debug` channel after `AgentServer.subscribe/2`.
 
 ```elixir
 {:agent, {:debug, {:agent_state_update, %State{}}}}
