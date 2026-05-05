@@ -138,14 +138,21 @@ defmodule Sagents do
         middleware: [LoggingMiddleware, MetricsMiddleware]
       )
   """
-  defdelegate new(opts \\ []), to: Agent
+  @spec new(keyword() | map()) ::
+          {:ok, Agent.t()} | {:error, Ecto.Changeset.t()}
+  def new(opts \\ [])
+  def new(opts) when is_list(opts), do: opts |> Map.new() |> Agent.new()
+  def new(%{} = attrs), do: Agent.new(attrs)
 
   @doc """
   Create a new Agent, raising on error.
 
   See `new/1` for options.
   """
-  defdelegate new!(opts \\ []), to: Agent
+  @spec new!(keyword() | map()) :: Agent.t() | no_return()
+  def new!(opts \\ [])
+  def new!(opts) when is_list(opts), do: opts |> Map.new() |> Agent.new!()
+  def new!(%{} = attrs), do: Agent.new!(attrs)
 
   @doc """
   Execute an agent with the given state.
