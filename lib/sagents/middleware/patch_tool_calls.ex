@@ -135,30 +135,9 @@ defmodule Sagents.Middleware.PatchToolCalls do
   def patch_dangling_tool_calls(messages) when is_list(messages) do
     {patched, _index} =
       Enum.reduce(messages, {[], 0}, fn msg, {patched_messages, index} ->
-        # Add the current message
         patched_with_msg = patched_messages ++ [msg]
-
-        # Check if this is an assistant message with tool calls
-        case msg do
-          %Message{role: :assistant, tool_calls: tool_calls}
-          when is_list(tool_calls) and tool_calls != [] ->
-            # For each tool call, check if there's a corresponding result
-            patches =
-              Enum.flat_map(tool_calls, fn tool_call ->
-                if has_tool_result?(messages, index, tool_call.call_id) do
-                  # Tool result exists, no patch needed
-                  []
-                else
-                  # Create synthetic tool result for dangling call
-                  [create_cancellation_message(tool_call)]
-                end
-              end)
-
-            {patched_with_msg ++ patches, index + 1}
-
-          _other ->
-            {patched_with_msg, index + 1}
-        end
+        patches = build_patches_for(msg, messages, index)
+        {patched_with_msg ++ patches, index + 1}
       end)
 
     patched
@@ -168,6 +147,23 @@ defmodule Sagents.Middleware.PatchToolCalls do
     # Not a list, return empty list
     []
   end
+
+  defp build_patches_for(
+         %Message{role: :assistant, tool_calls: tool_calls},
+         messages,
+         index
+       )
+       when is_list(tool_calls) and tool_calls != [] do
+    Enum.flat_map(tool_calls, fn tool_call ->
+      if has_tool_result?(messages, index, tool_call.call_id) do
+        []
+      else
+        [create_cancellation_message(tool_call)]
+      end
+    end)
+  end
+
+  defp build_patches_for(_msg, _messages, _index), do: []
 
   # Check if a tool result exists for the given tool call ID
   # Only searches in messages AFTER the current index (forward search)

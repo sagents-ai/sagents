@@ -144,7 +144,11 @@ defmodule Sagents.Middleware.ProcessContext do
   end
 
   @impl true
-  def handle_message({:update_context, %{keys: _, propagators: _} = snapshot}, state, _config) do
+  def handle_message(
+        {:update_context, %{keys: _keys, propagators: _propagators} = snapshot},
+        state,
+        _config
+      ) do
     runtime = Map.put(state.runtime || %{}, ProcessContext, snapshot)
     {:ok, %{state | runtime: runtime}}
   end
@@ -222,7 +226,7 @@ defmodule Sagents.Middleware.ProcessContext do
   # per-tool Task — go through state.runtime only.
   defp ensure_snapshot_in_runtime(state, config) do
     case state.runtime do
-      %{ProcessContext => _} ->
+      %{ProcessContext => _snapshot} ->
         state
 
       runtime ->
@@ -235,7 +239,7 @@ defmodule Sagents.Middleware.ProcessContext do
   defp apply_snapshot(state) do
     case state.runtime do
       %{ProcessContext => snapshot} -> do_apply(snapshot)
-      _ -> :ok
+      _other -> :ok
     end
   end
 
@@ -269,5 +273,5 @@ defmodule Sagents.Middleware.ProcessContext do
        when is_function(capture, 0) and is_function(apply, 1),
        do: true
 
-  defp valid_propagator?(_), do: false
+  defp valid_propagator?(_other), do: false
 end

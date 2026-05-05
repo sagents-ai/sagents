@@ -374,8 +374,7 @@ defmodule Sagents.Middleware.FileSystem do
   defp tool_list_section(enabled) do
     @default_enabled_tools
     |> Enum.filter(&(&1 in enabled))
-    |> Enum.map(&("- " <> Map.fetch!(@tool_descriptions, &1)))
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", &("- " <> Map.fetch!(@tool_descriptions, &1)))
   end
 
   defp maybe_pattern_filtering_section(enabled) do
@@ -851,20 +850,22 @@ defmodule Sagents.Middleware.FileSystem do
     limit = get_arg(args, "limit") || 2000
 
     # Validate path
-    with {:ok, normalized_path} <- validate_path(file_path) do
-      # Read file using FileSystemServer (handles lazy loading automatically)
-      case FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
-        {:ok, entry} ->
-          format_file_content(entry.content || "", normalized_path, start_line, limit)
+    case validate_path(file_path) do
+      {:ok, normalized_path} ->
+        # Read file using FileSystemServer (handles lazy loading automatically)
+        case FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
+          {:ok, entry} ->
+            format_file_content(entry.content || "", normalized_path, start_line, limit)
 
-        {:error, :enoent} ->
-          {:error, "File not found: #{normalized_path}"}
+          {:error, :enoent} ->
+            {:error, "File not found: #{normalized_path}"}
 
-        {:error, reason} ->
-          {:error, "Failed to read file: #{inspect(reason)}"}
-      end
-    else
-      {:error, reason} -> {:error, reason}
+          {:error, reason} ->
+            {:error, "Failed to read file: #{inspect(reason)}"}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   rescue
     e ->
@@ -889,38 +890,28 @@ defmodule Sagents.Middleware.FileSystem do
     file_path = get_arg(args, "file_path")
     content = get_arg(args, "content")
 
-    cond do
-      is_nil(file_path) or is_nil(content) ->
-        {:error, "Both file_path and content are required"}
-
-      true ->
-        # Validate path
-        with {:ok, normalized_path} <- validate_path(file_path) do
-          # Check if file already exists (overwrite protection)
-          if FileSystemServer.file_exists?(config.filesystem_scope, normalized_path) do
-            {:error,
-             "File already exists: #{normalized_path}. Use replace_file_text or replace_file_lines to modify existing files."}
-          else
-            # Write file using FileSystemServer
-            case FileSystemServer.write_file(
-                   config.filesystem_scope,
-                   normalized_path,
-                   content
-                 ) do
-              {:ok, entry} ->
-                {:ok, Jason.encode!(FileEntry.to_llm_map(entry))}
-
-              {:error, reason} ->
-                {:error, "Failed to create file: #{inspect(reason)}"}
-            end
-          end
-        else
-          {:error, reason} -> {:error, reason}
-        end
+    if is_nil(file_path) or is_nil(content) do
+      {:error, "Both file_path and content are required"}
+    else
+      with {:ok, normalized_path} <- validate_path(file_path) do
+        create_new_file(config.filesystem_scope, normalized_path, content)
+      end
     end
   rescue
     e ->
       {:error, "Filesystem not available: #{Exception.message(e)}"}
+  end
+
+  defp create_new_file(scope, path, content) do
+    if FileSystemServer.file_exists?(scope, path) do
+      {:error,
+       "File already exists: #{path}. Use replace_file_text or replace_file_lines to modify existing files."}
+    else
+      case FileSystemServer.write_file(scope, path, content) do
+        {:ok, entry} -> {:ok, Jason.encode!(FileEntry.to_llm_map(entry))}
+        {:error, reason} -> {:error, "Failed to create file: #{inspect(reason)}"}
+      end
+    end
   end
 
   defp execute_replace_text_tool(args, _context, config) do
@@ -929,13 +920,12 @@ defmodule Sagents.Middleware.FileSystem do
     new_string = get_arg(args, "new_string")
     replace_all = get_boolean_arg(args, "replace_all", false)
 
-    cond do
-      is_nil(file_path) or is_nil(old_string) or is_nil(new_string) ->
-        {:error, "file_path, old_string, and new_string are required"}
-
-      true ->
-        # Validate path
-        with {:ok, normalized_path} <- validate_path(file_path) do
+    if is_nil(file_path) or is_nil(old_string) or is_nil(new_string) do
+      {:error, "file_path, old_string, and new_string are required"}
+    else
+      # Validate path
+      case validate_path(file_path) do
+        {:ok, normalized_path} ->
           # Read current content using FileSystemServer
           case FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
             {:ok, entry} ->
@@ -954,9 +944,10 @@ defmodule Sagents.Middleware.FileSystem do
             {:error, reason} ->
               {:error, "Failed to read file: #{inspect(reason)}"}
           end
-        else
-          {:error, reason} -> {:error, reason}
-        end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   rescue
     e ->
@@ -966,13 +957,12 @@ defmodule Sagents.Middleware.FileSystem do
   defp execute_delete_file_tool(args, _context, config) do
     file_path = get_arg(args, "file_path")
 
-    cond do
-      is_nil(file_path) ->
-        {:error, "file_path is required"}
-
-      true ->
-        # Validate path
-        with {:ok, normalized_path} <- validate_path(file_path) do
+    if is_nil(file_path) do
+      {:error, "file_path is required"}
+    else
+      # Validate path
+      case validate_path(file_path) do
+        {:ok, normalized_path} ->
           # Delete file using FileSystemServer
           case FileSystemServer.delete_file(config.filesystem_scope, normalized_path) do
             :ok ->
@@ -981,9 +971,10 @@ defmodule Sagents.Middleware.FileSystem do
             {:error, reason} ->
               {:error, "Failed to delete file: #{inspect(reason)}"}
           end
-        else
-          {:error, reason} -> {:error, reason}
-        end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   rescue
     e ->
@@ -994,32 +985,30 @@ defmodule Sagents.Middleware.FileSystem do
     old_path = get_arg(args, "old_path")
     new_path = get_arg(args, "new_path")
 
-    cond do
-      is_nil(old_path) or is_nil(new_path) ->
-        {:error, "old_path and new_path are required"}
+    if is_nil(old_path) or is_nil(new_path) do
+      {:error, "old_path and new_path are required"}
+    else
+      with {:ok, normalized_old} <- validate_path(old_path),
+           {:ok, normalized_new} <- validate_path(new_path) do
+        case FileSystemServer.move_file(
+               config.filesystem_scope,
+               normalized_old,
+               normalized_new
+             ) do
+          {:ok, moved_entries} ->
+            {:ok,
+             "Moved successfully: #{normalized_old} -> #{normalized_new} (#{length(moved_entries)} entries)"}
 
-      true ->
-        with {:ok, normalized_old} <- validate_path(old_path),
-             {:ok, normalized_new} <- validate_path(new_path) do
-          case FileSystemServer.move_file(
-                 config.filesystem_scope,
-                 normalized_old,
-                 normalized_new
-               ) do
-            {:ok, moved_entries} ->
-              {:ok,
-               "Moved successfully: #{normalized_old} -> #{normalized_new} (#{length(moved_entries)} entries)"}
+          {:error, :enoent} ->
+            {:error, "File not found: #{normalized_old}"}
 
-            {:error, :enoent} ->
-              {:error, "File not found: #{normalized_old}"}
+          {:error, :already_exists} ->
+            {:error, "Target already exists: #{normalized_new}"}
 
-            {:error, :already_exists} ->
-              {:error, "Target already exists: #{normalized_new}"}
-
-            {:error, reason} ->
-              {:error, "Failed to move file: #{inspect(reason)}"}
-          end
+          {:error, reason} ->
+            {:error, "Failed to move file: #{inspect(reason)}"}
         end
+      end
     end
   rescue
     e ->
@@ -1124,7 +1113,7 @@ defmodule Sagents.Middleware.FileSystem do
   end
 
   defp format_search_results(results, max_results, truncated) do
-    if Enum.empty?(results) or Enum.all?(results, fn {_, matches} -> Enum.empty?(matches) end) do
+    if Enum.empty?(results) or Enum.all?(results, fn {_path, matches} -> Enum.empty?(matches) end) do
       {:ok, "No matches found"}
     else
       formatted =
@@ -1151,22 +1140,20 @@ defmodule Sagents.Middleware.FileSystem do
     before =
       context_before
       |> Enum.with_index()
-      |> Enum.map(fn {ctx_line, idx} ->
+      |> Enum.map_join("\n", fn {ctx_line, idx} ->
         ctx_line_num = line_num - length(context_before) + idx
         formatted_num = String.pad_leading(Integer.to_string(ctx_line_num), 6)
         "#{formatted_num} |\t#{ctx_line}"
       end)
-      |> Enum.join("\n")
 
     after_ctx =
       context_after
       |> Enum.with_index()
-      |> Enum.map(fn {ctx_line, idx} ->
+      |> Enum.map_join("\n", fn {ctx_line, idx} ->
         ctx_line_num = line_num + idx + 1
         formatted_num = String.pad_leading(Integer.to_string(ctx_line_num), 6)
         "#{formatted_num} |\t#{ctx_line}"
       end)
-      |> Enum.join("\n")
 
     formatted_line_num = String.pad_leading(Integer.to_string(line_num), 6)
     match_line = "#{formatted_line_num}\t#{line}"
@@ -1265,7 +1252,9 @@ defmodule Sagents.Middleware.FileSystem do
     show_end = min(total_after, edit_end + @replace_edit_context_lines)
     limit = max(show_end - show_start + 1, 1)
 
-    {formatted, _, _, _} = TextLines.render(updated_content, start_line: show_start, limit: limit)
+    {formatted, _start, _end, _truncated} =
+      TextLines.render(updated_content, start_line: show_start, limit: limit)
+
     formatted
   end
 
@@ -1285,7 +1274,7 @@ defmodule Sagents.Middleware.FileSystem do
       val when is_boolean(val) -> val
       "true" -> true
       "false" -> false
-      _ -> default
+      _other -> default
     end
   end
 
@@ -1294,7 +1283,7 @@ defmodule Sagents.Middleware.FileSystem do
       nil -> default
       val when is_integer(val) -> val
       val when is_binary(val) -> String.to_integer(val)
-      _ -> default
+      _other -> default
     end
   end
 

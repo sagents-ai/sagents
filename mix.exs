@@ -72,7 +72,8 @@ defmodule Sagents.MixProject do
       {:usage_rules, "~> 0.1", only: :dev, runtime: false},
 
       # Static analysis
-      {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
 
@@ -82,6 +83,7 @@ defmodule Sagents.MixProject do
         "compile --warnings-as-errors",
         "deps.unlock --unused",
         "format",
+        "credo",
         "test --include cluster --include slow"
       ]
     ]

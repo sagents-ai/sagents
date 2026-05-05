@@ -192,7 +192,7 @@ defmodule Sagents.SubAgentTest do
       }
 
       assert {:error, changeset} = SubAgentConfig.new(attrs)
-      assert %{name: [_]} = errors_on(changeset)
+      assert %{name: [_msg]} = errors_on(changeset)
     end
 
     test "validates description length" do
@@ -204,7 +204,7 @@ defmodule Sagents.SubAgentTest do
       }
 
       assert {:error, changeset} = SubAgentConfig.new(attrs)
-      assert %{description: [_]} = errors_on(changeset)
+      assert %{description: [_msg]} = errors_on(changeset)
     end
 
     test "validates system_prompt length" do
@@ -216,7 +216,7 @@ defmodule Sagents.SubAgentTest do
       }
 
       assert {:error, changeset} = SubAgentConfig.new(attrs)
-      assert %{system_prompt: [_]} = errors_on(changeset)
+      assert %{system_prompt: [_msg]} = errors_on(changeset)
     end
 
     test "accepts multiple tools" do
@@ -324,7 +324,7 @@ defmodule Sagents.SubAgentTest do
       }
 
       assert {:error, changeset} = SubAgentCompiled.new(attrs)
-      assert %{name: [_]} = errors_on(changeset)
+      assert %{name: [_msg]} = errors_on(changeset)
     end
 
     test "validates description length" do
@@ -335,7 +335,7 @@ defmodule Sagents.SubAgentTest do
       }
 
       assert {:error, changeset} = SubAgentCompiled.new(attrs)
-      assert %{description: [_]} = errors_on(changeset)
+      assert %{description: [_msg]} = errors_on(changeset)
     end
   end
 
@@ -433,7 +433,7 @@ defmodule Sagents.SubAgentTest do
       # Should have an error on initial_messages field (Ecto returns "is invalid" for type mismatch)
       assert errors[:initial_messages]
       assert is_list(errors[:initial_messages])
-      assert length(errors[:initial_messages]) > 0
+      assert errors[:initial_messages] != []
     end
 
     test "accepts empty list for initial_messages" do
@@ -602,7 +602,7 @@ defmodule Sagents.SubAgentTest do
       # Middleware should be appended
       assert Enum.any?(agent.middleware, fn
                %MiddlewareEntry{module: CustomMiddleware} -> true
-               _ -> false
+               _other -> false
              end)
     end
 
@@ -747,8 +747,8 @@ defmodule Sagents.SubAgentTest do
       assert length(result) == 2
 
       refute Enum.any?(result, fn
-               {Sagents.Middleware.SubAgent, _} -> true
-               _ -> false
+               {Sagents.Middleware.SubAgent, _config} -> true
+               _other -> false
              end)
     end
 
@@ -790,7 +790,7 @@ defmodule Sagents.SubAgentTest do
       assert length(result) == 3
 
       assert Enum.all?(result, fn
-               {mod, _} -> mod != Sagents.Middleware.SubAgent
+               {mod, _config} -> mod != Sagents.Middleware.SubAgent
              end)
     end
 
@@ -825,18 +825,18 @@ defmodule Sagents.SubAgentTest do
       # SubAgent middleware should be filtered out
       refute Enum.any?(result, fn
                %MiddlewareEntry{module: Sagents.Middleware.SubAgent} -> true
-               _ -> false
+               _other -> false
              end)
 
       # Other middleware should remain
       assert Enum.any?(result, fn
                %MiddlewareEntry{module: Sagents.Middleware.TodoList} -> true
-               _ -> false
+               _other -> false
              end)
 
       assert Enum.any?(result, fn
                %MiddlewareEntry{module: Sagents.Middleware.FileSystem} -> true
-               _ -> false
+               _other -> false
              end)
 
       # Should have 2 items (TodoList and FileSystem) - SubAgent filtered out
@@ -1186,7 +1186,7 @@ defmodule Sagents.SubAgentTest do
         Enum.flat_map(subagent.chain.messages, fn msg ->
           Enum.map(msg.content, fn
             %LangChain.Message.ContentPart{type: :text, content: text} -> text
-            _ -> ""
+            _other -> ""
           end)
         end)
 

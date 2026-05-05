@@ -169,7 +169,7 @@ defmodule Sagents.Persistence.Hooks do
       config when is_list(config) ->
         Keyword.get(config, :hooks)
 
-      _ ->
+      _other ->
         nil
     end
   end

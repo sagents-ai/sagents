@@ -231,7 +231,7 @@ defmodule Sagents.AgentsDynamicSupervisor do
       # Get agent_id from the AgentSupervisor's registered name via Registry
       case Sagents.ProcessRegistry.keys(pid) do
         [{:agent_supervisor, agent_id}] -> agent_id
-        _ -> nil
+        _other -> nil
       end
     end)
     |> Enum.reject(&is_nil/1)

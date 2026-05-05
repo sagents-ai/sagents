@@ -187,34 +187,29 @@ defmodule Sagents.FileSystem.Persistence.Disk do
     case File.ls(dir) do
       {:ok, entries} ->
         Enum.flat_map(entries, fn entry ->
-          full_path = Path.join(dir, entry)
-
-          cond do
-            File.dir?(full_path) ->
-              # Recurse into subdirectory
-              scan_directory(full_path, storage_path, base_directory)
-
-            File.regular?(full_path) ->
-              # Get path relative to storage root
-              relative_path = Path.relative_to(full_path, storage_path)
-
-              # Prepend base_directory to create virtual path
-              virtual_path =
-                if base_directory != "" do
-                  "/#{base_directory}/#{relative_path}"
-                else
-                  "/#{relative_path}"
-                end
-
-              [virtual_path]
-
-            true ->
-              []
-          end
+          entry_to_paths(Path.join(dir, entry), storage_path, base_directory)
         end)
 
-      {:error, _} ->
+      {:error, _reason} ->
         []
+    end
+  end
+
+  defp entry_to_paths(full_path, storage_path, base_directory) do
+    cond do
+      File.dir?(full_path) -> scan_directory(full_path, storage_path, base_directory)
+      File.regular?(full_path) -> [virtual_path_for(full_path, storage_path, base_directory)]
+      true -> []
+    end
+  end
+
+  defp virtual_path_for(full_path, storage_path, base_directory) do
+    relative_path = Path.relative_to(full_path, storage_path)
+
+    if base_directory != "" do
+      "/#{base_directory}/#{relative_path}"
+    else
+      "/#{relative_path}"
     end
   end
 end

@@ -429,7 +429,7 @@ defmodule Sagents.Middleware.ProcessContextTest do
 
       # Synchronize so on_server_start has fully run and the snapshot is in
       # the AgentServer's state.runtime.
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       exported = AgentServer.export_state(agent_id)
 
@@ -485,7 +485,7 @@ defmodule Sagents.Middleware.ProcessContextTest do
       {:ok, %{snapshot: snapshot}} =
         ProcessContext.init(
           keys: [:test_marker],
-          propagators: [{fn -> :v end, fn _ -> :ok end}]
+          propagators: [{fn -> :v end, fn _value -> :ok end}]
         )
 
       parent_runtime = %{ProcessContext => snapshot}

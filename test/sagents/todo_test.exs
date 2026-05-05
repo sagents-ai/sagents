@@ -47,7 +47,7 @@ defmodule Sagents.TodoTest do
       assert {:error, changeset} = Todo.new(%{content: long_content})
       errors = errors_on(changeset).content
       assert is_list(errors)
-      assert length(errors) > 0
+      assert errors != []
       assert hd(errors) =~ "should be at most"
     end
 
@@ -60,7 +60,7 @@ defmodule Sagents.TodoTest do
       assert {:error, changeset} = Todo.new(%{content: ""})
       errors = errors_on(changeset).content
       assert is_list(errors)
-      assert length(errors) > 0
+      assert errors != []
       # Either "can't be blank" or "should be at least 1 character(s)"
       assert hd(errors) =~ "blank" or hd(errors) =~ "at least"
     end

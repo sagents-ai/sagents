@@ -236,7 +236,7 @@ defmodule Sagents.Subscriber do
         %{state: :pending, channel: channel} ->
           subscribe_to_agent(acc, agent_id, channel)
 
-        _ ->
+        _other ->
           acc
       end
     end)

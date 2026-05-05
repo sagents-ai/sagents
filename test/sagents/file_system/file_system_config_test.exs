@@ -23,7 +23,7 @@ defmodule Sagents.FileSystem.FileSystemConfigTest do
       attrs = %{
         base_directory: "account_files",
         persistence_module: Disk,
-        debounce_ms: 10000,
+        debounce_ms: 10_000,
         readonly: true,
         storage_opts: [path: "/data/accounts"]
       }
@@ -31,7 +31,7 @@ defmodule Sagents.FileSystem.FileSystemConfigTest do
       assert {:ok, config} = FileSystemConfig.new(attrs)
       assert config.base_directory == "account_files"
       assert config.persistence_module == Disk
-      assert config.debounce_ms == 10000
+      assert config.debounce_ms == 10_000
       assert config.readonly == true
       assert config.storage_opts == [path: "/data/accounts"]
     end
@@ -69,7 +69,7 @@ defmodule Sagents.FileSystem.FileSystemConfigTest do
       }
 
       assert {:error, changeset} = FileSystemConfig.new(attrs)
-      assert %{base_directory: [_]} = errors_on(changeset)
+      assert %{base_directory: _message_template} = errors_on(changeset)
     end
 
     test "rejects base_directory ending with /" do
@@ -79,7 +79,7 @@ defmodule Sagents.FileSystem.FileSystemConfigTest do
       }
 
       assert {:error, changeset} = FileSystemConfig.new(attrs)
-      assert %{base_directory: [_]} = errors_on(changeset)
+      assert %{base_directory: _message_template} = errors_on(changeset)
     end
 
     test "rejects base_directory containing dots" do
@@ -89,7 +89,7 @@ defmodule Sagents.FileSystem.FileSystemConfigTest do
       }
 
       assert {:error, changeset} = FileSystemConfig.new(attrs)
-      assert %{base_directory: [_]} = errors_on(changeset)
+      assert %{base_directory: _message_template} = errors_on(changeset)
     end
 
     test "rejects negative debounce_ms" do
@@ -100,7 +100,7 @@ defmodule Sagents.FileSystem.FileSystemConfigTest do
       }
 
       assert {:error, changeset} = FileSystemConfig.new(attrs)
-      assert %{debounce_ms: [_]} = errors_on(changeset)
+      assert %{debounce_ms: _message_template} = errors_on(changeset)
     end
 
     test "accepts any module atom" do

@@ -192,7 +192,7 @@ defmodule Sagents.AgentServerMessageCallbackFocusedTest do
 
       # Message should still be in state even though persistence failed
       state = AgentServer.get_state(agent_id)
-      assert length(state.messages) >= 1
+      assert state.messages != []
 
       AgentServer.stop(agent_id)
     end

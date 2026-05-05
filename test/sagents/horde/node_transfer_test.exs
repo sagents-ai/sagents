@@ -52,7 +52,7 @@ defmodule Sagents.Horde.NodeTransferTest do
     # Uses ClusterTestHelper to unlink from the RPC caller process, otherwise
     # the supervisor dies when the temporary RPC process exits.
     for node <- nodes do
-      {:ok, _} = :rpc.call(node, Sagents.ClusterTestHelper, :start_supervisor, [])
+      {:ok, _pid} = :rpc.call(node, Sagents.ClusterTestHelper, :start_supervisor, [])
     end
 
     # Set explicit Horde members on each node, excluding the test runner (manager) node.
@@ -125,7 +125,7 @@ defmodule Sagents.Horde.NodeTransferTest do
       {:ok, pid} when is_pid(pid) ->
         {:ok, pid}
 
-      _ ->
+      _other ->
         if System.monotonic_time(:millisecond) < deadline do
           Process.sleep(delay)
           do_wait_for_agent(node, agent_id, deadline, min(delay * 2, 500))
@@ -222,8 +222,8 @@ defmodule Sagents.Horde.NodeTransferTest do
         end
 
       # Group agents by which node they're on
-      agents_on_node1 = Enum.filter(agents, fn {_, _, n} -> n == node1 end)
-      agents_on_node2 = Enum.filter(agents, fn {_, _, n} -> n == node2 end)
+      agents_on_node1 = Enum.filter(agents, fn {_id, _pid, n} -> n == node1 end)
+      agents_on_node2 = Enum.filter(agents, fn {_id, _pid, n} -> n == node2 end)
 
       # Wait for CRDT to sync process entries to both nodes
       Process.sleep(2_000)
@@ -232,7 +232,7 @@ defmodule Sagents.Horde.NodeTransferTest do
       LocalCluster.stop(cluster, node1)
 
       # All agents that were on node1 should move to node2
-      for {agent_id, _old_pid, _} <- agents_on_node1 do
+      for {agent_id, _old_pid, _node} <- agents_on_node1 do
         assert {:ok, new_pid} = wait_for_agent(node2, agent_id, @redistribution_timeout),
                "Agent #{agent_id} was not redistributed to node2"
 
@@ -240,7 +240,7 @@ defmodule Sagents.Horde.NodeTransferTest do
       end
 
       # Agents that were already on node2 should still be there
-      for {agent_id, old_pid, _} <- agents_on_node2 do
+      for {agent_id, old_pid, _node} <- agents_on_node2 do
         assert {:ok, ^old_pid} =
                  :rpc.call(node2, Sagents.AgentSupervisor, :get_pid, [agent_id]),
                "Agent #{agent_id} should still be on node2 with same PID"

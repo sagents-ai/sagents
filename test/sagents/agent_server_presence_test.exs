@@ -25,7 +25,7 @@ defmodule Sagents.AgentServerPresenceTest do
         pid when is_pid(pid) -> Elixir.Agent.stop(__MODULE__, :normal, :infinity)
       end
     catch
-      :exit, _ -> :ok
+      :exit, _reason -> :ok
     end
 
     def set_viewers(topic, viewers) do
@@ -51,7 +51,7 @@ defmodule Sagents.AgentServerPresenceTest do
   end
 
   setup do
-    {:ok, _} = TestPresence.start_link()
+    {:ok, _pid} = TestPresence.start_link()
     on_exit(fn -> TestPresence.stop() end)
     :ok
   end
@@ -264,7 +264,7 @@ defmodule Sagents.AgentServerPresenceTest do
         pid when is_pid(pid) -> Elixir.Agent.stop(__MODULE__, :normal, :infinity)
       end
     catch
-      :exit, _ -> :ok
+      :exit, _reason -> :ok
     end
 
     def get_tracked do
@@ -304,7 +304,7 @@ defmodule Sagents.AgentServerPresenceTest do
 
   describe "agent presence tracking" do
     setup do
-      {:ok, _} = AgentPresence.start_link()
+      {:ok, _pid} = AgentPresence.start_link()
       on_exit(fn -> AgentPresence.stop() end)
       :ok
     end
@@ -326,7 +326,7 @@ defmodule Sagents.AgentServerPresenceTest do
       assert is_pid(agent_pid)
 
       # Synchronize: ensure handle_continue has completed
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       # Verify presence was tracked
       tracked = AgentPresence.get_tracked()
@@ -356,7 +356,7 @@ defmodule Sagents.AgentServerPresenceTest do
         )
 
       # Synchronize: ensure handle_continue has completed
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       # No presence should be tracked
       tracked = AgentPresence.get_tracked()
@@ -402,7 +402,7 @@ defmodule Sagents.AgentServerPresenceTest do
         )
 
       # Synchronize: ensure handle_continue has completed
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       tracked = AgentPresence.get_tracked()
       assert length(tracked) == 1
@@ -428,7 +428,7 @@ defmodule Sagents.AgentServerPresenceTest do
         )
 
       # Synchronize: ensure handle_continue has completed
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       tracked = AgentPresence.get_tracked()
       assert length(tracked) == 1
@@ -455,7 +455,7 @@ defmodule Sagents.AgentServerPresenceTest do
         )
 
       # Synchronize: ensure handle_continue has completed
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       assert [tracked] = AgentPresence.get_tracked()
 
@@ -474,8 +474,8 @@ defmodule Sagents.AgentServerPresenceTest do
     presences = Sagents.TestPresence.list("agent_server:presence")
 
     case Map.get(presences, agent_id) do
-      %{metas: [meta | _]} -> meta
-      _ -> nil
+      %{metas: [meta | _rest]} -> meta
+      _other -> nil
     end
   end
 
@@ -494,7 +494,7 @@ defmodule Sagents.AgentServerPresenceTest do
         )
 
       # Synchronize: ensure handle_continue has completed (presence is tracked)
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       # Get initial last_activity_at
       initial_metadata = get_presence_metadata(agent_id)
@@ -505,7 +505,7 @@ defmodule Sagents.AgentServerPresenceTest do
       Process.sleep(50)
       AgentServer.touch(agent_id)
       # Synchronize: ensure touch handler has completed
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       # Verify last_activity_at was updated
       updated_metadata = get_presence_metadata(agent_id)
@@ -530,7 +530,7 @@ defmodule Sagents.AgentServerPresenceTest do
         )
 
       # Synchronize: ensure handle_continue has completed (presence is tracked)
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       # Get initial last_activity_at
       initial_metadata = get_presence_metadata(agent_id)
@@ -541,7 +541,7 @@ defmodule Sagents.AgentServerPresenceTest do
       Process.sleep(50)
       AgentServer.add_message(agent_id, Message.new_user!("test"))
       # Synchronize: ensure message handling and status update completed
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       # Verify last_activity_at was updated
       updated_metadata = get_presence_metadata(agent_id)

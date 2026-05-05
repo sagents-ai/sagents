@@ -84,37 +84,35 @@ defmodule Sagents.AgentCancelSubAgentTest do
               |> List.wrap()
               |> Enum.map_join("", fn
                 %{content: c} when is_binary(c) -> c
-                _ -> ""
+                _other -> ""
               end)
 
             text =~ "research things slowly"
 
-          _ ->
+          _other ->
             false
         end)
 
-      cond do
-        is_subagent_call ->
-          send(test_pid, :subagent_llm_started)
-          Process.sleep(5_000)
-          {:ok, [Message.new_assistant!(%{content: "done"})]}
+      if is_subagent_call do
+        send(test_pid, :subagent_llm_started)
+        Process.sleep(5_000)
+        {:ok, [Message.new_assistant!(%{content: "done"})]}
+      else
+        msg =
+          Message.new_assistant!(%{
+            tool_calls: [
+              ToolCall.new!(%{
+                call_id: "parent_tc_1",
+                name: "task",
+                arguments: %{
+                  "instructions" => "do slow research",
+                  "task_name" => "slow-researcher"
+                }
+              })
+            ]
+          })
 
-        true ->
-          msg =
-            Message.new_assistant!(%{
-              tool_calls: [
-                ToolCall.new!(%{
-                  call_id: "parent_tc_1",
-                  name: "task",
-                  arguments: %{
-                    "instructions" => "do slow research",
-                    "task_name" => "slow-researcher"
-                  }
-                })
-              ]
-            })
-
-          {:ok, [msg]}
+        {:ok, [msg]}
       end
     end)
 
@@ -140,7 +138,7 @@ defmodule Sagents.AgentCancelSubAgentTest do
     sup_pid = SubAgentsDynamicSupervisor.whereis(agent_id)
     assert is_pid(sup_pid)
 
-    [{_, sub_pid, :worker, _}] = DynamicSupervisor.which_children(sup_pid)
+    [{_id, sub_pid, :worker, _modules}] = DynamicSupervisor.which_children(sup_pid)
     assert is_pid(sub_pid)
 
     ref = Process.monitor(sub_pid)

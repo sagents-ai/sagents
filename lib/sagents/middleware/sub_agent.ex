@@ -305,7 +305,7 @@ defmodule Sagents.Middleware.SubAgent do
   defp include_task_list?(config) when is_map(config),
     do: Map.get(config, :include_task_list, false) == true
 
-  defp include_task_list?(_), do: false
+  defp include_task_list?(_other), do: false
 
   defp task_tool_description(config) do
     if include_task_list?(config) do
@@ -342,15 +342,14 @@ defmodule Sagents.Middleware.SubAgent do
   defp build_available_tasks_section(descriptions, use_instructions_map) do
     bullets =
       descriptions
-      |> Enum.sort_by(fn {name, _} -> name end)
-      |> Enum.map(fn {name, desc} ->
+      |> Enum.sort_by(fn {name, _desc} -> name end)
+      |> Enum.map_join("\n", fn {name, desc} ->
         if Map.has_key?(use_instructions_map, name) do
           "- #{name}: #{desc} Call `get_task_instructions(\"#{name}\")` for the full usage guide before invoking."
         else
           "- #{name}: #{desc}"
         end
       end)
-      |> Enum.join("\n")
 
     "## Available Tasks\n\n" <> bullets <> "\n"
   end
@@ -403,7 +402,7 @@ defmodule Sagents.Middleware.SubAgent do
     |> Kernel.>(0)
   end
 
-  defp has_use_instructions?(_), do: false
+  defp has_use_instructions?(_other), do: false
 
   # When the `task` tool call is identified, the chain augments it with the
   # tool's static display_text ("Running task"). If the parent picked a
@@ -434,7 +433,7 @@ defmodule Sagents.Middleware.SubAgent do
             :ok
         end
 
-      _ ->
+      _other ->
         :ok
     end
   end
@@ -538,7 +537,7 @@ defmodule Sagents.Middleware.SubAgent do
       %{sub_agent_id: sub_agent_id} ->
         {:resume, sub_agent_id}
 
-      _ ->
+      _other ->
         :new
     end
   end
@@ -857,7 +856,7 @@ defmodule Sagents.Middleware.SubAgent do
     end
   end
 
-  defp validate_system_prompt(_), do: {:error, "system_prompt must be a string"}
+  defp validate_system_prompt(_other), do: {:error, "system_prompt must be a string"}
 
   # Validate block_middleware entries and log warnings for potential issues
   # Note: We only validate that entries are atoms and loaded modules.

@@ -139,7 +139,7 @@ defmodule Sagents.Publisher do
     try do
       GenServer.call(server, {:__publisher__, channel, :subscribe, pid})
     catch
-      :exit, _ -> {:error, :process_not_found}
+      :exit, _reason -> {:error, :process_not_found}
     end
   end
 
@@ -156,7 +156,7 @@ defmodule Sagents.Publisher do
     try do
       GenServer.call(server, {:__publisher__, channel, :unsubscribe, pid})
     catch
-      :exit, _ -> :ok
+      :exit, _reason -> :ok
     end
   end
 

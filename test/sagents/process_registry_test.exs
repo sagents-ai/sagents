@@ -20,7 +20,7 @@ defmodule Sagents.ProcessRegistryTest do
       name = ProcessRegistry.via_tuple(key)
       {:ok, pid} = Agent.start_link(fn -> :ok end, name: name)
 
-      assert [{^pid, _}] = ProcessRegistry.lookup(key)
+      assert [{^pid, _value}] = ProcessRegistry.lookup(key)
 
       Agent.stop(pid)
     end

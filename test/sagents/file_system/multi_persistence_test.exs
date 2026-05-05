@@ -22,7 +22,7 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
       rescue
         ArgumentError -> :ok
       catch
-        :exit, _ -> :ok
+        :exit, _reason -> :ok
       end
     end)
 
@@ -121,7 +121,7 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
         FileSystemConfig.new(%{
           base_directory: "user_files",
           persistence_module: Persistence.Disk,
-          debounce_ms: 10000,
+          debounce_ms: 10_000,
           storage_opts: [path: tmp_dir]
         })
 
@@ -269,7 +269,7 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
 
           entries =
             :ets.tab2list(storage_table)
-            |> Enum.map(fn {path, _} ->
+            |> Enum.map(fn {path, _value} ->
               {:ok, entry} = Sagents.FileSystem.FileEntry.new_indexed_file(path)
               entry
             end)

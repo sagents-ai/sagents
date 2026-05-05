@@ -144,52 +144,45 @@ defmodule Sagents.Middleware.DebugLog do
     current_count = length(state.messages)
 
     log_event(config, state.agent_id, "AFTER_MODEL", fn ->
-      new_count = current_count - prev_count
-      new_messages = Enum.slice(state.messages, prev_count..current_count)
-
-      lines = [
-        "New messages since BEFORE_MODEL: #{new_count}"
-      ]
-
-      lines =
-        if new_count > 0 do
-          lines ++
-            Enum.map(new_messages, fn msg ->
-              role = msg.role
-              tool_calls = if is_list(msg.tool_calls), do: length(msg.tool_calls), else: 0
-
-              summary =
-                cond do
-                  tool_calls > 0 ->
-                    "  [#{role}] (with #{tool_calls} tool call#{if tool_calls > 1, do: "s", else: ""})"
-
-                  is_binary(msg.content) and byte_size(msg.content) > 100 ->
-                    "  [#{role}] #{inspect(String.slice(msg.content, 0, 100))}..."
-
-                  true ->
-                    "  [#{role}] #{inspect(msg.content)}"
-                end
-
-              summary
-            end)
-        else
-          lines
-        end
-
-      interrupt_line =
-        if state.interrupt_data do
-          "Interrupt: #{safe_inspect(state.interrupt_data, config)}"
-        else
-          "Interrupt: none"
-        end
-
-      lines = lines ++ ["", interrupt_line]
-      Enum.join(lines, "\n")
+      build_after_model_log(state, config, prev_count, current_count)
     end)
 
     updated_state = State.put_metadata(state, "debug_log.msg_count", current_count)
     {:ok, updated_state}
   end
+
+  defp build_after_model_log(state, config, prev_count, current_count) do
+    new_count = current_count - prev_count
+    new_messages = Enum.slice(state.messages, prev_count..current_count)
+
+    header = ["New messages since BEFORE_MODEL: #{new_count}"]
+    message_lines = if new_count > 0, do: Enum.map(new_messages, &summarize_message/1), else: []
+    interrupt_line = format_interrupt_line(state.interrupt_data, config)
+
+    (header ++ message_lines ++ ["", interrupt_line])
+    |> Enum.join("\n")
+  end
+
+  defp summarize_message(msg) do
+    role = msg.role
+    tool_calls = if is_list(msg.tool_calls), do: length(msg.tool_calls), else: 0
+
+    cond do
+      tool_calls > 0 ->
+        "  [#{role}] (with #{tool_calls} tool call#{if tool_calls > 1, do: "s", else: ""})"
+
+      is_binary(msg.content) and byte_size(msg.content) > 100 ->
+        "  [#{role}] #{inspect(String.slice(msg.content, 0, 100))}..."
+
+      true ->
+        "  [#{role}] #{inspect(msg.content)}"
+    end
+  end
+
+  defp format_interrupt_line(nil, _config), do: "Interrupt: none"
+
+  defp format_interrupt_line(interrupt_data, config),
+    do: "Interrupt: #{safe_inspect(interrupt_data, config)}"
 
   @impl true
   def handle_resume(_agent, state, _resume_data, %{enabled: false}, _opts), do: {:cont, state}
@@ -405,7 +398,7 @@ defmodule Sagents.Middleware.DebugLog do
 
       inspect(term, inspect_opts)
     rescue
-      _ -> "<inspect failed>"
+      _error -> "<inspect failed>"
     end
   end
 
@@ -413,7 +406,7 @@ defmodule Sagents.Middleware.DebugLog do
     try do
       chain.custom_context.state.agent_id
     rescue
-      _ -> "unknown"
+      _error -> "unknown"
     end
   end
 end

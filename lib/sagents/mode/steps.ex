@@ -37,7 +37,7 @@ defmodule Sagents.Mode.Steps do
         agent_id =
           case chain.custom_context do
             %{state: %{agent_id: agent_id}} -> agent_id
-            _ -> nil
+            _other -> nil
           end
 
         state = %State{
@@ -131,7 +131,7 @@ defmodule Sagents.Mode.Steps do
     current_state =
       case chain.custom_context do
         %{state: %State{} = state} -> state
-        _ -> State.new!()
+        _other -> State.new!()
       end
 
     state_deltas = extract_state_deltas_from_chain(chain)
@@ -166,7 +166,7 @@ defmodule Sagents.Mode.Steps do
           |> Enum.filter(fn result -> is_struct(result.processed_content, State) end)
           |> Enum.map(& &1.processed_content)
 
-        _ ->
+        _other ->
           []
       end
     end)

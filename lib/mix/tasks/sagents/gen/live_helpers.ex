@@ -72,7 +72,7 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
   @impl Mix.Task
   def run(args) do
     # Parse arguments
-    {opts, parsed, _} = OptionParser.parse(args, switches: @switches, aliases: @aliases)
+    {opts, parsed, _invalid} = OptionParser.parse(args, switches: @switches, aliases: @aliases)
 
     # Validate helper module argument
     helper_module = parse_helper_module!(parsed)
@@ -96,7 +96,7 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
     print_instructions(config)
   end
 
-  defp parse_helper_module!([helper_module | _]) do
+  defp parse_helper_module!([helper_module | _rest]) do
     # Validate module name format
     unless helper_module =~ ~r/^[A-Z][A-Za-z0-9.]*$/ do
       Mix.raise("Helper module must be a valid Elixir module name")

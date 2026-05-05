@@ -69,7 +69,7 @@ defmodule Sagents.AgentServerSyntheticMessageTest do
         })
 
       # Sync via get_state to flush mailbox.
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       refute_received {:saved_synthetic_message, _, _, _}
       refute_received {:agent, {:display_message_saved, _}}
@@ -95,7 +95,7 @@ defmodule Sagents.AgentServerSyntheticMessageTest do
           content: %{"text" => "ignored"}
         })
 
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       refute_received {:saved_synthetic_message, _, _, _}
       refute_received {:agent, {:display_message_saved, _}}
