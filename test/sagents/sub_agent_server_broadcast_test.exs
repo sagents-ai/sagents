@@ -26,7 +26,7 @@ defmodule Sagents.SubAgentServerBroadcastTest do
 
     {:ok, _pid} = AgentServer.start_link(agent: parent_agent)
 
-    {:ok, _server_pid, _ref} = AgentServer.subscribe_debug(parent_agent.agent_id)
+    {:ok, _server_pid, _ref} = AgentServer.subscribe(parent_agent.agent_id, :debug)
 
     parent_agent
   end

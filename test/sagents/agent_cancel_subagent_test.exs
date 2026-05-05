@@ -126,7 +126,7 @@ defmodule Sagents.AgentCancelSubAgentTest do
       )
 
     {:ok, _server, _ref_main} = AgentServer.subscribe(agent_id)
-    {:ok, _server, _ref_debug} = AgentServer.subscribe_debug(agent_id)
+    {:ok, _server, _ref_debug} = AgentServer.subscribe(agent_id, :debug)
 
     assert :ok = AgentServer.execute(agent_id)
 

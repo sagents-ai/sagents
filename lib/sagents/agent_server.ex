@@ -492,64 +492,55 @@ defmodule Sagents.AgentServer do
   end
 
   @doc """
-  Subscribe the calling process to main events from this AgentServer.
+  Subscribe a process to events from this AgentServer.
 
-  Events are delivered as `{:agent, event}` messages via direct `send/2`.
-  The producer monitors the subscriber so departure is
-  cleaned up automatically — but subscribers should also `Process.monitor/1`
-  the returned `server_pid` to detect server death.
+  Events on the `:main` channel are delivered as `{:agent, event}` messages;
+  events on the `:debug` channel are delivered as `{:agent, {:debug, event}}`
+  and provide additional insight into middleware state, sub-agent activity,
+  and similar diagnostic data not surfaced on the main channel.
+
+  Delivery is via direct `send/2`. The producer monitors the subscriber so
+  departure is cleaned up automatically — but subscribers should also
+  `Process.monitor/1` the returned `server_pid` to detect server death.
+
+  ## Arguments
+
+  - `agent_id` — the agent's id.
+  - `channel` — `:main` (default) or `:debug`.
+  - `subscriber_pid` — the pid to receive events. Defaults to `self()` when
+    `nil`.
 
   Returns `{:ok, server_pid, monitor_ref}` on success, or
   `{:error, :process_not_found}` if no AgentServer is running for `agent_id`.
 
   ## Examples
 
+      # Most common: subscribe self() to the main channel.
       {:ok, _pid, _ref} = AgentServer.subscribe("my-agent-1")
+
+      # Subscribe to debug events (used by sagents_live_debugger and similar).
+      {:ok, _pid, _ref} = AgentServer.subscribe("my-agent-1", :debug)
+
+      # Subscribe a foreign pid (e.g. a bridge GenServer that proxies events).
+      {:ok, _pid, _ref} = AgentServer.subscribe("my-agent-1", :main, bridge_pid)
   """
-  @spec subscribe(String.t()) ::
+  @spec subscribe(String.t(), :main | :debug, pid() | nil) ::
           {:ok, pid(), reference()} | {:error, :process_not_found}
-  def subscribe(agent_id) do
-    Publisher.subscribe(get_name(agent_id), :main)
+  def subscribe(agent_id, channel \\ :main, subscriber_pid \\ nil)
+      when is_binary(agent_id) and channel in [:main, :debug] do
+    Publisher.subscribe(get_name(agent_id), channel, subscriber_pid)
   end
 
   @doc """
-  Unsubscribe the calling process from main events.
+  Unsubscribe a process from events on the given channel.
 
-  Always returns `:ok`.
+  Mirrors `subscribe/3`. Defaults `channel` to `:main` and `subscriber_pid`
+  to `self()` (when `nil`). Always returns `:ok`.
   """
-  @spec unsubscribe(String.t()) :: :ok
-  def unsubscribe(agent_id) do
-    Publisher.unsubscribe(get_name(agent_id), :main)
-  end
-
-  @doc """
-  Subscribe the calling process to debug events.
-
-  Debug events are delivered as `{:agent, {:debug, event}}` messages.
-  These provide additional insight into middleware state, sub-agent activity,
-  and similar diagnostic data not surfaced on the main channel.
-
-  Returns `{:ok, server_pid, monitor_ref}` on success, or
-  `{:error, :process_not_found}` if no AgentServer is running.
-
-  ## Examples
-
-      {:ok, _pid, _ref} = AgentServer.subscribe_debug("my-agent-1")
-  """
-  @spec subscribe_debug(String.t()) ::
-          {:ok, pid(), reference()} | {:error, :process_not_found}
-  def subscribe_debug(agent_id) do
-    Publisher.subscribe(get_name(agent_id), :debug)
-  end
-
-  @doc """
-  Unsubscribe the calling process from debug events.
-
-  Always returns `:ok`.
-  """
-  @spec unsubscribe_debug(String.t()) :: :ok
-  def unsubscribe_debug(agent_id) do
-    Publisher.unsubscribe(get_name(agent_id), :debug)
+  @spec unsubscribe(String.t(), :main | :debug, pid() | nil) :: :ok
+  def unsubscribe(agent_id, channel \\ :main, subscriber_pid \\ nil)
+      when is_binary(agent_id) and channel in [:main, :debug] do
+    Publisher.unsubscribe(get_name(agent_id), channel, subscriber_pid)
   end
 
   @doc """
