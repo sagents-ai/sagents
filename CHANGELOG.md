@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.8.0-rc.4
+
+No breaking changes from `v0.8.0-rc.3`. See the v0.8.0-rc.1 entry below for upgrading from `v0.7.0`.
+
+### Added
+- `agent_id` is now a top-level key on tool execution context (`context.agent_id`), so tools can publish events back through the running `AgentServer` without reaching into `state`. Sub-agent tools receive the **parent** agent id (where subscribers actually live). [#86](https://github.com/sagents-ai/sagents/pull/86)
+- `Sagents.AgentServer.save_synthetic_message_from/2` lets middleware persist user-facing transcript entries (e.g. an `ask_user` answer or a "User cancelled" note) through the same display-message pipeline LLM messages use, broadcast as `{:display_message_saved, msg}`. New optional `save_synthetic_message/3` callback on `DisplayMessagePersistence` plus a default generator template implementation. [#88](https://github.com/sagents-ai/sagents/pull/88)
+- `AskUserQuestion` middleware now records the user's answer (selected option labels, freeform text, or cancellation) as a synthetic display message via the new hook, so reloading a conversation shows the answer alongside the question. [#89](https://github.com/sagents-ai/sagents/pull/89)
+- Dialyzer is wired up via `dialyxir` and runs in CI on the lint matrix entry, with cached PLTs split across separate save/restore steps. New `.dialyzer_ignore.exs` file. [#90](https://github.com/sagents-ai/sagents/pull/90)
+
+### Changed
+- `Sagents.new/1` and `new!/1` are now explicit clauses with `@spec`s instead of `defdelegate`, so callers' Dialyzer runs see the public API's types. [#90](https://github.com/sagents-ai/sagents/pull/90)
+- `StateSerializer.deserialize_state/2` unconditionally applies `State.clean_stale_interrupts/1`; the duplicate call in `State.from_serialized/2` was removed so there is one source of truth. [#89](https://github.com/sagents-ai/sagents/pull/89)
+- Bumped `langchain` dependency floor to `>= 0.8.6`. [#90](https://github.com/sagents-ai/sagents/pull/90)
+
+### Fixed
+- Middleware-injected synthetic messages (e.g. a foundation-document preamble added in `before_model`) are now visible to debug subscribers that join mid-turn, and a mid-turn `get_state/1` reflects the post-middleware messages. The `on_after_middleware` callback now routes through the `AgentServer` GenServer instead of broadcasting from a frozen-snapshot closure. [#87](https://github.com/sagents-ai/sagents/pull/87)
+- Recover cleanly from stale interrupt state on restart. A serialized `ToolResult` with `is_interrupt: true` is sanitized into an error result on deserialize (the `interrupt_data` virtual field cannot survive serialization), and a crashed execution `Task` in `AgentServer` now drives the agent to `:error` via a new `handle_info({:EXIT, ...})` clause instead of leaving it stuck in `:running`. The generated `agent_subscriber_session.ex.eex` template gains a `handle_status_interrupted(nil)` clause so subscribers can apply the result unconditionally. [#89](https://github.com/sagents-ai/sagents/pull/89)
+- Several Dialyzer-surfaced issues: removed unreachable error branches in `Agent`, `HumanInTheLoop`, `state_serializer`, and `sub_agent_server`; corrected `Publisher.subscribe/3` and `unsubscribe/3` typespecs to allow a `nil` subscriber pid; `FileSystem.state_schema/0` returns `nil` instead of `[]`. [#90](https://github.com/sagents-ai/sagents/pull/90)
+
 ## v0.8.0-rc.3
 
 No breaking changes from `v0.8.0-rc.2`. See the v0.8.0-rc.1 entry below for upgrading from `v0.7.0`.
