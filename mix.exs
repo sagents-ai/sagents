@@ -72,7 +72,7 @@ defmodule Sagents.MixProject do
       {:usage_rules, "~> 0.1", only: :dev, runtime: false},
 
       # Static analysis
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
   end
 
