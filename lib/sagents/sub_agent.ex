@@ -834,7 +834,7 @@ defmodule Sagents.SubAgent do
 
     defp validate_tools(changeset) do
       case get_field(changeset, :tools) do
-        tools when is_list(tools) and length(tools) > 0 ->
+        tools when is_list(tools) and tools != [] ->
           if Enum.all?(tools, &is_struct(&1, LangChain.Function)) do
             changeset
           else

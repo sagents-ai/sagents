@@ -692,7 +692,7 @@ defmodule Sagents.AgentTest do
       {:ok, agent} = Agent.new(%{model: mock_model()})
 
       # Should have TodoList middleware in the stack
-      assert length(agent.middleware) > 0
+      assert agent.middleware != []
 
       # Should have write_todos tool
       tool_names = Enum.map(agent.tools, & &1.name)

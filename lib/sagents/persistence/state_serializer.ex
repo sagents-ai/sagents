@@ -175,7 +175,7 @@ defmodule Sagents.Persistence.StateSerializer do
 
     # Add tool_calls if present
     base =
-      if message.tool_calls && length(message.tool_calls) > 0 do
+      if message.tool_calls && message.tool_calls != [] do
         Map.put(base, "tool_calls", Enum.map(message.tool_calls, &serialize_tool_call/1))
       else
         base
@@ -183,7 +183,7 @@ defmodule Sagents.Persistence.StateSerializer do
 
     # Add tool_results if present
     base =
-      if message.tool_results && length(message.tool_results) > 0 do
+      if message.tool_results && message.tool_results != [] do
         Map.put(base, "tool_results", Enum.map(message.tool_results, &serialize_tool_result/1))
       else
         base

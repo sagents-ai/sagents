@@ -507,7 +507,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
       if has_special_other?, do: Enum.reject(selected, &(&1 == "other")), else: selected
 
     cond do
-      not is_list(selected) or length(selected) == 0 ->
+      not is_list(selected) or selected == [] ->
         {:error, "multi_select requires at least one selection"}
 
       has_special_other? and not question_data.allow_other ->
