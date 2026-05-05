@@ -157,7 +157,7 @@ defmodule Sagents.Publisher do
 
   Returns `{:error, :process_not_found}` if the producer is not running.
   """
-  @spec subscribe(GenServer.server(), channel(), pid()) ::
+  @spec subscribe(GenServer.server(), channel(), pid() | nil) ::
           {:ok, pid(), reference()} | {:error, :process_not_found}
   def subscribe(server, channel \\ :main, subscriber_pid \\ nil) do
     pid = subscriber_pid || self()
@@ -175,7 +175,7 @@ defmodule Sagents.Publisher do
   Returns `:ok`. If the producer is no longer running, returns `:ok`
   (the subscriber would have been cleaned up anyway).
   """
-  @spec unsubscribe(GenServer.server(), channel(), pid()) :: :ok
+  @spec unsubscribe(GenServer.server(), channel(), pid() | nil) :: :ok
   def unsubscribe(server, channel \\ :main, subscriber_pid \\ nil) do
     pid = subscriber_pid || self()
 

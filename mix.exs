@@ -2,7 +2,7 @@ defmodule Sagents.MixProject do
   use Mix.Project
 
   @source_url "https://github.com/sagents-ai/sagents"
-  @version "0.8.0-rc.3"
+  @version "0.8.0-rc.4"
 
   def project do
     [
@@ -14,6 +14,12 @@ defmodule Sagents.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
+      dialyzer: [
+        ignore_warnings: ".dialyzer_ignore.exs",
+        plt_file: {:no_warn, "priv/plts/project.plt"},
+        plt_core_path: "priv/plts",
+        plt_add_apps: [:mix]
+      ],
       package: package(),
       docs: docs(),
       name: "Sagents",
@@ -43,7 +49,7 @@ defmodule Sagents.MixProject do
   defp deps do
     [
       # Core dependency - the LangChain library
-      {:langchain, ">= 0.8.5"},
+      {:langchain, ">= 0.8.6"},
       # {:langchain, path: "../my_langchain"},
 
       # Required dependencies
@@ -63,7 +69,10 @@ defmodule Sagents.MixProject do
       {:local_cluster, "~> 2.0", only: :test},
 
       # AGENTS.md file maintenance
-      {:usage_rules, "~> 0.1", only: :dev, runtime: false}
+      {:usage_rules, "~> 0.1", only: :dev, runtime: false},
+
+      # Static analysis
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
   end
 

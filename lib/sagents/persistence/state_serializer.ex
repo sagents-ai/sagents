@@ -99,14 +99,9 @@ defmodule Sagents.Persistence.StateSerializer do
       when is_binary(agent_id) and is_map(data)
       when is_map(data) and is_binary(agent_id) do
     # Handle version migration if needed
-    case maybe_migrate(data) do
-      {:error, reason} ->
-        {:error, reason}
-
-      migrated_data ->
-        # Only deserialize state, not agent config
-        deserialize_state(agent_id, migrated_data["state"])
-    end
+    migrated_data = maybe_migrate(data)
+    # Only deserialize state, not agent config
+    deserialize_state(agent_id, migrated_data["state"])
   end
 
   @doc """
