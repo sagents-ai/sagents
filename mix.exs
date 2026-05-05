@@ -83,6 +83,7 @@ defmodule Sagents.MixProject do
         "compile --warnings-as-errors",
         "deps.unlock --unused",
         "format",
+        "credo",
         "test --include cluster --include slow"
       ]
     ]

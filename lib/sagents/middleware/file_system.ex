@@ -893,35 +893,25 @@ defmodule Sagents.Middleware.FileSystem do
     if is_nil(file_path) or is_nil(content) do
       {:error, "Both file_path and content are required"}
     else
-      # Validate path
-      case validate_path(file_path) do
-        {:ok, normalized_path} ->
-          # Check if file already exists (overwrite protection)
-          if FileSystemServer.file_exists?(config.filesystem_scope, normalized_path) do
-            {:error,
-             "File already exists: #{normalized_path}. Use replace_file_text or replace_file_lines to modify existing files."}
-          else
-            # Write file using FileSystemServer
-            case FileSystemServer.write_file(
-                   config.filesystem_scope,
-                   normalized_path,
-                   content
-                 ) do
-              {:ok, entry} ->
-                {:ok, Jason.encode!(FileEntry.to_llm_map(entry))}
-
-              {:error, reason} ->
-                {:error, "Failed to create file: #{inspect(reason)}"}
-            end
-          end
-
-        {:error, reason} ->
-          {:error, reason}
+      with {:ok, normalized_path} <- validate_path(file_path) do
+        create_new_file(config.filesystem_scope, normalized_path, content)
       end
     end
   rescue
     e ->
       {:error, "Filesystem not available: #{Exception.message(e)}"}
+  end
+
+  defp create_new_file(scope, path, content) do
+    if FileSystemServer.file_exists?(scope, path) do
+      {:error,
+       "File already exists: #{path}. Use replace_file_text or replace_file_lines to modify existing files."}
+    else
+      case FileSystemServer.write_file(scope, path, content) do
+        {:ok, entry} -> {:ok, Jason.encode!(FileEntry.to_llm_map(entry))}
+        {:error, reason} -> {:error, "Failed to create file: #{inspect(reason)}"}
+      end
+    end
   end
 
   defp execute_replace_text_tool(args, _context, config) do

@@ -373,64 +373,42 @@ defmodule Sagents.Middleware.Summarization do
     end)
   end
 
+  # Base tokens for message structure
+  @message_base_tokens 4
+  # Per-tool-call/result framing overhead
+  @tool_overhead_tokens 10
+
   defp count_message_tokens(%Message{} = message) do
-    # Base tokens for message structure
-    base_tokens = 4
-
-    # Count content tokens
-    content_tokens =
-      cond do
-        is_list(message.content) ->
-          Enum.reduce(message.content, 0, fn part, acc ->
-            acc + count_content_part_tokens(part)
-          end)
-
-        is_binary(message.content) ->
-          estimate_text_tokens(message.content)
-
-        true ->
-          0
-      end
-
-    # Count tool call tokens
-    tool_call_tokens =
-      if message.tool_calls && message.tool_calls != [] do
-        Enum.reduce(message.tool_calls, 0, fn call, acc ->
-          # Tool call structure + name + arguments
-          name_tokens = estimate_text_tokens(call.name || "")
-          args_tokens = estimate_text_tokens(Jason.encode!(call.arguments || %{}))
-          acc + 10 + name_tokens + args_tokens
-        end)
-      else
-        0
-      end
-
-    # Count tool result tokens
-    tool_result_tokens =
-      if message.tool_results && message.tool_results != [] do
-        Enum.reduce(message.tool_results, 0, fn result, acc ->
-          content_tokens =
-            cond do
-              is_list(result.content) ->
-                Enum.reduce(result.content, 0, fn part, part_acc ->
-                  part_acc + count_content_part_tokens(part)
-                end)
-
-              is_binary(result.content) ->
-                estimate_text_tokens(result.content)
-
-              true ->
-                0
-            end
-
-          acc + 10 + content_tokens
-        end)
-      else
-        0
-      end
-
-    base_tokens + content_tokens + tool_call_tokens + tool_result_tokens
+    @message_base_tokens +
+      count_content_tokens(message.content) +
+      count_tool_calls_tokens(message.tool_calls) +
+      count_tool_results_tokens(message.tool_results)
   end
+
+  defp count_content_tokens(content) when is_list(content) do
+    Enum.reduce(content, 0, fn part, acc -> acc + count_content_part_tokens(part) end)
+  end
+
+  defp count_content_tokens(content) when is_binary(content), do: estimate_text_tokens(content)
+  defp count_content_tokens(_other), do: 0
+
+  defp count_tool_calls_tokens(calls) when is_list(calls) and calls != [] do
+    Enum.reduce(calls, 0, fn call, acc ->
+      name_tokens = estimate_text_tokens(call.name || "")
+      args_tokens = estimate_text_tokens(Jason.encode!(call.arguments || %{}))
+      acc + @tool_overhead_tokens + name_tokens + args_tokens
+    end)
+  end
+
+  defp count_tool_calls_tokens(_other), do: 0
+
+  defp count_tool_results_tokens(results) when is_list(results) and results != [] do
+    Enum.reduce(results, 0, fn result, acc ->
+      acc + @tool_overhead_tokens + count_content_tokens(result.content)
+    end)
+  end
+
+  defp count_tool_results_tokens(_other), do: 0
 
   defp count_content_part_tokens(%{type: :text, content: text}) when is_binary(text) do
     estimate_text_tokens(text)

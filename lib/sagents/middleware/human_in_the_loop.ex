@@ -409,75 +409,67 @@ defmodule Sagents.Middleware.HumanInTheLoop do
     callbacks = Keyword.get(opts, :callbacks)
 
     if Enum.all?(messages, &is_struct(&1, Message)) do
-      case Agent.build_chain(agent, messages, state, callbacks) do
-        {:ok, chain} ->
-          # Get the assistant message with tool calls
-          assistant_msg =
-            Enum.reverse(messages)
-            |> Enum.find(fn msg ->
-              msg.role == :assistant && msg.tool_calls != nil && msg.tool_calls != []
-            end)
-
-          case assistant_msg do
-            nil ->
-              {:error, "No tool calls found in state"}
-
-            %{tool_calls: all_tool_calls} ->
-              interrupt_data = state.interrupt_data
-              hitl_tool_call_ids = Map.get(interrupt_data, :hitl_tool_call_ids, [])
-              action_requests = Map.get(interrupt_data, :action_requests, [])
-
-              # Build decisions map indexed by tool_call_id
-              decisions_by_id =
-                action_requests
-                |> Enum.zip(decisions)
-                |> Map.new(fn {action_req, decision} ->
-                  {action_req.tool_call_id, decision}
-                end)
-
-              # Build full decisions array matching ALL tool calls
-              # Auto-approve non-HITL tools, use human decisions for HITL tools
-              full_decisions =
-                Enum.map(all_tool_calls, fn tc ->
-                  if tc.call_id in hitl_tool_call_ids do
-                    Map.fetch!(decisions_by_id, tc.call_id)
-                  else
-                    %{type: :approve}
-                  end
-                end)
-
-              # Execute tool calls with decisions via LLMChain
-              updated_chain =
-                LLMChain.execute_tool_calls_with_decisions(
-                  chain,
-                  all_tool_calls,
-                  full_decisions
-                )
-
-              # Extract the tool result message and add to state
-              tool_result_message = List.last(updated_chain.exchanged_messages)
-              state_with_results = State.add_message(state, tool_result_message)
-
-              # Check if any auto-approved tools produced interrupts during
-              # execution. If so, return {:cont} with the new interrupt_data on
-              # state so the middleware cycle re-scans and the owning middleware
-              # can claim it.
-              interrupted = find_interrupt_results(tool_result_message)
-
-              if interrupted == [] do
-                {:ok, state_with_results}
-              else
-                interrupt_data = build_interrupt_data_from_results(interrupted)
-                {:cont, %{state_with_results | interrupt_data: interrupt_data}}
-              end
-          end
-
-        {:error, reason} ->
-          {:error, reason}
+      with {:ok, chain} <- Agent.build_chain(agent, messages, state, callbacks),
+           %{tool_calls: all_tool_calls} <- find_assistant_with_tool_calls(messages) do
+        run_decisions(chain, all_tool_calls, decisions, state)
+      else
+        nil -> {:error, "No tool calls found in state"}
+        {:error, reason} -> {:error, reason}
       end
     else
       {:error, "All messages must be LangChain.Message structs"}
     end
+  end
+
+  defp find_assistant_with_tool_calls(messages) do
+    messages
+    |> Enum.reverse()
+    |> Enum.find(fn msg ->
+      msg.role == :assistant && msg.tool_calls != nil && msg.tool_calls != []
+    end)
+  end
+
+  defp run_decisions(chain, all_tool_calls, decisions, state) do
+    full_decisions = build_full_decisions(all_tool_calls, decisions, state.interrupt_data)
+
+    updated_chain =
+      LLMChain.execute_tool_calls_with_decisions(chain, all_tool_calls, full_decisions)
+
+    tool_result_message = List.last(updated_chain.exchanged_messages)
+    state_with_results = State.add_message(state, tool_result_message)
+
+    # Check if any auto-approved tools produced interrupts during
+    # execution. If so, return {:cont} with the new interrupt_data on
+    # state so the middleware cycle re-scans and the owning middleware
+    # can claim it.
+    case find_interrupt_results(tool_result_message) do
+      [] ->
+        {:ok, state_with_results}
+
+      interrupted ->
+        interrupt_data = build_interrupt_data_from_results(interrupted)
+        {:cont, %{state_with_results | interrupt_data: interrupt_data}}
+    end
+  end
+
+  # Build full decisions array matching ALL tool calls.
+  # Auto-approve non-HITL tools, use human decisions for HITL tools.
+  defp build_full_decisions(all_tool_calls, decisions, interrupt_data) do
+    hitl_tool_call_ids = Map.get(interrupt_data, :hitl_tool_call_ids, [])
+    action_requests = Map.get(interrupt_data, :action_requests, [])
+
+    decisions_by_id =
+      action_requests
+      |> Enum.zip(decisions)
+      |> Map.new(fn {action_req, decision} -> {action_req.tool_call_id, decision} end)
+
+    Enum.map(all_tool_calls, fn tc ->
+      if tc.call_id in hitl_tool_call_ids do
+        Map.fetch!(decisions_by_id, tc.call_id)
+      else
+        %{type: :approve}
+      end
+    end)
   end
 
   # Private functions

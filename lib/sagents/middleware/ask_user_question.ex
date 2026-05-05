@@ -590,28 +590,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
   def user_facing_attrs(%{type: :answer} = response, %{response_type: :multi_select} = q) do
     case Map.get(response, :selected, []) do
       selected when is_list(selected) and selected != [] ->
-        has_other? = Enum.any?(selected, &special_other?(&1, q.options))
-
-        if has_other? and not Map.get(q, :allow_other, false) do
-          {:error, :other_not_allowed}
-        else
-          regular = Enum.reject(selected, &special_other?(&1, q.options))
-          labels_csv = Enum.map_join(regular, ", ", &lookup_label(q.options, &1))
-
-          text =
-            if has_other? do
-              other_text = Map.get(response, :other_text, "")
-
-              case labels_csv do
-                "" -> "Other:  \n#{other_text}"
-                csv -> "#{csv}  \nOther:  \n#{other_text}"
-              end
-            else
-              labels_csv
-            end
-
-          {:ok, user_text_attrs(text)}
-        end
+        build_multi_select_attrs(response, q, selected)
 
       _other ->
         {:error, :invalid_multi_select}
@@ -619,6 +598,23 @@ defmodule Sagents.Middleware.AskUserQuestion do
   end
 
   def user_facing_attrs(_response, _question_data), do: {:error, :invalid_response}
+
+  defp build_multi_select_attrs(response, q, selected) do
+    has_other? = Enum.any?(selected, &special_other?(&1, q.options))
+
+    if has_other? and not Map.get(q, :allow_other, false) do
+      {:error, :other_not_allowed}
+    else
+      regular = Enum.reject(selected, &special_other?(&1, q.options))
+      labels_csv = Enum.map_join(regular, ", ", &lookup_label(q.options, &1))
+      other_text = if has_other?, do: Map.get(response, :other_text, ""), else: nil
+      {:ok, user_text_attrs(format_multi_select(labels_csv, other_text))}
+    end
+  end
+
+  defp format_multi_select(labels_csv, nil), do: labels_csv
+  defp format_multi_select("", other_text), do: "Other:  \n#{other_text}"
+  defp format_multi_select(csv, other_text), do: "#{csv}  \nOther:  \n#{other_text}"
 
   defp lookup_label(options, value) do
     case Enum.find(options, &(&1.value == value)) do

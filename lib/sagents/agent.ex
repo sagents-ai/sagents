@@ -677,54 +677,48 @@ defmodule Sagents.Agent do
 
   defp execute_model(%Agent{} = agent, %State{} = state, callbacks, opts) do
     with {:ok, langchain_messages} <- validate_messages(state.messages),
-         {:ok, chain} <- build_chain_impl(agent, langchain_messages, state, callbacks),
-         result <- execute_chain(chain, agent.middleware, agent, opts) do
-      case result do
-        {:ok, executed_chain} ->
-          case extract_state_from_chain(executed_chain, state) do
-            {:ok, final_state} ->
-              # Check if the last message was cancelled due to a streaming error
-              # (e.g. content filtering). The error is stored in message metadata
-              # by LLMChain.cancel_delta/3.
-              case check_for_streaming_error(final_state) do
-                nil -> {:ok, final_state}
-                error -> {:error, error}
-              end
+         {:ok, chain} <- build_chain_impl(agent, langchain_messages, state, callbacks) do
+      chain
+      |> execute_chain(agent.middleware, agent, opts)
+      |> handle_chain_result(state)
+    end
+  end
 
-            {:error, reason} ->
-              {:error, reason}
-          end
-
-        {:ok, executed_chain, extra} ->
-          case extract_state_from_chain(executed_chain, state) do
-            {:ok, final_state} -> {:ok, final_state, extra}
-            {:error, reason} -> {:error, reason}
-          end
-
-        {:interrupt, interrupted_chain, interrupt_data} ->
-          # Tool calls need human approval - return interrupt with current state
-          case extract_state_from_chain(interrupted_chain, state) do
-            {:ok, interrupted_state} ->
-              # Add interrupt_data to state so it's available during resume
-              state_with_interrupt_data = %{interrupted_state | interrupt_data: interrupt_data}
-              {:interrupt, state_with_interrupt_data, interrupt_data}
-
-            {:error, reason} ->
-              {:error, reason}
-          end
-
-        {:pause, paused_chain} ->
-          # Infrastructure pause (e.g., node draining). Extract state and propagate.
-          case extract_state_from_chain(paused_chain, state) do
-            {:ok, paused_state} -> {:pause, paused_state}
-            {:error, reason} -> {:error, reason}
-          end
-
-        {:error, reason} ->
-          {:error, reason}
+  defp handle_chain_result({:ok, executed_chain}, state) do
+    with {:ok, final_state} <- extract_state_from_chain(executed_chain, state) do
+      # Check if the last message was cancelled due to a streaming error
+      # (e.g. content filtering). The error is stored in message metadata
+      # by LLMChain.cancel_delta/3.
+      case check_for_streaming_error(final_state) do
+        nil -> {:ok, final_state}
+        error -> {:error, error}
       end
     end
   end
+
+  defp handle_chain_result({:ok, executed_chain, extra}, state) do
+    with {:ok, final_state} <- extract_state_from_chain(executed_chain, state) do
+      {:ok, final_state, extra}
+    end
+  end
+
+  defp handle_chain_result({:interrupt, interrupted_chain, interrupt_data}, state) do
+    # Tool calls need human approval - return interrupt with current state
+    with {:ok, interrupted_state} <- extract_state_from_chain(interrupted_chain, state) do
+      # Add interrupt_data to state so it's available during resume
+      state_with_interrupt_data = %{interrupted_state | interrupt_data: interrupt_data}
+      {:interrupt, state_with_interrupt_data, interrupt_data}
+    end
+  end
+
+  defp handle_chain_result({:pause, paused_chain}, state) do
+    # Infrastructure pause (e.g., node draining). Extract state and propagate.
+    with {:ok, paused_state} <- extract_state_from_chain(paused_chain, state) do
+      {:pause, paused_state}
+    end
+  end
+
+  defp handle_chain_result({:error, reason}, _state), do: {:error, reason}
 
   defp check_for_streaming_error(%State{messages: messages}) do
     case List.last(messages) do
