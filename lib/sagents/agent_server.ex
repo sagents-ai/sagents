@@ -1261,6 +1261,13 @@ defmodule Sagents.AgentServer do
     # Ensure agent_id is set in the state
     state = %{state | agent_id: agent.agent_id}
 
+    # Detect a surviving (restorable) interrupt on the trailing tool result
+    # so the ServerState boots in :interrupted status and broadcasts it.
+    # Also repopulates the virtual state.interrupt_data field for middleware
+    # resume callbacks (HITL.process_decisions, AskUserQuestion.handle_resume)
+    # that read it.
+    {boot_status, boot_interrupt_data, state} = derive_boot_status(state)
+
     # The :pubsub option is only used for presence wiring (subscribing
     # to presence_diff broadcasts from Phoenix.Presence). Per-agent events are
     # delivered directly to subscriber pids via Sagents.Publisher.
@@ -1326,10 +1333,10 @@ defmodule Sagents.AgentServer do
     server_state = %ServerState{
       agent: updated_agent,
       state: state,
-      status: :idle,
+      status: boot_status,
       publisher: publisher_state,
       pubsub_name: pubsub_name,
-      interrupt_data: nil,
+      interrupt_data: boot_interrupt_data,
       error: nil,
       inactivity_timeout: inactivity_timeout,
       inactivity_timer_ref: nil,
@@ -1351,6 +1358,57 @@ defmodule Sagents.AgentServer do
     # Use continue to broadcast initial state after init completes
     # This ensures subscribers are ready before we broadcast
     {:ok, server_state, {:continue, :broadcast_initial_state}}
+  end
+
+  # Inspect the trailing tool message for surviving (restorable) interrupt
+  # placeholders. If found, build the same enriched interrupt_data shape that
+  # `LangChain.Chains.LLMChain.Mode.Steps.extract_interrupt_data/1` produces
+  # in the live path — i.e. with `:tool_call_id` injected from the surrounding
+  # ToolResult, and a `:multiple_interrupts` wrapper when more than one tool
+  # result is interrupted in the same turn.
+  #
+  # Repopulates the virtual `state.interrupt_data` field so middleware resume
+  # callbacks (HITL.process_decisions, AskUserQuestion.handle_resume) and UI
+  # consumers (which read `interrupt_data.tool_call_id`) see the same shape
+  # as a freshly-fired live interrupt. For a fresh state with no messages
+  # this is a no-op.
+  defp derive_boot_status(%State{messages: messages} = state) do
+    case List.last(messages) do
+      %LangChain.Message{role: :tool, tool_results: results} when is_list(results) ->
+        case Enum.filter(results, &live_interrupt?/1) do
+          [] ->
+            {:idle, nil, state}
+
+          interrupted ->
+            data = restore_interrupt_data(interrupted)
+            {:interrupted, data, %{state | interrupt_data: data}}
+        end
+
+      _other ->
+        {:idle, nil, state}
+    end
+  end
+
+  defp live_interrupt?(%LangChain.Message.ToolResult{is_interrupt: true, interrupt_data: data})
+       when not is_nil(data),
+       do: true
+
+  defp live_interrupt?(_), do: false
+
+  # Mirror of LangChain's `extract_interrupt_data/1` — keep these in lockstep
+  # so restored and freshly-fired interrupts surface identically.
+  defp restore_interrupt_data([single]) do
+    Map.put(single.interrupt_data, :tool_call_id, single.tool_call_id)
+  end
+
+  defp restore_interrupt_data(multiple) do
+    %{
+      type: :multiple_interrupts,
+      interrupts:
+        Enum.map(multiple, fn result ->
+          Map.merge(result.interrupt_data, %{tool_call_id: result.tool_call_id})
+        end)
+    }
   end
 
   @impl true
@@ -1383,9 +1441,17 @@ defmodule Sagents.AgentServer do
       broadcast_event(server_state, {:node_transferred, %{to_node: node()}})
     end
 
-    # Broadcast initial :idle status so UI knows agent is ready
-    broadcast_event(server_state, {:status_changed, :idle, nil})
-    update_presence_status(server_state, :idle)
+    # Broadcast initial status so UI knows agent is ready. When restored from
+    # persisted state with a surviving (restorable) interrupt, this fires
+    # {:status_changed, :interrupted, interrupt_data} — matching the live
+    # interrupt broadcast shape — so subscribers and mount-time get_status
+    # callers re-surface the question UI without any extra plumbing.
+    broadcast_event(
+      server_state,
+      {:status_changed, server_state.status, server_state.interrupt_data}
+    )
+
+    update_presence_status(server_state, server_state.status)
 
     # Track presence for agent discovery (unconditional when configured)
     server_state = track_presence(server_state)
@@ -1568,24 +1634,40 @@ defmodule Sagents.AgentServer do
         # Add LLM message to the state
         new_state = State.add_message(server_state.state, llm_message)
 
-        # Transition to idle if we were completed/error/cancelled to allow new execution
-        new_status =
+        # Transition to idle if we were completed/error/cancelled to allow new
+        # execution. If interrupted, the user has chosen to send a new message
+        # instead of resuming — demote the pending interrupt so the trailing
+        # tool-result placeholder doesn't malform the next LLM call.
+        {new_state, new_status, new_interrupt_data} =
           case server_state.status do
-            :completed -> :idle
-            :error -> :idle
-            :cancelled -> :idle
-            status -> status
+            :interrupted ->
+              {State.cancel_pending_interrupts(new_state), :idle, nil}
+
+            s when s in [:completed, :error, :cancelled] ->
+              {new_state, :idle, server_state.interrupt_data}
+
+            _ ->
+              {new_state, server_state.status, server_state.interrupt_data}
           end
 
         updated_server_state = %{
           server_state
           | state: new_state,
             status: new_status,
+            interrupt_data: new_interrupt_data,
             error: nil
         }
 
         # Reset inactivity timer on user message
         updated_server_state = reset_inactivity_timer(updated_server_state)
+
+        # If the prior status was :interrupted, broadcast the cancellation so
+        # subscribers (LiveViews) clear any pending interrupt UI before the new
+        # user message arrives.
+        if server_state.status == :interrupted do
+          broadcast_event(updated_server_state, {:status_changed, :idle, nil})
+          update_presence_status(updated_server_state, :idle)
+        end
 
         # Save and broadcast the display message
         # Note: During LLM execution, assistant messages are also saved via on_message_processed callback
@@ -2886,16 +2968,47 @@ defmodule Sagents.AgentServer do
   # Direct send/2 fan-out to main-channel subscribers. Wraps events in
   # `{:agent, event}` so consumers can pattern-match on origin.
   defp broadcast_event(%ServerState{} = server_state, event) do
-    Publisher.broadcast(server_state.publisher, :main, {:agent, event})
+    Publisher.broadcast(server_state.publisher, :main, main_envelope(event))
     :ok
   end
 
   # Direct send/2 fan-out to debug-channel subscribers. The outer `:agent` tag
   # identifies the producer; the inner `:debug` tag distinguishes the channel.
   defp broadcast_debug_event(%ServerState{} = server_state, event) do
-    Publisher.broadcast(server_state.publisher, :debug, {:agent, {:debug, event}})
+    Publisher.broadcast(server_state.publisher, :debug, debug_envelope(event))
     :ok
   end
+
+  # Single-pid send used by on_subscribed/3 to deliver a snapshot to a newly
+  # registered subscriber. Same envelope as broadcast_event so consumers can
+  # treat snapshot and live events identically.
+  defp send_main_event_to(pid, event) when is_pid(pid) do
+    send(pid, main_envelope(event))
+    :ok
+  end
+
+  defp main_envelope(event), do: {:agent, event}
+  defp debug_envelope(event), do: {:agent, {:debug, event}}
+
+  # Sync a newly registered :main-channel subscriber to the current state by
+  # sending it a status snapshot. Without this, a subscriber that joins after
+  # the boot broadcast (e.g. a LiveView reloading mid-conversation) would never
+  # learn that the agent is :interrupted with a pending question.
+  #
+  # Snapshots use the same envelope as live events; consumers don't need a
+  # special handler. The snapshot fires inside the subscribe handle_call,
+  # before the reply, so it's guaranteed to arrive at the subscriber before
+  # any later broadcasts on the same channel.
+  def on_subscribed(:main, subscriber_pid, %ServerState{} = server_state) do
+    send_main_event_to(
+      subscriber_pid,
+      {:status_changed, server_state.status, server_state.interrupt_data}
+    )
+
+    server_state
+  end
+
+  def on_subscribed(_channel, _subscriber_pid, server_state), do: server_state
 
   ## Inactivity Timer Management
 

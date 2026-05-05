@@ -1578,4 +1578,391 @@ defmodule Sagents.AgentServerTest do
       # But the event should still be broadcast
     end
   end
+
+  describe "boot with restored interrupt" do
+    alias LangChain.Message.ToolResult
+
+    defp interrupted_state(interrupt_data) do
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "call_1",
+          name: "ask_user",
+          arguments: %{}
+        })
+
+      assistant_msg = Message.new_assistant!(%{tool_calls: [tool_call]})
+
+      tool_result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Waiting for user...",
+          is_interrupt: true,
+          interrupt_data: interrupt_data
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [tool_result]})
+
+      State.new!(%{
+        messages: [Message.new_user!("hi"), assistant_msg, tool_msg]
+      })
+    end
+
+    test "get_status returns :interrupted and get_info carries enriched interrupt_data" do
+      data = %{type: :ask_user_question, question: "Continue?"}
+      enriched = Map.put(data, :tool_call_id, "call_1")
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: interrupted_state(data),
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      assert AgentServer.get_status(agent_id) == :interrupted
+      info = AgentServer.get_info(agent_id)
+      # tool_call_id is injected from the surrounding ToolResult, mirroring
+      # LangChain's extract_interrupt_data/1 in the live path.
+      assert info.interrupt_data == enriched
+    end
+
+    test "repopulates the virtual state.interrupt_data field with tool_call_id" do
+      data = %{type: :ask_user_question, question: "Continue?"}
+      enriched = Map.put(data, :tool_call_id, "call_1")
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: interrupted_state(data),
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      state = AgentServer.get_state(agent_id)
+      assert state.interrupt_data == enriched
+    end
+
+    test "boot broadcast carries :interrupted with enriched interrupt_data" do
+      data = %{type: :ask_user_question, question: "Continue?"}
+      enriched = Map.put(data, :tool_call_id, "call_1")
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+      test_pid = self()
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: interrupted_state(data),
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil,
+          initial_subscribers: [{:main, test_pid}]
+        )
+
+      assert_receive {:agent, {:status_changed, :interrupted, ^enriched}}, 200
+    end
+
+    test "multiple interrupted tool results restore as :multiple_interrupts" do
+      tool_call_a =
+        LangChain.Message.ToolCall.new!(%{call_id: "call_a", name: "ask_user", arguments: %{}})
+
+      tool_call_b =
+        LangChain.Message.ToolCall.new!(%{call_id: "call_b", name: "ask_user", arguments: %{}})
+
+      assistant_msg = Message.new_assistant!(%{tool_calls: [tool_call_a, tool_call_b]})
+
+      result_a =
+        ToolResult.new!(%{
+          tool_call_id: "call_a",
+          name: "ask_user",
+          content: "Q1?",
+          is_interrupt: true,
+          interrupt_data: %{type: :ask_user_question, question: "A"}
+        })
+
+      result_b =
+        ToolResult.new!(%{
+          tool_call_id: "call_b",
+          name: "ask_user",
+          content: "Q2?",
+          is_interrupt: true,
+          interrupt_data: %{type: :ask_user_question, question: "B"}
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [result_a, result_b]})
+      initial_state = State.new!(%{messages: [assistant_msg, tool_msg]})
+
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      assert AgentServer.get_status(agent_id) == :interrupted
+      info = AgentServer.get_info(agent_id)
+
+      assert info.interrupt_data == %{
+               type: :multiple_interrupts,
+               interrupts: [
+                 %{type: :ask_user_question, question: "A", tool_call_id: "call_a"},
+                 %{type: :ask_user_question, question: "B", tool_call_id: "call_b"}
+               ]
+             }
+    end
+
+    test "boot from state with no interrupt still broadcasts :idle (regression)" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+      test_pid = self()
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: State.new!(%{messages: [Message.new_user!("hi")]}),
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil,
+          initial_subscribers: [{:main, test_pid}]
+        )
+
+      assert_receive {:agent, {:status_changed, :idle, nil}}, 200
+      assert AgentServer.get_status(agent_id) == :idle
+    end
+
+    test "interrupted tool result with nil interrupt_data does NOT trigger :interrupted boot" do
+      # Mirrors the post-clean_stale_interrupts state when no middleware claimed
+      # the data: is_interrupt should be cleared, but defensively, even if a
+      # malformed state arrives with is_interrupt: true / interrupt_data: nil,
+      # derive_boot_status must NOT promote it to :interrupted.
+      tool_result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "stale",
+          is_interrupt: true,
+          interrupt_data: nil
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [tool_result]})
+      state = State.new!(%{messages: [tool_msg]})
+
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      assert AgentServer.get_status(agent_id) == :idle
+    end
+  end
+
+  describe "late subscribe snapshot" do
+    alias LangChain.Message.ToolResult
+
+    test "a late :main-channel subscriber receives a status snapshot on subscribe" do
+      data = %{type: :ask_user_question, question: "Continue?"}
+
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "call_1",
+          name: "ask_user",
+          arguments: %{}
+        })
+
+      assistant_msg = Message.new_assistant!(%{tool_calls: [tool_call]})
+
+      tool_result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Waiting...",
+          is_interrupt: true,
+          interrupt_data: data
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [tool_result]})
+      initial_state = State.new!(%{messages: [assistant_msg, tool_msg]})
+
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      # Boot the agent WITHOUT initial_subscribers — the boot broadcast goes
+      # nowhere. This mirrors the real bug: agent has been running, the boot
+      # broadcast already fired, and a fresh LiveView mount needs to learn the
+      # current state somehow.
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      # Subscribe AFTER boot — this is what the LiveView does on (re)mount.
+      assert {:ok, _server_pid, _ref} = AgentServer.subscribe(agent_id)
+
+      # The on_subscribed hook fires the current status to just this subscriber.
+      # The interrupt_data carries the enriched shape (with :tool_call_id) so
+      # downstream UI consumers see the same shape as a freshly-fired interrupt.
+      enriched = Map.put(data, :tool_call_id, "call_1")
+      assert_receive {:agent, {:status_changed, :interrupted, ^enriched}}, 200
+    end
+
+    test "a late subscriber to an idle agent receives :idle snapshot" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      assert {:ok, _server_pid, _ref} = AgentServer.subscribe(agent_id)
+      assert_receive {:agent, {:status_changed, :idle, nil}}, 200
+    end
+
+    test ":debug-channel subscribers do NOT receive a status snapshot" do
+      data = %{type: :ask_user_question, question: "?"}
+
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "call_1",
+          name: "ask_user",
+          arguments: %{}
+        })
+
+      assistant_msg = Message.new_assistant!(%{tool_calls: [tool_call]})
+
+      tool_result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Waiting...",
+          is_interrupt: true,
+          interrupt_data: data
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [tool_result]})
+      initial_state = State.new!(%{messages: [assistant_msg, tool_msg]})
+
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil
+        )
+
+      assert {:ok, _server_pid, _ref} = AgentServer.subscribe_debug(agent_id)
+
+      # No snapshot on the debug channel — only :main carries status.
+      refute_receive {:agent, {:status_changed, _, _}}, 100
+    end
+  end
+
+  describe "add_message while :interrupted" do
+    alias LangChain.Message.ToolResult
+
+    test "demotes the pending interrupt and broadcasts :idle before the new turn" do
+      data = %{type: :ask_user_question, question: "Continue?"}
+
+      tool_call =
+        LangChain.Message.ToolCall.new!(%{
+          call_id: "call_1",
+          name: "ask_user",
+          arguments: %{}
+        })
+
+      assistant_msg = Message.new_assistant!(%{tool_calls: [tool_call]})
+
+      tool_result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Waiting for user...",
+          is_interrupt: true,
+          interrupt_data: data
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [tool_result]})
+
+      initial_state =
+        State.new!(%{
+          messages: [Message.new_user!("hi"), assistant_msg, tool_msg]
+        })
+
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+      test_pid = self()
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: nil,
+          initial_subscribers: [{:main, test_pid}]
+        )
+
+      # Sanity: boot says :interrupted (with tool_call_id enrichment).
+      enriched = Map.put(data, :tool_call_id, "call_1")
+      assert_receive {:agent, {:status_changed, :interrupted, ^enriched}}, 200
+
+      # Capture the state Agent.execute receives — it must already have the
+      # pending interrupt demoted to an error result before the chain runs.
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        send(test_pid, {:executed_with_state, state})
+        {:ok, state}
+      end)
+
+      # User sends a free-text message instead of answering — implicit
+      # cancellation of the pending interrupt.
+      :ok = AgentServer.add_message(agent_id, Message.new_user!("never mind"))
+
+      # The cancellation broadcast fires before execute is invoked.
+      assert_receive {:agent, {:status_changed, :idle, nil}}, 200
+
+      # Then the normal execute lifecycle.
+      assert_receive {:agent, {:status_changed, :running, nil}}, 200
+      assert_receive {:executed_with_state, state_seen_by_execute}, 500
+      assert_receive {:agent, {:status_changed, :idle, nil}}, 200
+
+      # The state passed to execute has the trailing tool result demoted to an
+      # error and the new user message appended.
+      messages = state_seen_by_execute.messages
+      tool_message = Enum.find(messages, &(&1.role == :tool))
+      [demoted] = tool_message.tool_results
+
+      refute demoted.is_interrupt
+      assert demoted.is_error
+      assert is_nil(demoted.interrupt_data)
+      assert demoted.content =~ "user did not respond"
+
+      # Server-level interrupt_data is cleared.
+      info = AgentServer.get_info(agent_id)
+      assert is_nil(info.interrupt_data)
+
+      # Last message is the new user message — conversation ends with user.
+      assert List.last(messages).role == :user
+    end
+  end
 end

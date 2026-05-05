@@ -88,6 +88,23 @@ defmodule Sagents.Publisher do
   The macro injects two `handle_call/3` clauses that match on
   `{:__publisher__, channel, :subscribe | :unsubscribe, pid}`. These clauses
   must come before any catch-all `handle_call/3` clause in the host.
+
+  The macro also injects a default no-op `on_subscribed/3` callback that the
+  host can override to send a state snapshot to a newly registered subscriber.
+  This is how late subscribers (e.g. a LiveView mounting after the producer
+  has already broadcast its initial state) get synced to the current state
+  without relying on out-of-band polling.
+
+      def on_subscribed(:main, subscriber_pid, state) do
+        send(subscriber_pid, {:agent, {:status_changed, state.status, state.data}})
+        state
+      end
+
+      def on_subscribed(_channel, _pid, state), do: state
+
+  The callback runs inside the subscribe `handle_call` *after* registration
+  but *before* the reply, so the snapshot is guaranteed to arrive at the
+  subscriber before any later broadcasts on the same channel.
   """
   defmacro __using__(opts) do
     state_field = Keyword.fetch!(opts, :state_field)
@@ -101,6 +118,7 @@ defmodule Sagents.Publisher do
         pub = Map.fetch!(state, @publisher_state_field)
         {ref, new_pub} = Sagents.Publisher.State.add(pub, channel, subscriber_pid)
         new_state = Map.put(state, @publisher_state_field, new_pub)
+        new_state = on_subscribed(channel, subscriber_pid, new_state)
         {:reply, {:ok, self(), ref}, new_state}
       end
 
@@ -111,6 +129,14 @@ defmodule Sagents.Publisher do
         new_state = Map.put(state, @publisher_state_field, new_pub)
         {:reply, :ok, new_state}
       end
+
+      @doc """
+      Hook fired after a subscriber is registered. Default no-op. Override
+      to send a snapshot of the current state to the new subscriber so it
+      can sync without polling.
+      """
+      def on_subscribed(_channel, _subscriber_pid, state), do: state
+      defoverridable on_subscribed: 3
     end
   end
 

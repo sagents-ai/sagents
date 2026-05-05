@@ -502,4 +502,56 @@ defmodule Sagents.State do
         interrupt_data: nil
     }
   end
+
+  defp demote(tr, :user_cancelled) do
+    %{
+      tr
+      | content:
+          "Tool execution was interrupted and the user did not respond. " <>
+            "They sent a new message instead — proceed with their new request.",
+        is_interrupt: false,
+        is_error: true,
+        interrupt_data: nil
+    }
+  end
+
+  @doc """
+  Demote every `is_interrupt: true` tool result in the message log to an
+  error result, signaling to the LLM that the user abandoned the pending
+  interrupt and that a new user message follows.
+
+  Used when a user sends a free-text message instead of resuming an
+  interrupted tool call (e.g. ignoring an `ask_user` question and asking
+  something different). Without this demotion the trailing interrupt
+  placeholder would remain in the conversation, causing the next LLM call
+  to be malformed (Anthropic rejects with "must end with a user message").
+
+  Also clears `state.interrupt_data` (the virtual field).
+
+  Idempotent: a state with no interrupts is unchanged.
+  """
+  @spec cancel_pending_interrupts(t()) :: t()
+  def cancel_pending_interrupts(%State{} = state) do
+    cancelled_messages =
+      Enum.map(state.messages, fn message ->
+        case message do
+          %LangChain.Message{role: :tool, tool_results: results} when is_list(results) ->
+            cancelled_results =
+              Enum.map(results, fn
+                %LangChain.Message.ToolResult{is_interrupt: true} = tr ->
+                  demote(tr, :user_cancelled)
+
+                other ->
+                  other
+              end)
+
+            %{message | tool_results: cancelled_results}
+
+          other ->
+            other
+        end
+      end)
+
+    %{state | messages: cancelled_messages, interrupt_data: nil}
+  end
 end

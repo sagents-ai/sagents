@@ -632,4 +632,105 @@ defmodule Sagents.StateTest do
       assert result.is_error
     end
   end
+
+  describe "cancel_pending_interrupts/1" do
+    alias LangChain.Message.ToolResult
+
+    test "demotes a single is_interrupt: true tool result with the cancellation message" do
+      result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Waiting...",
+          is_interrupt: true,
+          interrupt_data: %{type: :ask_user_question, question: "?"}
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [result]})
+      state = State.new!(%{messages: [tool_msg]})
+
+      cancelled = State.cancel_pending_interrupts(state)
+
+      [tool_msg] = cancelled.messages
+      [result] = tool_msg.tool_results
+
+      refute result.is_interrupt
+      assert result.is_error
+      assert is_nil(result.interrupt_data)
+      assert result.content =~ "user did not respond"
+      assert result.content =~ "proceed with their new request"
+    end
+
+    test "demotes every interrupt in a tool message with multiple results" do
+      r1 =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Q1?",
+          is_interrupt: true,
+          interrupt_data: %{type: :ask_user_question, question: "Q1"}
+        })
+
+      r2 =
+        ToolResult.new!(%{
+          tool_call_id: "call_2",
+          name: "ask_user",
+          content: "Q2?",
+          is_interrupt: true,
+          interrupt_data: %{type: :ask_user_question, question: "Q2"}
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [r1, r2]})
+      state = State.new!(%{messages: [tool_msg]})
+
+      cancelled = State.cancel_pending_interrupts(state)
+
+      [tool_msg] = cancelled.messages
+      [c1, c2] = tool_msg.tool_results
+
+      refute c1.is_interrupt
+      refute c2.is_interrupt
+      assert c1.is_error
+      assert c2.is_error
+    end
+
+    test "leaves non-interrupt tool results untouched" do
+      normal =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "search",
+          content: "results"
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [normal]})
+      state = State.new!(%{messages: [tool_msg]})
+
+      cancelled = State.cancel_pending_interrupts(state)
+
+      [tool_msg] = cancelled.messages
+      [result] = tool_msg.tool_results
+
+      refute result.is_interrupt
+      refute result.is_error
+    end
+
+    test "clears state.interrupt_data (the virtual field)" do
+      state =
+        State.new!(%{
+          messages: [],
+          interrupt_data: %{type: :ask_user_question, question: "?"}
+        })
+
+      cancelled = State.cancel_pending_interrupts(state)
+
+      assert is_nil(cancelled.interrupt_data)
+    end
+
+    test "is a no-op when no interrupts are pending" do
+      state = State.new!(%{messages: [Message.new_user!("hello")]})
+      cancelled = State.cancel_pending_interrupts(state)
+      assert cancelled.messages == state.messages
+      assert is_nil(cancelled.interrupt_data)
+    end
+  end
 end
