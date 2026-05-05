@@ -977,7 +977,7 @@ defmodule Sagents.AgentServerTest do
 
       # Subscribe to both main and debug channels
       {:ok, _pid, _ref} = AgentServer.subscribe(agent_id)
-      AgentServer.subscribe_debug(agent_id)
+      AgentServer.subscribe(agent_id, :debug)
 
       {:ok, agent: agent, agent_id: agent_id}
     end
@@ -1154,7 +1154,7 @@ defmodule Sagents.AgentServerTest do
         )
 
       # Subscribe to debug events
-      AgentServer.subscribe_debug(agent_id)
+      AgentServer.subscribe(agent_id, :debug)
 
       # Publish a middleware action debug event
       test_event = {:middleware_action, TestMiddleware, {:test_action, "test_data"}}

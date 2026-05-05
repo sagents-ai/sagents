@@ -114,7 +114,7 @@ defmodule Sagents.Subscriber do
     key = {:agent, agent_id}
 
     do_subscribe(subs, key, channel, fn ->
-      Publisher.subscribe(AgentServer.get_name(agent_id), channel, subscriber_pid)
+      AgentServer.subscribe(agent_id, channel, subscriber_pid)
     end)
   end
 
