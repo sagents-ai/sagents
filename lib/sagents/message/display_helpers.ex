@@ -180,8 +180,7 @@ defmodule Sagents.Message.DisplayHelpers do
     # Extract text from ContentParts
     content
     |> Enum.filter(fn part -> part.type == :text end)
-    |> Enum.map(fn part -> part.content end)
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", fn part -> part.content end)
   end
 
   defp extract_tool_result_content(_), do: ""

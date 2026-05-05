@@ -343,14 +343,13 @@ defmodule Sagents.Middleware.SubAgent do
     bullets =
       descriptions
       |> Enum.sort_by(fn {name, _} -> name end)
-      |> Enum.map(fn {name, desc} ->
+      |> Enum.map_join("\n", fn {name, desc} ->
         if Map.has_key?(use_instructions_map, name) do
           "- #{name}: #{desc} Call `get_task_instructions(\"#{name}\")` for the full usage guide before invoking."
         else
           "- #{name}: #{desc}"
         end
       end)
-      |> Enum.join("\n")
 
     "## Available Tasks\n\n" <> bullets <> "\n"
   end

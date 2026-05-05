@@ -651,15 +651,11 @@ defmodule Sagents.SubAgentServer do
 
   # Extract a friendly name from the subagent
   defp get_subagent_name(subagent) do
-    cond do
-      # Check if chain has a name in custom_context
-      subagent.chain && is_map(subagent.chain.custom_context) &&
-          Map.get(subagent.chain.custom_context, :config_name) ->
-        subagent.chain.custom_context.config_name
-
-      # Default to general-purpose
-      true ->
-        "general-purpose"
+    if subagent.chain && is_map(subagent.chain.custom_context) &&
+         Map.get(subagent.chain.custom_context, :config_name) do
+      subagent.chain.custom_context.config_name
+    else
+      "general-purpose"
     end
   end
 

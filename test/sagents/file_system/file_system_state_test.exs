@@ -403,7 +403,7 @@ defmodule Sagents.FileSystem.FileSystemStateTest do
         FileSystemConfig.new(%{
           base_directory: "user_files",
           persistence_module: TestPersistence6,
-          debounce_ms: 10000
+          debounce_ms: 10_000
         })
 
       assert {:error, reason} = FileSystemState.register_persistence(state, config2)

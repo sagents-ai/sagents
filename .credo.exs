@@ -106,7 +106,9 @@
           {Credo.Check.Readability.ParenthesesInCondition, []},
           {Credo.Check.Readability.ParenthesesOnZeroArityDefs, []},
           {Credo.Check.Readability.PipeIntoAnonymousFunctions, []},
-          {Credo.Check.Readability.PredicateFunctionNames, []},
+          # PredicateFunctionNames disabled: existing public APIs use is_* names
+          # that we don't want to break for stylistic reasons.
+          # {Credo.Check.Readability.PredicateFunctionNames, []},
           {Credo.Check.Readability.PreferImplicitTry, []},
           {Credo.Check.Readability.RedundantBlankLines, []},
           {Credo.Check.Readability.Semicolons, []},
@@ -170,6 +172,11 @@
           # Disabled because "TODO" is part of this codebase's domain language
           # (Sagents.Todo, Sagents.Middleware.TodoList — AI-managed task lists).
           {Credo.Check.Design.TagTODO, []},
+
+          #
+          # Disabled to preserve existing public API names like `is_*?` that
+          # would be breaking changes to rename.
+          {Credo.Check.Readability.PredicateFunctionNames, []},
 
           #
           # Checks scheduled for next check update (opt-in for now)

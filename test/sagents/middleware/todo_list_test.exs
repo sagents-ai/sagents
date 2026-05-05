@@ -224,7 +224,7 @@ defmodule Sagents.Middleware.TodoListTest do
 
       assert length(state_after_second_call.todos) == 6,
              "Expected 6 todos after merge, but got #{length(state_after_second_call.todos)}. " <>
-               "IDs present: #{Enum.map(state_after_second_call.todos, & &1.id) |> Enum.join(", ")}"
+               "IDs present: #{Enum.map_join(state_after_second_call.todos, ", ", & &1.id)}"
 
       # Verify todo 1 was updated to completed
       todo1 = Enum.find(state_after_second_call.todos, &(&1.id == "1"))

@@ -334,8 +334,7 @@ defmodule Sagents.Middleware.TodoList do
         summary =
           todos
           |> Enum.group_by(& &1.status)
-          |> Enum.map(fn {status, items} -> "#{length(items)} #{status}" end)
-          |> Enum.join(", ")
+          |> Enum.map_join(", ", fn {status, items} -> "#{length(items)} #{status}" end)
 
         "Successfully #{mode} #{count} TODO(s): #{summary}"
     end

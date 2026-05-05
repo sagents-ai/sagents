@@ -207,10 +207,7 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
       last_msg = List.last(final_state.messages)
       assert last_msg.role == :assistant
 
-      last_text =
-        last_msg.content
-        |> Enum.map(& &1.content)
-        |> Enum.join()
+      last_text = Enum.map_join(last_msg.content, "", & &1.content)
 
       assert last_text =~ "written"
     end

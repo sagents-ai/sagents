@@ -316,10 +316,7 @@ defmodule Sagents.Middleware.HumanInTheLoop do
           interrupt_data = build_interrupt_data(interrupt_requests, config.interrupt_on)
 
           # Broadcast debug event for interrupt
-          tool_names =
-            interrupt_data.action_requests
-            |> Enum.map(& &1.tool_name)
-            |> Enum.join(", ")
+          tool_names = Enum.map_join(interrupt_data.action_requests, ", ", & &1.tool_name)
 
           AgentServer.publish_debug_event_from(
             state.agent_id,

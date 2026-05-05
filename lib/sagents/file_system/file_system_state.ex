@@ -685,8 +685,7 @@ defmodule Sagents.FileSystem.FileSystemState do
     # Generic handler for any other scope types
     scope_key
     |> Tuple.to_list()
-    |> Enum.map(&to_string/1)
-    |> Enum.join(":")
+    |> Enum.map_join(":", &to_string/1)
   end
 
   defp scope_key_to_agent_id(scope_key) when is_binary(scope_key) do

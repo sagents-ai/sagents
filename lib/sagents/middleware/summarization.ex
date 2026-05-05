@@ -353,9 +353,7 @@ defmodule Sagents.Middleware.Summarization do
   defp get_model_from_state(_), do: nil
 
   defp messages_to_text(messages) do
-    messages
-    |> Enum.map(&SummarizeConversationChain.for_summary_text/1)
-    |> Enum.join("\n")
+    Enum.map_join(messages, "\n", &SummarizeConversationChain.for_summary_text/1)
   end
 
   defp create_summary_messages(summary_text) do

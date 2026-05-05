@@ -213,7 +213,7 @@ defmodule PatchToolCallsIntegrationTest do
 
       # Create messages with metadata
       user_msg = Message.new_user!("Test")
-      user_msg = %{user_msg | metadata: %{source: "test", timestamp: 12345}}
+      user_msg = %{user_msg | metadata: %{source: "test", timestamp: 12_345}}
 
       assistant_msg = Message.new_assistant!(%{tool_calls: [tool_call]})
       assistant_msg = %{assistant_msg | metadata: %{model: "test-model"}}
@@ -236,7 +236,7 @@ defmodule PatchToolCallsIntegrationTest do
         Enum.find(processed_state.messages, fn m -> m.metadata[:source] == "test" end)
 
       assert patched_user != nil
-      assert patched_user.metadata[:timestamp] == 12345
+      assert patched_user.metadata[:timestamp] == 12_345
 
       patched_assistant =
         Enum.find(processed_state.messages, fn m -> m.metadata[:model] == "test-model" end)

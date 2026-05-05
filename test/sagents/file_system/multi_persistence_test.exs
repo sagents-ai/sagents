@@ -121,7 +121,7 @@ defmodule Sagents.FileSystem.MultiPersistenceTest do
         FileSystemConfig.new(%{
           base_directory: "user_files",
           persistence_module: Persistence.Disk,
-          debounce_ms: 10000,
+          debounce_ms: 10_000,
           storage_opts: [path: tmp_dir]
         })
 

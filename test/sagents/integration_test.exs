@@ -420,7 +420,7 @@ defmodule Sagents.IntegrationTest do
       # because the custom_context.state is not updated between tool calls
       assert length(final_state.todos) == 6,
              "Expected 6 todos (bug: got #{length(final_state.todos)}). " <>
-               "IDs: #{Enum.map(final_state.todos, & &1.id) |> Enum.join(", ")}"
+               "IDs: #{Enum.map_join(final_state.todos, ", ", & &1.id)}"
 
       # Verify todos 1 and 2 were updated
       todo1 = Enum.find(final_state.todos, &(&1.id == "1"))

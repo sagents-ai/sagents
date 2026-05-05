@@ -966,9 +966,7 @@ defmodule Sagents.Middleware.FileSystemTest do
   describe "find_in_file tool - max_results limiting" do
     test "limits results to max_results parameter", %{agent_id: agent_id} do
       # Create a file with many matches
-      content =
-        Enum.map(1..100, fn i -> "Line #{i}: MATCH #{i}" end)
-        |> Enum.join("\n")
+      content = Enum.map_join(1..100, "\n", fn i -> "Line #{i}: MATCH #{i}" end)
 
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", content)
 
@@ -991,9 +989,7 @@ defmodule Sagents.Middleware.FileSystemTest do
 
     test "shows truncation notice when results exceed max_results", %{agent_id: agent_id} do
       # Create a file with many matches
-      content =
-        Enum.map(1..60, fn i -> "Line #{i}: MATCH #{i}" end)
-        |> Enum.join("\n")
+      content = Enum.map_join(1..60, "\n", fn i -> "Line #{i}: MATCH #{i}" end)
 
       FileSystemServer.write_file({:agent, agent_id}, "/test.txt", content)
 

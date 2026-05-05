@@ -383,7 +383,7 @@ defmodule Sagents.FileSystemServerTest do
 
       config =
         make_config(TestPersistence4, "Memories",
-          debounce_ms: 10000,
+          debounce_ms: 10_000,
           storage_opts: [test_pid: test_pid]
         )
 
@@ -531,7 +531,7 @@ defmodule Sagents.FileSystemServerTest do
 
       Process.register(self(), :test_process)
 
-      config = make_config(TestPersistence6, "Memories", debounce_ms: 10000)
+      config = make_config(TestPersistence6, "Memories", debounce_ms: 10_000)
 
       {:ok, pid} =
         FileSystemServer.start_link(

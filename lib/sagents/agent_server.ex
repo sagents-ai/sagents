@@ -1697,13 +1697,7 @@ defmodule Sagents.AgentServer do
     Logger.info("Updating agent configuration and state for #{new_agent.agent_id}")
 
     # Validate that state has agent_id set (critical for middleware functionality)
-    unless new_state.agent_id do
-      error_msg =
-        "State.agent_id is nil. When deserializing state, you must provide agent_id: State.from_serialized(agent_id, data)"
-
-      Logger.error(error_msg)
-      {:reply, {:error, error_msg}, server_state}
-    else
+    if new_state.agent_id do
       # Update both agent and state atomically
       updated_state = %{server_state | agent: new_agent, state: new_state}
 
@@ -1711,6 +1705,12 @@ defmodule Sagents.AgentServer do
       broadcast_event(updated_state, {:state_restored, new_state})
 
       {:reply, :ok, updated_state}
+    else
+      error_msg =
+        "State.agent_id is nil. When deserializing state, you must provide agent_id: State.from_serialized(agent_id, data)"
+
+      Logger.error(error_msg)
+      {:reply, {:error, error_msg}, server_state}
     end
   end
 

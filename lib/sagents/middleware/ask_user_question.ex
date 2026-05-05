@@ -592,27 +592,25 @@ defmodule Sagents.Middleware.AskUserQuestion do
       selected when is_list(selected) and selected != [] ->
         has_other? = Enum.any?(selected, &special_other?(&1, q.options))
 
-        cond do
-          has_other? and not Map.get(q, :allow_other, false) ->
-            {:error, :other_not_allowed}
+        if has_other? and not Map.get(q, :allow_other, false) do
+          {:error, :other_not_allowed}
+        else
+          regular = Enum.reject(selected, &special_other?(&1, q.options))
+          labels_csv = Enum.map_join(regular, ", ", &lookup_label(q.options, &1))
 
-          true ->
-            regular = Enum.reject(selected, &special_other?(&1, q.options))
-            labels_csv = regular |> Enum.map(&lookup_label(q.options, &1)) |> Enum.join(", ")
+          text =
+            if has_other? do
+              other_text = Map.get(response, :other_text, "")
 
-            text =
-              if has_other? do
-                other_text = Map.get(response, :other_text, "")
-
-                case labels_csv do
-                  "" -> "Other:  \n#{other_text}"
-                  csv -> "#{csv}  \nOther:  \n#{other_text}"
-                end
-              else
-                labels_csv
+              case labels_csv do
+                "" -> "Other:  \n#{other_text}"
+                csv -> "#{csv}  \nOther:  \n#{other_text}"
               end
+            else
+              labels_csv
+            end
 
-            {:ok, user_text_attrs(text)}
+          {:ok, user_text_attrs(text)}
         end
 
       _ ->
@@ -655,8 +653,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
 
   defp build_system_prompt(response_types) do
     type_instructions =
-      response_types
-      |> Enum.map(fn
+      Enum.map_join(response_types, "\n", fn
         :single_select ->
           """
           - **single_select**: Use when the user should pick exactly one option from a list.
@@ -676,7 +673,6 @@ defmodule Sagents.Middleware.AskUserQuestion do
             Do NOT provide options for freeform questions.
           """
       end)
-      |> Enum.join("\n")
 
     """
     ## ask_user Tool
