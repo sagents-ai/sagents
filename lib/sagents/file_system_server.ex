@@ -137,7 +137,7 @@ defmodule Sagents.FileSystemServer do
   @spec whereis(term()) :: pid() | nil
   def whereis(scope_key) do
     case ProcessRegistry.lookup({:filesystem_server, scope_key}) do
-      [{pid, _}] -> pid
+      [{pid, _value}] -> pid
       [] -> nil
     end
   end

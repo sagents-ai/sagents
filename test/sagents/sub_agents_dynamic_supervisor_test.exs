@@ -176,7 +176,7 @@ defmodule Sagents.SubAgentsDynamicSupervisorTest do
       {:ok, sup_pid} = SubAgentsDynamicSupervisor.start_link(agent_id: agent_id)
 
       # Check Registry lookup
-      assert [{^sup_pid, _}] =
+      assert [{^sup_pid, _value}] =
                Sagents.ProcessRegistry.lookup({:sub_agents_supervisor, agent_id})
 
       # Clean up

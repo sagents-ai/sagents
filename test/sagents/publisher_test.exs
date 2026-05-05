@@ -99,11 +99,11 @@ defmodule Sagents.PublisherTest do
     test "channels are independent" do
       {:ok, server} = TestProducer.start_link()
 
-      {:ok, ^server, _} = Publisher.subscribe(server, :main)
+      {:ok, ^server, _ref} = Publisher.subscribe(server, :main)
       TestProducer.emit(server, :debug, :debug_event)
       refute_receive :debug_event, 50
 
-      {:ok, ^server, _} = Publisher.subscribe(server, :debug)
+      {:ok, ^server, _ref} = Publisher.subscribe(server, :debug)
       TestProducer.emit(server, :debug, :debug_event_2)
       assert_receive :debug_event_2, 100
     end
@@ -146,7 +146,7 @@ defmodule Sagents.PublisherTest do
         end)
 
       # Wait for subscribe to be processed
-      _ = TestProducer.get_publisher(server)
+      _publisher = TestProducer.get_publisher(server)
       pub = TestProducer.get_publisher(server)
       assert PubState.count(pub) == 1
 

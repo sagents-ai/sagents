@@ -222,7 +222,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
         try do
           AgentServer.save_synthetic_message_from(agent_id, attrs)
         catch
-          :exit, _ -> :ok
+          :exit, _reason -> :ok
         end
 
       {:error, _reason} ->
@@ -326,7 +326,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
       nil -> {:error, "Missing required field: question"}
       q when is_binary(q) and byte_size(q) > 0 -> {:ok, q}
       "" -> {:error, "Question must be a non-empty string"}
-      _ -> {:error, "Question must be a string"}
+      _other -> {:error, "Question must be a string"}
     end
   end
 
@@ -358,7 +358,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
             {:ok, type_atom}
         end
 
-      _ ->
+      _other ->
         {:error, "response_type must be a string"}
     end
   end
@@ -424,7 +424,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
            }
          end)}
 
-      {:error, _} = error ->
+      {:error, _reason} = error ->
         error
     end
   end
@@ -432,7 +432,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
   defp get_boolean_arg(args, key, default) do
     case Map.get(args, key) do
       val when is_boolean(val) -> val
-      _ -> default
+      _other -> default
     end
   end
 
@@ -462,7 +462,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
           {:error, "Cancellation is not allowed for this question"}
         end
 
-      _ ->
+      _other ->
         {:error, "Invalid response format. Expected %{type: :answer, ...} or %{type: :cancel}"}
     end
   end
@@ -517,7 +517,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
       if has_special_other?, do: Enum.reject(selected, &(&1 == "other")), else: selected
 
     cond do
-      not is_list(selected) or length(selected) == 0 ->
+      not is_list(selected) or selected == [] ->
         {:error, "multi_select requires at least one selection"}
 
       has_special_other? and not question_data.allow_other ->
@@ -549,7 +549,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
       "" ->
         {:error, "freeform response text must not be empty"}
 
-      _ ->
+      _other ->
         {:error, "freeform 'other_text' must be a string"}
     end
   end
@@ -573,7 +573,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
   def user_facing_attrs(%{type: :answer} = response, %{response_type: :freeform}) do
     case Map.get(response, :other_text) do
       text when is_binary(text) and byte_size(text) > 0 -> {:ok, user_text_attrs(text)}
-      _ -> {:error, :empty_freeform}
+      _other -> {:error, :empty_freeform}
     end
   end
 
@@ -592,7 +592,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
             {:ok, user_text_attrs(lookup_label(q.options, value))}
         end
 
-      _ ->
+      _other ->
         {:error, :invalid_single_select}
     end
   end
@@ -600,42 +600,36 @@ defmodule Sagents.Middleware.AskUserQuestion do
   def user_facing_attrs(%{type: :answer} = response, %{response_type: :multi_select} = q) do
     case Map.get(response, :selected, []) do
       selected when is_list(selected) and selected != [] ->
-        has_other? = Enum.any?(selected, &special_other?(&1, q.options))
+        build_multi_select_attrs(response, q, selected)
 
-        cond do
-          has_other? and not Map.get(q, :allow_other, false) ->
-            {:error, :other_not_allowed}
-
-          true ->
-            regular = Enum.reject(selected, &special_other?(&1, q.options))
-            labels_csv = regular |> Enum.map(&lookup_label(q.options, &1)) |> Enum.join(", ")
-
-            text =
-              if has_other? do
-                other_text = Map.get(response, :other_text, "")
-
-                case labels_csv do
-                  "" -> "Other:  \n#{other_text}"
-                  csv -> "#{csv}  \nOther:  \n#{other_text}"
-                end
-              else
-                labels_csv
-              end
-
-            {:ok, user_text_attrs(text)}
-        end
-
-      _ ->
+      _other ->
         {:error, :invalid_multi_select}
     end
   end
 
   def user_facing_attrs(_response, _question_data), do: {:error, :invalid_response}
 
+  defp build_multi_select_attrs(response, q, selected) do
+    has_other? = Enum.any?(selected, &special_other?(&1, q.options))
+
+    if has_other? and not Map.get(q, :allow_other, false) do
+      {:error, :other_not_allowed}
+    else
+      regular = Enum.reject(selected, &special_other?(&1, q.options))
+      labels_csv = Enum.map_join(regular, ", ", &lookup_label(q.options, &1))
+      other_text = if has_other?, do: Map.get(response, :other_text, ""), else: nil
+      {:ok, user_text_attrs(format_multi_select(labels_csv, other_text))}
+    end
+  end
+
+  defp format_multi_select(labels_csv, nil), do: labels_csv
+  defp format_multi_select("", other_text), do: "Other:  \n#{other_text}"
+  defp format_multi_select(csv, other_text), do: "#{csv}  \nOther:  \n#{other_text}"
+
   defp lookup_label(options, value) do
     case Enum.find(options, &(&1.value == value)) do
       %{label: label} when is_binary(label) -> label
-      _ -> value
+      _other -> value
     end
   end
 
@@ -665,8 +659,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
 
   defp build_system_prompt(response_types) do
     type_instructions =
-      response_types
-      |> Enum.map(fn
+      Enum.map_join(response_types, "\n", fn
         :single_select ->
           """
           - **single_select**: Use when the user should pick exactly one option from a list.
@@ -686,7 +679,6 @@ defmodule Sagents.Middleware.AskUserQuestion do
             Do NOT provide options for freeform questions.
           """
       end)
-      |> Enum.join("\n")
 
     """
     ## ask_user Tool

@@ -50,8 +50,26 @@ defmodule Sagents.Publisher do
   and receive the wrapped events as ordinary process messages. The producer
   monitors each subscriber to clean up on death.
 
-  See `Sagents.Subscriber` for the LiveView/GenServer-side helpers that capture
-  the monitor + Presence + auto-resubscribe loop.
+  ## Typical entry points
+
+  Most consumers should not call `Publisher.subscribe/3` directly — there are
+  higher-level wrappers that take an agent id (or filesystem scope key) and
+  resolve the via-tuple internally:
+
+    * `Sagents.AgentServer.subscribe/3` — `subscribe(agent_id, channel \\ :main,
+      subscriber_pid \\ nil)`. Covers the common case of subscribing `self()`
+      to `:main`, plus `:debug` (used by `sagents_live_debugger`) and
+      foreign-pid subscribers (e.g. a bridge GenServer proxying events to
+      another transport).
+    * `Sagents.FileSystemServer.subscribe/1` — same shape for filesystem
+      change events.
+    * `Sagents.Subscriber` — for hosts (LiveView, GenServer) that need
+      crash-recovery + Phoenix.Presence-driven re-subscription. Wraps the
+      AgentServer/FileSystemServer entry points and threads a subs map
+      through the host's state.
+
+  Reach for `Publisher.subscribe/3` directly only when implementing a new
+  producer module that needs to expose its own `subscribe/N` shorthand.
 
   ## Returned subscription handle
 
@@ -165,7 +183,7 @@ defmodule Sagents.Publisher do
     try do
       GenServer.call(server, {:__publisher__, channel, :subscribe, pid})
     catch
-      :exit, _ -> {:error, :process_not_found}
+      :exit, _reason -> {:error, :process_not_found}
     end
   end
 
@@ -182,7 +200,7 @@ defmodule Sagents.Publisher do
     try do
       GenServer.call(server, {:__publisher__, channel, :unsubscribe, pid})
     catch
-      :exit, _ -> :ok
+      :exit, _reason -> :ok
     end
   end
 

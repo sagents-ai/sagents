@@ -72,7 +72,7 @@ defmodule Mix.Tasks.Sagents.Setup do
   @impl Mix.Task
   def run(args) do
     # Parse arguments
-    {opts, parsed, _} = OptionParser.parse(args, switches: @switches, aliases: @aliases)
+    {opts, parsed, _invalid} = OptionParser.parse(args, switches: @switches, aliases: @aliases)
 
     # Validate context argument
     context_module = parse_context!(parsed)
@@ -113,7 +113,7 @@ defmodule Mix.Tasks.Sagents.Setup do
     prompt_live_helpers(config)
   end
 
-  defp parse_context!([context | _]) do
+  defp parse_context!([context | _rest]) do
     # Validate module name format
     unless context =~ ~r/^[A-Z][A-Za-z0-9.]*$/ do
       Mix.raise("Context module must be a valid Elixir module name")
@@ -129,10 +129,7 @@ defmodule Mix.Tasks.Sagents.Setup do
   end
 
   defp build_config(context_module, opts) do
-    # Infer application from context
     app = infer_app(context_module)
-
-    # Get or prompt for scope module
     scope_module = opts[:scope] || prompt_scope() || Mix.raise("Scope module is required")
 
     %{
@@ -140,20 +137,44 @@ defmodule Mix.Tasks.Sagents.Setup do
       context_name: context_name(context_module),
       app: app,
       app_module: app_module(app),
-      scope_module: scope_module,
-      owner_type: opts[:owner_type] || "user",
+      scope_module: scope_module
+    }
+    |> Map.merge(owner_config(app, opts))
+    |> Map.merge(infrastructure_config(app, opts))
+    |> Map.merge(generated_module_config(app, opts))
+  end
+
+  defp owner_config(app, opts) do
+    owner_type = opts[:owner_type] || "user"
+
+    %{
+      owner_type: owner_type,
       owner_field: opts[:owner_field] || "user_id",
-      owner_module: opts[:owner_module] || infer_owner_module(app, opts[:owner_type] || "user"),
+      owner_module: opts[:owner_module] || infer_owner_module(app, owner_type)
+    }
+  end
+
+  defp infrastructure_config(app, opts) do
+    app_mod = app_module(app)
+
+    %{
       table_prefix: opts[:table_prefix] || "sagents_",
-      repo: opts[:repo] || "#{app_module(app)}.Repo",
-      web: opts[:web] || "#{app_module(app)}Web",
-      factory_module: opts[:factory] || "#{app_module(app)}.Agents.Factory",
-      coordinator_module: opts[:coordinator] || "#{app_module(app)}.Agents.Coordinator",
-      agent_persistence_module: "#{app_module(app)}.Agents.AgentPersistence",
-      agent_subscriber_session_module: "#{app_module(app)}.Agents.AgentSubscriberSession",
-      display_message_persistence_module: "#{app_module(app)}.Agents.DisplayMessagePersistence",
-      pubsub_module: opts[:pubsub] || "#{app_module(app)}.PubSub",
-      presence_module: opts[:presence] || "#{app_module(app)}Web.Presence"
+      repo: opts[:repo] || "#{app_mod}.Repo",
+      web: opts[:web] || "#{app_mod}Web",
+      pubsub_module: opts[:pubsub] || "#{app_mod}.PubSub",
+      presence_module: opts[:presence] || "#{app_mod}Web.Presence"
+    }
+  end
+
+  defp generated_module_config(app, opts) do
+    app_mod = app_module(app)
+
+    %{
+      factory_module: opts[:factory] || "#{app_mod}.Agents.Factory",
+      coordinator_module: opts[:coordinator] || "#{app_mod}.Agents.Coordinator",
+      agent_persistence_module: "#{app_mod}.Agents.AgentPersistence",
+      agent_subscriber_session_module: "#{app_mod}.Agents.AgentSubscriberSession",
+      display_message_persistence_module: "#{app_mod}.Agents.DisplayMessagePersistence"
     }
   end
 

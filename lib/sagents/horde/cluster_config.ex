@@ -119,7 +119,7 @@ defmodule Sagents.Horde.ClusterConfig do
   defp in_region?(node, expected_region) do
     case :rpc.call(node, :persistent_term, :get, [{:sagents_region, node}, nil]) do
       ^expected_region -> true
-      _ -> false
+      _other -> false
     end
   end
 
@@ -166,5 +166,5 @@ defmodule Sagents.Horde.ClusterConfig do
   end
 
   defp valid_member_tuple?({mod, node}) when is_atom(mod) and is_atom(node), do: true
-  defp valid_member_tuple?(_), do: false
+  defp valid_member_tuple?(_other), do: false
 end

@@ -56,7 +56,7 @@ defmodule Sagents.Persistence.StateSerializerTest do
       assert %{"content" => "Task 1", "status" => "in_progress"} = first_todo
 
       # Check metadata is serialized with string keys
-      assert %{"session_id" => _} = metadata
+      assert %{"session_id" => _session_id} = metadata
     end
 
     test "handles empty state" do
@@ -96,9 +96,9 @@ defmodule Sagents.Persistence.StateSerializerTest do
 
       # All keys should be strings, check structure and values
       assert %{
-               "call_id" => _,
-               "type" => _,
-               "name" => _,
+               "call_id" => _call_id,
+               "type" => _type,
+               "name" => _name,
                "arguments" => %{"expression" => "2 + 2"}
              } = serialized_call
     end

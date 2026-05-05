@@ -175,21 +175,9 @@ defmodule Sagents.FileSystem.FileSystemState do
           # mark them clean so the dirty flag stays meaningful.
           entry = if config, do: entry, else: FileEntry.mark_clean(entry)
 
-          # Add to files map
           new_files = Map.put(state.files, path, entry)
-          new_state = %{state | files: new_files}
-
-          # New files persist immediately; edits to existing files are debounced
-          new_state =
-            if config do
-              if is_new_file do
-                persist_file_now(new_state, path, config)
-              else
-                schedule_persist(new_state, path, config)
-              end
-            else
-              new_state
-            end
+          state_with_entry = %{state | files: new_files}
+          new_state = persist_or_schedule(state_with_entry, path, config, is_new_file)
 
           # Return the entry as it is in state (may have been updated by persist_file_now)
           final_entry = Map.get(new_state.files, path)
@@ -200,6 +188,12 @@ defmodule Sagents.FileSystem.FileSystemState do
       end
     end
   end
+
+  # New files persist immediately; edits to existing files are debounced.
+  # Memory-only files (no config) have nothing to do.
+  defp persist_or_schedule(state, _path, nil, _is_new_file), do: state
+  defp persist_or_schedule(state, path, config, true), do: persist_file_now(state, path, config)
+  defp persist_or_schedule(state, path, config, false), do: schedule_persist(state, path, config)
 
   @doc """
   Reads a file entry from the filesystem state.
@@ -257,25 +251,27 @@ defmodule Sagents.FileSystem.FileSystemState do
         %FileEntry{} = entry ->
           # Cancel any pending timer
           new_state = cancel_timer(state, path)
-
-          # Delete from storage immediately if we have a config
-          if config do
-            opts = FileSystemConfig.build_storage_opts(config, state.scope_key)
-
-            case config.persistence_module.delete_from_storage(entry, opts) do
-              :ok ->
-                new_files = Map.delete(new_state.files, path)
-                {:ok, %{new_state | files: new_files}}
-
-              {:error, reason} ->
-                Logger.error("Failed to delete #{path} from storage: #{inspect(reason)}")
-                {:error, reason, state}
-            end
-          else
-            new_files = Map.delete(new_state.files, path)
-            {:ok, %{new_state | files: new_files}}
-          end
+          delete_with_persistence(new_state, path, entry, config, state)
       end
+    end
+  end
+
+  defp delete_with_persistence(new_state, path, _entry, nil, _orig_state) do
+    new_files = Map.delete(new_state.files, path)
+    {:ok, %{new_state | files: new_files}}
+  end
+
+  defp delete_with_persistence(new_state, path, entry, config, orig_state) do
+    opts = FileSystemConfig.build_storage_opts(config, new_state.scope_key)
+
+    case config.persistence_module.delete_from_storage(entry, opts) do
+      :ok ->
+        new_files = Map.delete(new_state.files, path)
+        {:ok, %{new_state | files: new_files}}
+
+      {:error, reason} ->
+        Logger.error("Failed to delete #{path} from storage: #{inspect(reason)}")
+        {:error, reason, orig_state}
     end
   end
 
@@ -306,55 +302,67 @@ defmodule Sagents.FileSystem.FileSystemState do
 
   def move_file(%FileSystemState{} = state, old_path, new_path) do
     config = find_config_for_path(state, old_path)
+
+    with :ok <- validate_move(state, old_path, new_path, config),
+         {:ok, affected} <- collect_move_entries(state, old_path),
+         :ok <- check_move_conflicts(state, affected, old_path, new_path) do
+      do_move_entries(state, affected, old_path, new_path, config)
+    else
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp validate_move(state, old_path, new_path, config) do
     new_config = find_config_for_path(state, new_path)
 
     cond do
       config && config.readonly ->
-        {:error, "Cannot move from read-only directory: #{config.base_directory}", state}
+        {:error, "Cannot move from read-only directory: #{config.base_directory}"}
 
       new_config && new_config.readonly ->
-        {:error, "Cannot move to read-only directory: #{new_config.base_directory}", state}
+        {:error, "Cannot move to read-only directory: #{new_config.base_directory}"}
 
       !same_persistence_config?(state, old_path, new_path) ->
         base_dir = if config, do: "/#{config.base_directory}", else: "the current directory"
 
         {:error,
          "Cannot move files across different storage backends. " <>
-           "The file can only be moved within #{base_dir}.", state}
+           "The file can only be moved within #{base_dir}."}
 
       true ->
-        # Collect the entry at old_path (if any) and all children under the prefix.
-        # This supports both single-file moves and bulk renames of a path prefix
-        # (the latter is what "rename a directory" reduces to once directory
-        # entries are gone).
-        affected =
-          state.files
-          |> Enum.filter(fn {path, _} ->
-            path == old_path or String.starts_with?(path, old_path <> "/")
-          end)
-          |> Enum.sort_by(fn {path, _} -> String.length(path) end)
-
-        case affected do
-          [] ->
-            {:error, :enoent, state}
-
-          _ ->
-            # Check target doesn't conflict (except with entries we're moving)
-            moving_paths = MapSet.new(affected, fn {path, _} -> path end)
-
-            conflict =
-              Enum.any?(affected, fn {path, _} ->
-                target = String.replace_prefix(path, old_path, new_path)
-                Map.has_key?(state.files, target) and not MapSet.member?(moving_paths, target)
-              end)
-
-            if conflict do
-              {:error, :already_exists, state}
-            else
-              do_move_entries(state, affected, old_path, new_path, config)
-            end
-        end
+        :ok
     end
+  end
+
+  # Collect the entry at old_path (if any) and all children under the prefix.
+  # This supports both single-file moves and bulk renames of a path prefix
+  # (the latter is what "rename a directory" reduces to once directory
+  # entries are gone).
+  defp collect_move_entries(state, old_path) do
+    affected =
+      state.files
+      |> Enum.filter(fn {path, _entry} ->
+        path == old_path or String.starts_with?(path, old_path <> "/")
+      end)
+      |> Enum.sort_by(fn {path, _entry} -> String.length(path) end)
+
+    case affected do
+      [] -> {:error, :enoent}
+      _other -> {:ok, affected}
+    end
+  end
+
+  # Check target doesn't conflict (except with entries we're moving).
+  defp check_move_conflicts(state, affected, old_path, new_path) do
+    moving_paths = MapSet.new(affected, fn {path, _entry} -> path end)
+
+    conflict =
+      Enum.any?(affected, fn {path, _entry} ->
+        target = String.replace_prefix(path, old_path, new_path)
+        Map.has_key?(state.files, target) and not MapSet.member?(moving_paths, target)
+      end)
+
+    if conflict, do: {:error, :already_exists}, else: :ok
   end
 
   defp do_move_entries(state, affected, old_path, new_path, config) do
@@ -447,7 +455,7 @@ defmodule Sagents.FileSystem.FileSystemState do
           state
         end
 
-      _ ->
+      _other ->
         # File no longer dirty or doesn't exist - no-op
         state
     end
@@ -668,11 +676,11 @@ defmodule Sagents.FileSystem.FileSystemState do
 
     case invalid_configs do
       [] -> :ok
-      _ -> {:error, :invalid_configs}
+      _other -> {:error, :invalid_configs}
     end
   end
 
-  defp validate_all_configs(_), do: {:error, :invalid_configs}
+  defp validate_all_configs(_other), do: {:error, :invalid_configs}
 
   # Extract agent_id from scope_key for backward compatibility with persistence modules
   # Persistence modules still expect agent_id as first parameter
@@ -685,8 +693,7 @@ defmodule Sagents.FileSystem.FileSystemState do
     # Generic handler for any other scope types
     scope_key
     |> Tuple.to_list()
-    |> Enum.map(&to_string/1)
-    |> Enum.join(":")
+    |> Enum.map_join(":", &to_string/1)
   end
 
   defp scope_key_to_agent_id(scope_key) when is_binary(scope_key) do
@@ -732,7 +739,7 @@ defmodule Sagents.FileSystem.FileSystemState do
             state
         end
 
-      _ ->
+      _other ->
         state
     end
   end

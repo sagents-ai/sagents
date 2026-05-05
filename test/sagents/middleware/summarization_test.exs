@@ -28,7 +28,7 @@ defmodule Sagents.Middleware.SummarizationTest do
         model: model,
         max_tokens_before_summary: 100_000,
         messages_to_keep: 10,
-        token_counter: fn _ -> 1000 end
+        token_counter: fn _msgs -> 1000 end
       ]
 
       assert {:ok, config} = Summarization.init(opts)
@@ -52,7 +52,7 @@ defmodule Sagents.Middleware.SummarizationTest do
       config = %{
         max_tokens_before_summary: 1_000_000,
         messages_to_keep: 6,
-        token_counter: fn _ -> 100 end
+        token_counter: fn _msgs -> 100 end
       }
 
       assert {:ok, ^state} = Summarization.before_model(state, config)
@@ -64,7 +64,7 @@ defmodule Sagents.Middleware.SummarizationTest do
       config = %{
         max_tokens_before_summary: 1000,
         messages_to_keep: 6,
-        token_counter: fn _ -> 0 end
+        token_counter: fn _msgs -> 0 end
       }
 
       assert {:ok, ^state} = Summarization.before_model(state, config)
@@ -76,7 +76,7 @@ defmodule Sagents.Middleware.SummarizationTest do
       config = %{
         max_tokens_before_summary: 1000,
         messages_to_keep: 6,
-        token_counter: fn _ -> 0 end
+        token_counter: fn _msgs -> 0 end
       }
 
       assert {:ok, ^state} = Summarization.before_model(state, config)
@@ -110,7 +110,7 @@ defmodule Sagents.Middleware.SummarizationTest do
         # Keep 2 messages, would need to cut between assistant and tool
         messages_to_keep: 2,
         summary_prompt: "Summarize",
-        token_counter: fn _ -> 1000 end
+        token_counter: fn _msgs -> 1000 end
       }
 
       # Should keep all messages since we can't safely cut the assistant+tool pair
@@ -218,7 +218,7 @@ defmodule Sagents.Middleware.SummarizationTest do
         # Would keep: assistant+tool+user (last 3)
         # Should cut before the assistant with tool_calls
         summary_prompt: "Summarize",
-        token_counter: fn _ -> 1000 end
+        token_counter: fn _msgs -> 1000 end
       }
 
       # Since we can't actually summarize without a model, we'll get an error
@@ -256,7 +256,7 @@ defmodule Sagents.Middleware.SummarizationTest do
         messages_to_keep: 2,
         # Keep last 2 messages
         summary_prompt: "Summarize",
-        token_counter: fn _ -> 1000 end
+        token_counter: fn _msgs -> 1000 end
       }
 
       assert {:ok, _result} = Summarization.before_model(state, config)
@@ -301,11 +301,11 @@ defmodule Sagents.Middleware.SummarizationTest do
       {:ok, config} = Summarization.init(max_tokens_before_summary: 10)
 
       # Token counter returns high value to trigger summarization
-      config = %{config | token_counter: fn _ -> 1000 end}
+      config = %{config | token_counter: fn _msgs -> 1000 end}
 
       # Should keep the system message
       assert {:ok, result_state} = Summarization.before_model(state, config)
-      assert length(result_state.messages) >= 1
+      assert result_state.messages != []
       assert List.first(result_state.messages).role == :system
     end
 

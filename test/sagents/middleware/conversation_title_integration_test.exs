@@ -60,7 +60,7 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
         )
 
       AgentServer.subscribe(agent_id)
-      AgentServer.subscribe_debug(agent_id)
+      AgentServer.subscribe(agent_id, :debug)
 
       # Made NOT LIVE here
       #
@@ -115,7 +115,7 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
         )
 
       AgentServer.subscribe(agent_id)
-      AgentServer.subscribe_debug(agent_id)
+      AgentServer.subscribe(agent_id, :debug)
 
       # Mock ChatAnthropic responses:
       # - First call (agent response) succeeds
@@ -170,7 +170,7 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
         )
 
       AgentServer.subscribe(agent_id)
-      AgentServer.subscribe_debug(agent_id)
+      AgentServer.subscribe(agent_id, :debug)
 
       # Pre-populate the conversation with an existing title by sending a middleware message
       existing_title = "Existing Conversation Title"
@@ -182,7 +182,7 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
       )
 
       # Synchronize: ensure the middleware message has been processed
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       # Mock only ONE ChatAnthropic call - for the agent's response
       # No second call should happen for title generation (verifies middleware skips title gen)
@@ -217,7 +217,7 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
         )
 
       AgentServer.subscribe(agent_id)
-      AgentServer.subscribe_debug(agent_id)
+      AgentServer.subscribe(agent_id, :debug)
 
       # First message: expect 2 calls (agent response + title generation)
       expect(ChatAnthropic, :call, 2, fn _model, messages, _tools ->

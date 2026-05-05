@@ -142,5 +142,5 @@ defmodule Sagents.Todo do
   defp parse_status("in_progress"), do: :in_progress
   defp parse_status("completed"), do: :completed
   defp parse_status("cancelled"), do: :cancelled
-  defp parse_status(_), do: :pending
+  defp parse_status(_other), do: :pending
 end

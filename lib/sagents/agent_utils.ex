@@ -39,7 +39,7 @@ defmodule Sagents.AgentUtils do
   def check_for_hitl_interrupt(%LLMChain{} = chain, interrupt_on) when is_map(interrupt_on) do
     case chain.last_message do
       %Message{role: :assistant, tool_calls: tool_calls}
-      when is_list(tool_calls) and length(tool_calls) > 0 ->
+      when is_list(tool_calls) and tool_calls != [] ->
         # Filter tool calls that need approval
         hitl_tool_calls =
           Enum.filter(tool_calls, fn tc ->
@@ -69,7 +69,7 @@ defmodule Sagents.AgentUtils do
           {:interrupt, interrupt_data}
         end
 
-      _ ->
+      _other ->
         # No tool calls in last message
         :continue
     end
@@ -140,7 +140,7 @@ defmodule Sagents.AgentUtils do
       %Message{role: :assistant, tool_calls: tool_calls} when is_list(tool_calls) ->
         tool_calls
 
-      _ ->
+      _other ->
         []
     end
   end

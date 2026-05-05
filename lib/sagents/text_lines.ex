@@ -38,7 +38,7 @@ defmodule Sagents.TextLines do
   defp drop_trailing_empty(lines) do
     case List.last(lines) do
       "" when length(lines) > 1 -> Enum.drop(lines, -1)
-      _ -> lines
+      _other -> lines
     end
   end
 
@@ -254,7 +254,7 @@ defmodule Sagents.TextLines do
 
     case Regex.compile(pattern_str) do
       {:ok, regex} -> {:ok, regex}
-      {:error, _} -> {:error, "Failed to compile escaped pattern: #{pattern}"}
+      {:error, _reason} -> {:error, "Failed to compile escaped pattern: #{pattern}"}
     end
   end
 
@@ -263,7 +263,7 @@ defmodule Sagents.TextLines do
 
     case Regex.compile(pattern_str) do
       {:ok, regex} -> {:ok, regex}
-      {:error, {reason, _}} -> {:error, "Invalid regex pattern: #{reason}"}
+      {:error, {reason, _info}} -> {:error, "Invalid regex pattern: #{reason}"}
     end
   end
 

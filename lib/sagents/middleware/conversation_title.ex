@@ -93,9 +93,7 @@ defmodule Sagents.Middleware.ConversationTitle do
     middleware_id = Keyword.get(opts, :id)
 
     # Validate required options
-    unless chat_model do
-      {:error, "ConversationTitle middleware requires :chat_model option"}
-    else
+    if chat_model do
       config = %{
         chat_model: chat_model,
         fallbacks: fallbacks,
@@ -112,6 +110,8 @@ defmodule Sagents.Middleware.ConversationTitle do
         end
 
       {:ok, config}
+    else
+      {:error, "ConversationTitle middleware requires :chat_model option"}
     end
   end
 

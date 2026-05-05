@@ -492,64 +492,55 @@ defmodule Sagents.AgentServer do
   end
 
   @doc """
-  Subscribe the calling process to main events from this AgentServer.
+  Subscribe a process to events from this AgentServer.
 
-  Events are delivered as `{:agent, event}` messages via direct `send/2`.
-  The producer monitors the subscriber so departure is
-  cleaned up automatically — but subscribers should also `Process.monitor/1`
-  the returned `server_pid` to detect server death.
+  Events on the `:main` channel are delivered as `{:agent, event}` messages;
+  events on the `:debug` channel are delivered as `{:agent, {:debug, event}}`
+  and provide additional insight into middleware state, sub-agent activity,
+  and similar diagnostic data not surfaced on the main channel.
+
+  Delivery is via direct `send/2`. The producer monitors the subscriber so
+  departure is cleaned up automatically — but subscribers should also
+  `Process.monitor/1` the returned `server_pid` to detect server death.
+
+  ## Arguments
+
+  - `agent_id` — the agent's id.
+  - `channel` — `:main` (default) or `:debug`.
+  - `subscriber_pid` — the pid to receive events. Defaults to `self()` when
+    `nil`.
 
   Returns `{:ok, server_pid, monitor_ref}` on success, or
   `{:error, :process_not_found}` if no AgentServer is running for `agent_id`.
 
   ## Examples
 
+      # Most common: subscribe self() to the main channel.
       {:ok, _pid, _ref} = AgentServer.subscribe("my-agent-1")
+
+      # Subscribe to debug events (used by sagents_live_debugger and similar).
+      {:ok, _pid, _ref} = AgentServer.subscribe("my-agent-1", :debug)
+
+      # Subscribe a foreign pid (e.g. a bridge GenServer that proxies events).
+      {:ok, _pid, _ref} = AgentServer.subscribe("my-agent-1", :main, bridge_pid)
   """
-  @spec subscribe(String.t()) ::
+  @spec subscribe(String.t(), :main | :debug, pid() | nil) ::
           {:ok, pid(), reference()} | {:error, :process_not_found}
-  def subscribe(agent_id) do
-    Publisher.subscribe(get_name(agent_id), :main)
+  def subscribe(agent_id, channel \\ :main, subscriber_pid \\ nil)
+      when is_binary(agent_id) and channel in [:main, :debug] do
+    Publisher.subscribe(get_name(agent_id), channel, subscriber_pid)
   end
 
   @doc """
-  Unsubscribe the calling process from main events.
+  Unsubscribe a process from events on the given channel.
 
-  Always returns `:ok`.
+  Mirrors `subscribe/3`. Defaults `channel` to `:main` and `subscriber_pid`
+  to `self()` (when `nil`). Always returns `:ok`.
   """
-  @spec unsubscribe(String.t()) :: :ok
-  def unsubscribe(agent_id) do
-    Publisher.unsubscribe(get_name(agent_id), :main)
-  end
-
-  @doc """
-  Subscribe the calling process to debug events.
-
-  Debug events are delivered as `{:agent, {:debug, event}}` messages.
-  These provide additional insight into middleware state, sub-agent activity,
-  and similar diagnostic data not surfaced on the main channel.
-
-  Returns `{:ok, server_pid, monitor_ref}` on success, or
-  `{:error, :process_not_found}` if no AgentServer is running.
-
-  ## Examples
-
-      {:ok, _pid, _ref} = AgentServer.subscribe_debug("my-agent-1")
-  """
-  @spec subscribe_debug(String.t()) ::
-          {:ok, pid(), reference()} | {:error, :process_not_found}
-  def subscribe_debug(agent_id) do
-    Publisher.subscribe(get_name(agent_id), :debug)
-  end
-
-  @doc """
-  Unsubscribe the calling process from debug events.
-
-  Always returns `:ok`.
-  """
-  @spec unsubscribe_debug(String.t()) :: :ok
-  def unsubscribe_debug(agent_id) do
-    Publisher.unsubscribe(get_name(agent_id), :debug)
+  @spec unsubscribe(String.t(), :main | :debug, pid() | nil) :: :ok
+  def unsubscribe(agent_id, channel \\ :main, subscriber_pid \\ nil)
+      when is_binary(agent_id) and channel in [:main, :debug] do
+    Publisher.unsubscribe(get_name(agent_id), channel, subscriber_pid)
   end
 
   @doc """
@@ -843,7 +834,7 @@ defmodule Sagents.AgentServer do
     try do
       GenServer.call(get_name(agent_id), :get_status)
     catch
-      :exit, _ ->
+      :exit, _reason ->
         :not_running
     end
   end
@@ -894,7 +885,7 @@ defmodule Sagents.AgentServer do
         try do
           GenServer.call(pid, :get_metadata, 5000)
         catch
-          :exit, _ -> {:error, :not_found}
+          :exit, _reason -> {:error, :not_found}
         end
     end
   end
@@ -921,7 +912,7 @@ defmodule Sagents.AgentServer do
         try do
           GenServer.call(pid, :get_agent, 5000)
         catch
-          :exit, _ -> {:error, :not_found}
+          :exit, _reason -> {:error, :not_found}
         end
     end
   end
@@ -1513,7 +1504,7 @@ defmodule Sagents.AgentServer do
     # through callbacks (which top up the rolling state). If it doesn't return
     # in time, brutal-kill. Either way, the rolling state in `server_state.state`
     # already reflects every fully-processed turn up to this point.
-    _ = Task.shutdown(task, :timer.seconds(2)) || Task.shutdown(task, :brutal_kill)
+    _result = Task.shutdown(task, :timer.seconds(2)) || Task.shutdown(task, :brutal_kill)
 
     # Drain any final turn casts the task may have emitted before exit so the
     # rolling state captures as much as possible before we snapshot it.
@@ -1787,13 +1778,7 @@ defmodule Sagents.AgentServer do
     Logger.info("Updating agent configuration and state for #{new_agent.agent_id}")
 
     # Validate that state has agent_id set (critical for middleware functionality)
-    unless new_state.agent_id do
-      error_msg =
-        "State.agent_id is nil. When deserializing state, you must provide agent_id: State.from_serialized(agent_id, data)"
-
-      Logger.error(error_msg)
-      {:reply, {:error, error_msg}, server_state}
-    else
+    if new_state.agent_id do
       # Update both agent and state atomically
       updated_state = %{server_state | agent: new_agent, state: new_state}
 
@@ -1801,6 +1786,12 @@ defmodule Sagents.AgentServer do
       broadcast_event(updated_state, {:state_restored, new_state})
 
       {:reply, :ok, updated_state}
+    else
+      error_msg =
+        "State.agent_id is nil. When deserializing state, you must provide agent_id: State.from_serialized(agent_id, data)"
+
+      Logger.error(error_msg)
+      {:reply, {:error, error_msg}, server_state}
     end
   end
 
@@ -1813,7 +1804,7 @@ defmodule Sagents.AgentServer do
       {:conversation_title_generated, _title, _agent_id} ->
         maybe_persist_state(server_state, :on_title_generated)
 
-      _ ->
+      _other ->
         :ok
     end
 
@@ -1927,7 +1918,7 @@ defmodule Sagents.AgentServer do
           handle_task_down(reason, server_state)
         end
 
-      _ ->
+      _other ->
         # Some other linked process exited; nothing for us to do here.
         {:noreply, server_state}
     end
@@ -2066,7 +2057,7 @@ defmodule Sagents.AgentServer do
     try do
       maybe_persist_state(server_state, :on_shutdown)
     catch
-      _, _ -> :ok
+      _kind, _reason -> :ok
     end
 
     # Explicitly untrack from presence before exiting.
@@ -2077,7 +2068,7 @@ defmodule Sagents.AgentServer do
     try do
       untrack_presence(server_state)
     catch
-      _, _ -> :ok
+      _kind, _reason -> :ok
     end
 
     # Broadcast node transfer and shutdown events.
@@ -2091,7 +2082,7 @@ defmodule Sagents.AgentServer do
         {:agent_shutdown, %{reason: reason, status: server_state.status}}
       )
     rescue
-      _ -> :ok
+      _error -> :ok
     end
 
     # FileSystemServer traps exits and will flush_all in its own terminate/2
@@ -2248,7 +2239,7 @@ defmodule Sagents.AgentServer do
             %{message: msg} -> msg
             msg when is_binary(msg) -> msg
             parts when is_list(parts) -> ContentPart.parts_to_string(parts) || inspect(parts)
-            _ -> inspect(error)
+            _other -> inspect(error)
           end
 
         tool_info = %{
@@ -2488,7 +2479,7 @@ defmodule Sagents.AgentServer do
           )
         end
 
-      _ ->
+      _other ->
         # Presence tracking disabled, use standard inactivity timeout
         :ok
     end
@@ -2509,7 +2500,7 @@ defmodule Sagents.AgentServer do
           "Agent #{server_state.agent.agent_id} subscribed to presence topic: #{topic}"
         )
 
-      _ ->
+      _other ->
         :ok
     end
   end
@@ -2537,14 +2528,14 @@ defmodule Sagents.AgentServer do
           {_id, child_pid, :worker, _mods} when is_pid(child_pid) ->
             cancel_subagent_child(server_state, child_pid, sup_pid)
 
-          _ ->
+          _other ->
             :ok
         end)
 
         :ok
     end
   catch
-    :exit, _ -> :ok
+    :exit, _reason -> :ok
   end
 
   defp cancel_subagent_child(server_state, child_pid, sup_pid) do
@@ -2557,7 +2548,7 @@ defmodule Sagents.AgentServer do
       try do
         GenServer.call(child_pid, :prepare_cancel, 300) == :ok
       catch
-        :exit, _ -> false
+        :exit, _reason -> false
       end
 
     unless broadcast_ok do
@@ -2583,13 +2574,13 @@ defmodule Sagents.AgentServer do
       {:error, :not_found} -> :ok
     end
   catch
-    :exit, _ -> :ok
+    :exit, _reason -> :ok
   end
 
   defp read_tool_call_id(pid) do
     case Process.info(pid, :dictionary) do
       {:dictionary, dict} -> Keyword.get(dict, :tool_call_id)
-      _ -> nil
+      _other -> nil
     end
   end
 
@@ -2621,10 +2612,10 @@ defmodule Sagents.AgentServer do
     Sagents.ProcessRegistry.keys(child_pid)
     |> Enum.find_value(fn
       {:sub_agent, id} -> id
-      _ -> nil
+      _other -> nil
     end)
   catch
-    :exit, _ -> nil
+    :exit, _reason -> nil
   end
 
   # Drain any pending turn-update casts from the mailbox so the rolling state
@@ -2649,7 +2640,7 @@ defmodule Sagents.AgentServer do
     try do
       GenServer.cast(server_name, message)
     catch
-      :exit, _ -> :ok
+      :exit, _reason -> :ok
     end
   end
 
@@ -2715,7 +2706,7 @@ defmodule Sagents.AgentServer do
         {:ok, updated_msg} ->
           broadcast_event(server_state, {:display_message_updated, updated_msg})
 
-        {:error, _} ->
+        {:error, _reason} ->
           :ok
       end
     end
@@ -2834,7 +2825,7 @@ defmodule Sagents.AgentServer do
         {:ok, updated_msg} ->
           broadcast_event(server_state, {:display_message_updated, updated_msg})
 
-        {:error, _} ->
+        {:error, _reason} ->
           :ok
       end
     end
@@ -3030,7 +3021,7 @@ defmodule Sagents.AgentServer do
 
         %{state | inactivity_timer_ref: timer_ref, last_activity_at: DateTime.utc_now()}
 
-      _ ->
+      _other ->
         state
     end
   end
@@ -3071,7 +3062,7 @@ defmodule Sagents.AgentServer do
     middleware_list
   end
 
-  defp build_middleware_entries(_), do: []
+  defp build_middleware_entries(_other), do: []
 
   ## Agent Presence Tracking
   #

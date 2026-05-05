@@ -273,7 +273,7 @@ defmodule Sagents.State do
     existing_index =
       Enum.find_index(state.todos, fn
         %{id: id} -> id == todo.id
-        _ -> false
+        _other -> false
       end)
 
     updated_todos =
@@ -296,7 +296,7 @@ defmodule Sagents.State do
   def get_todo(%State{} = state, todo_id) when is_binary(todo_id) do
     Enum.find(state.todos, fn
       %{id: ^todo_id} -> true
-      _ -> false
+      _other -> false
     end)
   end
 
@@ -307,7 +307,7 @@ defmodule Sagents.State do
     updated_todos =
       Enum.reject(state.todos, fn
         %{id: ^todo_id} -> true
-        _ -> false
+        _other -> false
       end)
 
     %{state | todos: updated_todos}
@@ -319,7 +319,7 @@ defmodule Sagents.State do
   def get_todos_by_status(%State{} = state, status) when is_atom(status) do
     Enum.filter(state.todos, fn
       %{status: ^status} -> true
-      _ -> false
+      _other -> false
     end)
   end
 

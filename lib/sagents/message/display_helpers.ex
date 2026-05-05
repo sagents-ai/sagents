@@ -123,7 +123,7 @@ defmodule Sagents.Message.DisplayHelpers do
           }
         end)
 
-      _ ->
+      _other ->
         []
     end
   end
@@ -180,11 +180,10 @@ defmodule Sagents.Message.DisplayHelpers do
     # Extract text from ContentParts
     content
     |> Enum.filter(fn part -> part.type == :text end)
-    |> Enum.map(fn part -> part.content end)
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", fn part -> part.content end)
   end
 
-  defp extract_tool_result_content(_), do: ""
+  defp extract_tool_result_content(_other), do: ""
 
   # Convert Message role to display message_type atom
   defp role_to_message_type(:system), do: :system

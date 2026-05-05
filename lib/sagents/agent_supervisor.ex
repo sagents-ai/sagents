@@ -105,7 +105,7 @@ defmodule Sagents.AgentSupervisor do
   @spec get_pid(String.t()) :: {:ok, pid()} | {:error, :not_found}
   def get_pid(agent_id) when is_binary(agent_id) do
     case ProcessRegistry.lookup({:agent_supervisor, agent_id}) do
-      [{pid, _}] -> {:ok, pid}
+      [{pid, _value}] -> {:ok, pid}
       [] -> {:error, :not_found}
     end
   end

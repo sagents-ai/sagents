@@ -23,7 +23,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       rescue
         ArgumentError -> :ok
       catch
-        :exit, _ -> :ok
+        :exit, _reason -> :ok
       end
     end)
 
@@ -191,7 +191,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
     end
 
     test "flush_all persists immediately", %{agent_id: agent_id, tmp_dir: tmp_dir} do
-      config = make_config(Disk, "Memories", tmp_dir, debounce_ms: 10000)
+      config = make_config(Disk, "Memories", tmp_dir, debounce_ms: 10_000)
 
       {:ok, _pid} =
         FileSystemServer.start_link(
@@ -236,7 +236,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
     end
 
     test "termination flushes pending writes", %{agent_id: agent_id, tmp_dir: tmp_dir} do
-      config = make_config(Disk, "Memories", tmp_dir, debounce_ms: 10000)
+      config = make_config(Disk, "Memories", tmp_dir, debounce_ms: 10_000)
 
       {:ok, pid} =
         FileSystemServer.start_link(

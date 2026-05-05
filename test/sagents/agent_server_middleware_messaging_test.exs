@@ -315,7 +315,7 @@ defmodule Sagents.AgentServerMiddlewareMessagingTest do
           name: AgentServer.get_name(agent_id)
         )
 
-      {:ok, _server, _ref} = AgentServer.subscribe_debug(agent_id)
+      {:ok, _server, _ref} = AgentServer.subscribe(agent_id, :debug)
 
       # Send message that updates state
       send(

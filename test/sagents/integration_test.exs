@@ -55,7 +55,7 @@ defmodule Sagents.IntegrationTest do
              ]}
 
           # Second LLM call (after tool execution) - return final response
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("I've created the TODO list for you.")]}
         end
       end)
@@ -124,7 +124,7 @@ defmodule Sagents.IntegrationTest do
              ]}
 
           # Second LLM call (after tool execution) - return final response
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("I've created the file test.txt for you.")]}
         end
       end)
@@ -246,7 +246,7 @@ defmodule Sagents.IntegrationTest do
              ]}
 
           # Final call: respond to user
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("All done! I've completed the task.")]}
         end
       end)
@@ -319,7 +319,7 @@ defmodule Sagents.IntegrationTest do
                })
              ]}
 
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("The file already exists.")]}
         end
       end)
@@ -404,7 +404,7 @@ defmodule Sagents.IntegrationTest do
              ]}
 
           # Third LLM call (after second tool execution) - return final response
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("Done!")]}
         end
       end)
@@ -420,7 +420,7 @@ defmodule Sagents.IntegrationTest do
       # because the custom_context.state is not updated between tool calls
       assert length(final_state.todos) == 6,
              "Expected 6 todos (bug: got #{length(final_state.todos)}). " <>
-               "IDs: #{Enum.map(final_state.todos, & &1.id) |> Enum.join(", ")}"
+               "IDs: #{Enum.map_join(final_state.todos, ", ", & &1.id)}"
 
       # Verify todos 1 and 2 were updated
       todo1 = Enum.find(final_state.todos, &(&1.id == "1"))

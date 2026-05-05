@@ -38,7 +38,7 @@ defmodule Sagents.SubscriberTest do
 
       {:ok, _pid} = AgentServer.start_link(agent: agent)
 
-      _ = Subscriber.subscribe_to_agent(%{}, agent_id, :main)
+      _subs = Subscriber.subscribe_to_agent(%{}, agent_id, :main)
 
       # Trigger an event by publishing via the AgentServer's helper.
       AgentServer.publish_event_from(agent_id, {:custom_test_event, 42})
@@ -52,7 +52,7 @@ defmodule Sagents.SubscriberTest do
       scope = {:agent, "fs-sub-test-#{System.unique_integer([:positive])}"}
       {:ok, _pid} = FileSystemServer.start_link(scope_key: scope)
 
-      _ = Subscriber.subscribe_to_filesystem(%{}, scope)
+      _subs = Subscriber.subscribe_to_filesystem(%{}, scope)
 
       {:ok, _entry} = FileSystemServer.write_file(scope, "/x.txt", "hello")
       assert_receive {:file_system, {:file_updated, "/x.txt"}}, 100

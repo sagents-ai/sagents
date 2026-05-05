@@ -156,7 +156,7 @@ defmodule Sagents.Middleware.TodoList do
     display_text =
       case config do
         %{display_text: text} when is_binary(text) -> text
-        _ -> @default_display_text
+        _other -> @default_display_text
       end
 
     Function.new!(%{
@@ -238,7 +238,7 @@ defmodule Sagents.Middleware.TodoList do
       val when is_boolean(val) -> val
       "true" -> true
       "false" -> false
-      _ -> default
+      _other -> default
     end
   end
 
@@ -249,7 +249,7 @@ defmodule Sagents.Middleware.TodoList do
       end)
 
     # Check if any failed
-    case Enum.find(results, fn result -> match?({:error, _}, result) end) do
+    case Enum.find(results, fn result -> match?({:error, _changeset}, result) end) do
       nil ->
         todos = Enum.map(results, fn {:ok, todo} -> todo end)
         {:ok, todos}
@@ -260,7 +260,7 @@ defmodule Sagents.Middleware.TodoList do
     end
   end
 
-  defp parse_todos(_), do: {:error, "todos must be an array"}
+  defp parse_todos(_other), do: {:error, "todos must be an array"}
 
   defp update_todos(%State{} = state, new_todos, true = _merge) do
     # Merge mode: update existing TODOs by ID
@@ -318,7 +318,7 @@ defmodule Sagents.Middleware.TodoList do
   defp ensure_todo_struct(map) when is_map(map) do
     case Todo.from_map(map) do
       {:ok, todo} -> todo
-      {:error, _} -> raise "Invalid TODO data: #{inspect(map)}"
+      {:error, _changeset} -> raise "Invalid TODO data: #{inspect(map)}"
     end
   end
 
@@ -327,15 +327,14 @@ defmodule Sagents.Middleware.TodoList do
       [] ->
         "TODO list cleared - all tasks completed"
 
-      _ ->
+      _other ->
         mode = if merge, do: "merged", else: "replaced"
         count = Enum.count(todos)
 
         summary =
           todos
           |> Enum.group_by(& &1.status)
-          |> Enum.map(fn {status, items} -> "#{length(items)} #{status}" end)
-          |> Enum.join(", ")
+          |> Enum.map_join(", ", fn {status, items} -> "#{length(items)} #{status}" end)
 
         "Successfully #{mode} #{count} TODO(s): #{summary}"
     end
