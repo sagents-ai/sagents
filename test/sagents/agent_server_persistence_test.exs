@@ -53,8 +53,8 @@ defmodule Sagents.AgentServerPersistenceTest do
       assert all_keys_are_strings?(exported)
 
       # Check content
-      assert [_, _] = exported["state"]["messages"]
-      assert [_] = exported["state"]["todos"]
+      assert [_msg_1, _msg_2] = exported["state"]["messages"]
+      assert [_todo_1] = exported["state"]["todos"]
 
       # Cleanup
       AgentServer.stop("export-test-1")
@@ -130,7 +130,7 @@ defmodule Sagents.AgentServerPersistenceTest do
       # Verify state was restored
       restored_state = AgentServer.get_state("restore-test-1")
       assert [message] = restored_state.messages
-      assert [%ContentPart{} = content_part | _] = message.content
+      assert [%ContentPart{} = content_part | _rest] = message.content
       assert content_part.content == "Restored message"
 
       assert [todo] = restored_state.todos
@@ -228,7 +228,7 @@ defmodule Sagents.AgentServerPersistenceTest do
       # Verify state was restored
       state = AgentServer.get_state("from-state-test-1")
       assert [message1, _message2] = state.messages
-      assert [%ContentPart{} = content_part | _] = message1.content
+      assert [%ContentPart{} = content_part | _rest] = message1.content
       assert content_part.content == "Hello"
 
       assert [todo] = state.todos
@@ -334,7 +334,7 @@ defmodule Sagents.AgentServerPersistenceTest do
       restored_state = AgentServer.get_state("roundtrip-test-1")
 
       # Compare messages
-      assert [_, _] = restored_state.messages
+      assert [_msg_1, _msg_2] = restored_state.messages
       assert length(restored_state.messages) == length(original_state.messages)
 
       Enum.zip(restored_state.messages, original_state.messages)
@@ -344,7 +344,7 @@ defmodule Sagents.AgentServerPersistenceTest do
       end)
 
       # Compare todos
-      assert [_, _] = restored_state.todos
+      assert [_todo_1, _todo_2] = restored_state.todos
 
       Enum.zip(restored_state.todos, original_state.todos)
       |> Enum.each(fn {restored, original} ->
@@ -390,7 +390,7 @@ defmodule Sagents.AgentServerPersistenceTest do
 
       # Get updated state
       updated_state = AgentServer.get_state("continue-test-1")
-      assert [_, _] = updated_state.messages
+      assert [_msg_1, _msg_2] = updated_state.messages
 
       # Restore to previous state
       :ok = AgentServer.restore_state("continue-test-1", exported)
@@ -398,7 +398,7 @@ defmodule Sagents.AgentServerPersistenceTest do
       # Verify we're back to previous state
       restored_state = AgentServer.get_state("continue-test-1")
       assert [message] = restored_state.messages
-      assert [content_part | _] = message.content
+      assert [content_part | _rest] = message.content
       assert content_part.content == "First message"
 
       AgentServer.stop("continue-test-1")

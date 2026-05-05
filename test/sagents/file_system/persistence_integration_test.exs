@@ -23,7 +23,7 @@ defmodule Sagents.FileSystem.PersistenceIntegrationTest do
       rescue
         ArgumentError -> :ok
       catch
-        :exit, _ -> :ok
+        :exit, _reason -> :ok
       end
     end)
 

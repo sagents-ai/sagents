@@ -159,7 +159,7 @@ defmodule Sagents.AgentServerTest do
             )
 
           # Synchronize to ensure handle_continue has completed
-          _ = AgentServer.get_state(agent_id)
+          _state = AgentServer.get_state(agent_id)
         end)
 
       assert log =~ "FailingStartMiddleware"
@@ -451,7 +451,7 @@ defmodule Sagents.AgentServerTest do
       assert :ok = AgentServer.execute(agent_id)
 
       # Second execution while running fails
-      assert {:error, _} = AgentServer.execute(agent_id)
+      assert {:error, _reason} = AgentServer.execute(agent_id)
     end
 
     test "handles agent execution error", %{agent: agent, agent_id: agent_id} do
@@ -746,7 +746,7 @@ defmodule Sagents.AgentServerTest do
         )
 
       decisions = [%{type: :approve}]
-      assert {:error, _} = AgentServer.resume(new_agent_id, decisions)
+      assert {:error, _reason} = AgentServer.resume(new_agent_id, decisions)
     end
 
     test "handles 3-tuple {:ok, state, extra} from resume with until_tool", %{
@@ -797,7 +797,7 @@ defmodule Sagents.AgentServerTest do
     setup do
       # Start a test PubSub with supervisor
       pubsub_name = :"test_pubsub_#{:erlang.unique_integer([:positive])}"
-      {:ok, _} = start_supervised({Phoenix.PubSub, name: pubsub_name})
+      {:ok, _pubsub_pid} = start_supervised({Phoenix.PubSub, name: pubsub_name})
 
       agent = create_test_agent()
       agent_id = agent.agent_id
@@ -926,7 +926,7 @@ defmodule Sagents.AgentServerTest do
       Agent
       |> expect(:execute, fn ^agent, state, opts ->
         # Extract the PubSub callbacks and fire on_error like LLMChain would
-        [pubsub_callbacks | _] = Keyword.fetch!(opts, :callbacks)
+        [pubsub_callbacks | _rest] = Keyword.fetch!(opts, :callbacks)
         pubsub_callbacks.on_error.(nil, error)
         {:ok, state}
       end)
@@ -961,7 +961,7 @@ defmodule Sagents.AgentServerTest do
   describe "error callback debug events" do
     setup do
       pubsub_name = :"test_pubsub_#{:erlang.unique_integer([:positive])}"
-      {:ok, _} = start_supervised({Phoenix.PubSub, name: pubsub_name})
+      {:ok, _pubsub_pid} = start_supervised({Phoenix.PubSub, name: pubsub_name})
 
       agent = create_test_agent()
       agent_id = agent.agent_id
@@ -992,7 +992,7 @@ defmodule Sagents.AgentServerTest do
       |> expect(:execute, fn ^agent, state, opts ->
         # Extract the PubSub callbacks and fire on_llm_error like LLMChain would
         # during a transient failure that gets retried
-        [pubsub_callbacks | _] = Keyword.fetch!(opts, :callbacks)
+        [pubsub_callbacks | _rest] = Keyword.fetch!(opts, :callbacks)
         pubsub_callbacks.on_llm_error.(nil, error)
         {:ok, state}
       end)
@@ -1009,7 +1009,7 @@ defmodule Sagents.AgentServerTest do
     setup do
       # Start a test PubSub
       pubsub_name = :"test_pubsub_#{:erlang.unique_integer([:positive])}"
-      {:ok, _} = start_supervised({Phoenix.PubSub, name: pubsub_name})
+      {:ok, _pubsub_pid} = start_supervised({Phoenix.PubSub, name: pubsub_name})
 
       agent = create_test_agent()
       agent_id = agent.agent_id
@@ -1138,7 +1138,7 @@ defmodule Sagents.AgentServerTest do
     test "broadcasts debug event to subscribers on the :debug channel" do
       agent_id = generate_test_agent_id()
       pubsub_name = :"test_pubsub_#{agent_id}"
-      {:ok, _} = start_supervised({Phoenix.PubSub, name: pubsub_name})
+      {:ok, _pubsub_pid} = start_supervised({Phoenix.PubSub, name: pubsub_name})
 
       {:ok, agent} =
         Agent.new(%{
@@ -1170,7 +1170,7 @@ defmodule Sagents.AgentServerTest do
     test "returns :ok when no subscribers are on the :debug channel" do
       agent_id = generate_test_agent_id()
       pubsub_name = :"test_pubsub_#{agent_id}"
-      {:ok, _} = start_supervised({Phoenix.PubSub, name: pubsub_name})
+      {:ok, _pubsub_pid} = start_supervised({Phoenix.PubSub, name: pubsub_name})
 
       {:ok, agent} =
         Agent.new(%{
@@ -1545,7 +1545,7 @@ defmodule Sagents.AgentServerTest do
     test "broadcasts shutdown event when timeout triggers" do
       # Start a test PubSub
       pubsub_name = :"test_pubsub_#{:erlang.unique_integer([:positive])}"
-      {:ok, _} = start_supervised({Phoenix.PubSub, name: pubsub_name})
+      {:ok, _pubsub_pid} = start_supervised({Phoenix.PubSub, name: pubsub_name})
 
       agent = create_test_agent()
       agent_id = agent.agent_id

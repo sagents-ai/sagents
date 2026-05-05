@@ -69,7 +69,7 @@ defmodule Sagents.FileSystemTest do
 
       # Call ensure_filesystem 10 times
       results =
-        Enum.map(1..10, fn _ ->
+        Enum.map(1..10, fn _num ->
           FileSystem.ensure_filesystem(scope_key, [config], supervisor: sup)
         end)
 
@@ -88,14 +88,14 @@ defmodule Sagents.FileSystemTest do
       config = create_test_config({:user, 123})
 
       # Invalid scope_key (not a tuple)
-      assert {:error, _} = FileSystem.ensure_filesystem("invalid", [config])
+      assert {:error, _reason} = FileSystem.ensure_filesystem("invalid", [config])
     end
 
     test "validates configs is a list", %{supervisor_pid: _sup} do
       scope_key = {:user, System.unique_integer([:positive])}
 
       # Invalid configs (not a list)
-      assert {:error, _} = FileSystem.ensure_filesystem(scope_key, "invalid")
+      assert {:error, _reason} = FileSystem.ensure_filesystem(scope_key, "invalid")
     end
   end
 
@@ -266,7 +266,7 @@ defmodule Sagents.FileSystemTest do
 
       # Start 5 concurrent tasks trying to ensure the same filesystem
       tasks =
-        Enum.map(1..5, fn _ ->
+        Enum.map(1..5, fn _num ->
           Task.async(fn ->
             FileSystem.ensure_filesystem(scope_key, [config], supervisor: sup)
           end)

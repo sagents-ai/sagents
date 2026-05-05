@@ -405,7 +405,7 @@ defmodule Sagents.Middleware.DebugLog do
 
       inspect(term, inspect_opts)
     rescue
-      _ -> "<inspect failed>"
+      _error -> "<inspect failed>"
     end
   end
 
@@ -413,7 +413,7 @@ defmodule Sagents.Middleware.DebugLog do
     try do
       chain.custom_context.state.agent_id
     rescue
-      _ -> "unknown"
+      _error -> "unknown"
     end
   end
 end

@@ -252,7 +252,7 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
   @spec get_filesystem(tuple()) :: {:ok, pid()} | {:error, :not_found}
   def get_filesystem(scope_key) when is_tuple(scope_key) do
     case ProcessRegistry.lookup({:filesystem_server, scope_key}) do
-      [{pid, _}] -> {:ok, pid}
+      [{pid, _value}] -> {:ok, pid}
       [] -> {:error, :not_found}
     end
   end
@@ -299,14 +299,14 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
   # succeeds immediately on the first check.
   defp await_registry_propagation(registry_key, expected_pid, attempts \\ 50) do
     case ProcessRegistry.lookup(registry_key) do
-      [{^expected_pid, _}] ->
+      [{^expected_pid, _value}] ->
         :ok
 
-      _ when attempts > 0 ->
+      _other when attempts > 0 ->
         Process.sleep(5)
         await_registry_propagation(registry_key, expected_pid, attempts - 1)
 
-      _ ->
+      _other ->
         Logger.warning(
           "Registry propagation timeout for #{inspect(registry_key)}, " <>
             "pid #{inspect(expected_pid)} is alive=#{Process.alive?(expected_pid)}"
@@ -334,7 +334,7 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
             end
         end
       catch
-        _, _ -> false
+        _kind, _reason -> false
       end
 
     if ready do

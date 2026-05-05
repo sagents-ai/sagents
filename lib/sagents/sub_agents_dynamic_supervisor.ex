@@ -69,7 +69,7 @@ defmodule Sagents.SubAgentsDynamicSupervisor do
   @spec whereis(String.t()) :: pid() | nil
   def whereis(agent_id) do
     case ProcessRegistry.lookup({:sub_agents_supervisor, agent_id}) do
-      [{pid, _}] -> pid
+      [{pid, _value}] -> pid
       [] -> nil
     end
   end

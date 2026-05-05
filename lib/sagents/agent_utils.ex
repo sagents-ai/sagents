@@ -69,7 +69,7 @@ defmodule Sagents.AgentUtils do
           {:interrupt, interrupt_data}
         end
 
-      _ ->
+      _other ->
         # No tool calls in last message
         :continue
     end
@@ -140,7 +140,7 @@ defmodule Sagents.AgentUtils do
       %Message{role: :assistant, tool_calls: tool_calls} when is_list(tool_calls) ->
         tool_calls
 
-      _ ->
+      _other ->
         []
     end
   end

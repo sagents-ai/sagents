@@ -39,7 +39,7 @@ defmodule Sagents.FileSystemServerTest do
       rescue
         ArgumentError -> :ok
       catch
-        :exit, _ -> :ok
+        :exit, _reason -> :ok
       end
     end)
 
@@ -662,7 +662,7 @@ defmodule Sagents.FileSystemServerTest do
         rescue
           ArgumentError -> :ok
         catch
-          :exit, _ -> :ok
+          :exit, _reason -> :ok
         end
       end)
 
@@ -758,7 +758,7 @@ defmodule Sagents.FileSystemServerTest do
 
       {:ok, _pid, _ref} = FileSystemServer.subscribe({:agent, agent_id})
 
-      {:error, _} =
+      {:error, _reason} =
         FileSystemServer.write_file({:agent, agent_id}, "/ReadOnly/test.txt", "content")
 
       refute_receive {:file_system, _}, 50
@@ -792,14 +792,14 @@ defmodule Sagents.FileSystemServerTest do
         end)
 
       # Synchronize: wait until the server has processed the subscribe call
-      _ = :sys.get_state(server_pid)
+      _state = :sys.get_state(server_pid)
       assert Sagents.Publisher.State.count(:sys.get_state(server_pid).publisher) == 1
 
       Process.exit(sub, :kill)
 
       # Synchronize again: a follow-up call serializes after the :DOWN handler
-      _ = :sys.get_state(server_pid)
-      _ = :sys.get_state(server_pid)
+      _state1 = :sys.get_state(server_pid)
+      _state2 = :sys.get_state(server_pid)
       assert Sagents.Publisher.State.count(:sys.get_state(server_pid).publisher) == 0
     end
   end
@@ -890,7 +890,7 @@ defmodule Sagents.FileSystemServerTest do
 
           entries =
             :ets.tab2list(storage_table)
-            |> Enum.map(fn {path, _} ->
+            |> Enum.map(fn {path, _value} ->
               {:ok, entry} = Sagents.FileSystem.FileEntry.new_indexed_file(path)
               entry
             end)

@@ -96,7 +96,7 @@ defmodule Sagents.Publisher.State do
     channel_subs = Map.get(state.channels, channel, %{})
 
     case Map.pop(channel_subs, pid) do
-      {nil, _} ->
+      {nil, _subs} ->
         state
 
       {ref, new_channel_subs} ->
@@ -115,7 +115,7 @@ defmodule Sagents.Publisher.State do
   @spec remove_ref(t(), reference()) :: {:ok, t()} | :error
   def remove_ref(%__MODULE__{} = state, ref) when is_reference(ref) do
     case Map.pop(state.monitors, ref) do
-      {nil, _} ->
+      {nil, _monitors} ->
         :error
 
       {{pid, channel}, new_monitors} ->

@@ -93,7 +93,7 @@ defmodule Sagents.AgentServerMessagePreprocessorTest do
   # Helper to extract text content from a message
   defp text_content(%Message{content: content}) when is_binary(content), do: content
 
-  defp text_content(%Message{content: [%{content: text} | _]}), do: text
+  defp text_content(%Message{content: [%{content: text} | _rest]}), do: text
 
   describe "without message_preprocessor" do
     test "message flows unchanged to both state and display" do

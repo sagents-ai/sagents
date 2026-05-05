@@ -124,7 +124,7 @@ defmodule Sagents.AgentServerToolCallAugmentationTest do
           # NO display_text
           description: "Plain tool",
           parameters_schema: %{type: "object", properties: %{}},
-          function: fn _, _ -> {:ok, "Done"} end
+          function: fn _args, _context -> {:ok, "Done"} end
         })
 
       {:ok, model} = ChatAnthropic.new(%{model: "claude-3-5-haiku-latest", api_key: "test"})

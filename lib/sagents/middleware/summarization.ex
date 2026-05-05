@@ -296,7 +296,7 @@ defmodule Sagents.Middleware.Summarization do
           # Check if the next few messages contain tool results
           has_pending_tool_results?(messages, index, @search_range_for_tool_pairs)
 
-        _ ->
+        _other ->
           # Not an assistant with tool calls, safe to cut here
           true
       end
@@ -309,7 +309,7 @@ defmodule Sagents.Middleware.Summarization do
     |> Enum.slice(start_index, search_range)
     |> Enum.any?(fn
       %Message{role: :tool} -> true
-      _ -> false
+      _other -> false
     end)
   end
 
@@ -350,7 +350,7 @@ defmodule Sagents.Middleware.Summarization do
     Map.get(metadata, :model) || Map.get(metadata, "model")
   end
 
-  defp get_model_from_state(_), do: nil
+  defp get_model_from_state(_other), do: nil
 
   defp messages_to_text(messages) do
     Enum.map_join(messages, "\n", &SummarizeConversationChain.for_summary_text/1)
@@ -438,7 +438,7 @@ defmodule Sagents.Middleware.Summarization do
 
   defp count_content_part_tokens(%{type: :image}), do: 1000
   defp count_content_part_tokens(%{type: :image_url}), do: 1000
-  defp count_content_part_tokens(_), do: 10
+  defp count_content_part_tokens(_other), do: 10
 
   # Rough estimation: ~1.3 tokens per word, 4 chars per token on average
   defp estimate_text_tokens(text) when is_binary(text) do
@@ -452,5 +452,5 @@ defmodule Sagents.Middleware.Summarization do
     div(word_based + char_based, 2)
   end
 
-  defp estimate_text_tokens(_), do: 0
+  defp estimate_text_tokens(_other), do: 0
 end

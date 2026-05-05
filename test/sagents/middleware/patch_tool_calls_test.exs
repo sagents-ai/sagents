@@ -557,7 +557,7 @@ defmodule Sagents.Middleware.PatchToolCallsTest do
             Enum.any?(msg.tool_results || [], fn r ->
               case r.content do
                 [%Message.ContentPart{content: content}] -> content =~ "was cancelled"
-                _ -> false
+                _other -> false
               end
             end)
         end)

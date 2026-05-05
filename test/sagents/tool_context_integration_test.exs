@@ -45,7 +45,7 @@ defmodule Sagents.ToolContextIntegrationTest do
                })
              ]}
 
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("Done.")]}
         end
       end)
@@ -108,7 +108,7 @@ defmodule Sagents.ToolContextIntegrationTest do
                })
              ]}
 
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("Done.")]}
         end
       end)
@@ -164,7 +164,7 @@ defmodule Sagents.ToolContextIntegrationTest do
                })
              ]}
 
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("Done.")]}
         end
       end)
@@ -224,7 +224,7 @@ defmodule Sagents.ToolContextIntegrationTest do
                })
              ]}
 
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("Done.")]}
         end
       end)
@@ -278,7 +278,7 @@ defmodule Sagents.ToolContextIntegrationTest do
                })
              ]}
 
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("Done.")]}
         end
       end)

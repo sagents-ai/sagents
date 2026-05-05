@@ -109,7 +109,7 @@ defmodule Sagents.AgentTest do
 
     test "requires model parameter" do
       {:error, changeset} = Agent.new(%{})
-      assert {"can't be blank", _} = changeset.errors[:model]
+      assert {"can't be blank", _opts} = changeset.errors[:model]
     end
 
     test "creates agent with system prompt" do
@@ -284,7 +284,7 @@ defmodule Sagents.AgentTest do
                )
 
       refute changeset.valid?
-      assert {message, _} = changeset.errors[:middleware]
+      assert {message, _opts} = changeset.errors[:middleware]
       assert message =~ "initialization failed"
       assert message =~ "bogus_tool_name"
       assert message =~ "find_in_file"
@@ -889,7 +889,7 @@ defmodule Sagents.AgentTest do
       case result do
         {:error, %LangChainError{} = err} -> refute err.message =~ "not found"
         {:error, msg} when is_binary(msg) -> refute msg =~ "not found"
-        _ -> :ok
+        _other -> :ok
       end
     end
 

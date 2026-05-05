@@ -70,7 +70,7 @@ defmodule Sagents.TestDisplayMessagePersistenceForwarding do
 
     case :persistent_term.get({__MODULE__, :synthetic_response}, :ok) do
       :ok -> {:ok, %{id: "synthetic-#{System.unique_integer([:positive])}", attrs: attrs}}
-      {:error, _} = err -> err
+      {:error, _reason} = err -> err
       :raise -> raise "Simulated synthetic persistence error"
     end
   end

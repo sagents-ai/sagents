@@ -75,6 +75,7 @@
           {Credo.Check.Consistency.SpaceAroundOperators, []},
           {Credo.Check.Consistency.SpaceInParentheses, []},
           {Credo.Check.Consistency.TabsOrSpaces, []},
+          {Credo.Check.Consistency.UnusedVariableNames, [force: :meaningful]},
 
           #
           ## Design Checks
@@ -192,7 +193,7 @@
           #   and be sure to use `mix credo --strict` to see low priority checks)
           #
           {Credo.Check.Consistency.MultiAliasImportRequireUse, []},
-          {Credo.Check.Consistency.UnusedVariableNames, []},
+          # {Credo.Check.Consistency.UnusedVariableNames, []},
           {Credo.Check.Design.DuplicatedCode, []},
           {Credo.Check.Design.SkipTestWithoutComment, []},
           {Credo.Check.Readability.AliasAs, []},

@@ -84,12 +84,12 @@ defmodule Sagents.AgentCancelSubAgentTest do
               |> List.wrap()
               |> Enum.map_join("", fn
                 %{content: c} when is_binary(c) -> c
-                _ -> ""
+                _other -> ""
               end)
 
             text =~ "research things slowly"
 
-          _ ->
+          _other ->
             false
         end)
 
@@ -138,7 +138,7 @@ defmodule Sagents.AgentCancelSubAgentTest do
     sup_pid = SubAgentsDynamicSupervisor.whereis(agent_id)
     assert is_pid(sup_pid)
 
-    [{_, sub_pid, :worker, _}] = DynamicSupervisor.which_children(sup_pid)
+    [{_id, sub_pid, :worker, _modules}] = DynamicSupervisor.which_children(sup_pid)
     assert is_pid(sub_pid)
 
     ref = Process.monitor(sub_pid)

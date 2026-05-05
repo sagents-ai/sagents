@@ -213,7 +213,7 @@ defmodule Sagents.FileSystem.Persistence.Disk do
           end
         end)
 
-      {:error, _} ->
+      {:error, _reason} ->
         []
     end
   end

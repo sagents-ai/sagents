@@ -38,7 +38,7 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
 
   setup_all do
     unless Process.whereis(Sagents.Registry) do
-      {:ok, _} = Registry.start_link(keys: :unique, name: Sagents.Registry)
+      {:ok, _pid} = Registry.start_link(keys: :unique, name: Sagents.Registry)
     end
 
     Mimic.copy(ChatAnthropic)
@@ -65,7 +65,7 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
       )
 
     # Start the SubAgentsDynamicSupervisor that SubAgent middleware needs
-    {:ok, _} = SubAgentsDynamicSupervisor.start_link(agent_id: agent.agent_id)
+    {:ok, _pid} = SubAgentsDynamicSupervisor.start_link(agent_id: agent.agent_id)
 
     agent
   end

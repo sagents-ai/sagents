@@ -69,7 +69,7 @@ defmodule Sagents.FileSystem.FileSystemConfigTest do
       }
 
       assert {:error, changeset} = FileSystemConfig.new(attrs)
-      assert %{base_directory: [_]} = errors_on(changeset)
+      assert %{base_directory: _message_template} = errors_on(changeset)
     end
 
     test "rejects base_directory ending with /" do
@@ -79,7 +79,7 @@ defmodule Sagents.FileSystem.FileSystemConfigTest do
       }
 
       assert {:error, changeset} = FileSystemConfig.new(attrs)
-      assert %{base_directory: [_]} = errors_on(changeset)
+      assert %{base_directory: _message_template} = errors_on(changeset)
     end
 
     test "rejects base_directory containing dots" do
@@ -89,7 +89,7 @@ defmodule Sagents.FileSystem.FileSystemConfigTest do
       }
 
       assert {:error, changeset} = FileSystemConfig.new(attrs)
-      assert %{base_directory: [_]} = errors_on(changeset)
+      assert %{base_directory: _message_template} = errors_on(changeset)
     end
 
     test "rejects negative debounce_ms" do
@@ -100,7 +100,7 @@ defmodule Sagents.FileSystem.FileSystemConfigTest do
       }
 
       assert {:error, changeset} = FileSystemConfig.new(attrs)
-      assert %{debounce_ms: [_]} = errors_on(changeset)
+      assert %{debounce_ms: _message_template} = errors_on(changeset)
     end
 
     test "accepts any module atom" do

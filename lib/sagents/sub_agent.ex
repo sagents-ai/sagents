@@ -640,7 +640,7 @@ defmodule Sagents.SubAgent do
        when is_binary(system_prompt) and system_prompt != "" do
     case instructions do
       nil -> [Message.new_system!(system_prompt)]
-      _ -> [Message.new_system!(system_prompt), Message.new_user!(instructions)]
+      _other -> [Message.new_system!(system_prompt), Message.new_user!(instructions)]
     end
   end
 
@@ -663,12 +663,12 @@ defmodule Sagents.SubAgent do
           true -> nil
         end
 
-      _ ->
+      _other ->
         nil
     end)
   end
 
-  defp extract_interrupt_on_from_middleware(_), do: %{}
+  defp extract_interrupt_on_from_middleware(_other), do: %{}
 
   # Execute chain using the mode system (replaces execute_chain_with_hitl/2)
   #
@@ -844,7 +844,7 @@ defmodule Sagents.SubAgent do
         [] ->
           add_error(changeset, :tools, "must contain at least one tool")
 
-        _ ->
+        _other ->
           add_error(changeset, :tools, "must be a list")
       end
     end
@@ -863,7 +863,7 @@ defmodule Sagents.SubAgent do
         names when is_list(names) ->
           validate_tool_names_exist(changeset, names, tools)
 
-        _ ->
+        _other ->
           add_error(changeset, :until_tool, "must be a string or list of strings")
       end
     end
@@ -911,7 +911,7 @@ defmodule Sagents.SubAgent do
     defp present?(nil), do: false
     defp present?(""), do: false
     defp present?(str) when is_binary(str), do: true
-    defp present?(_), do: false
+    defp present?(_other), do: false
   end
 
   defmodule Compiled do
@@ -978,7 +978,7 @@ defmodule Sagents.SubAgent do
         %Sagents.Agent{} ->
           changeset
 
-        _ ->
+        _other ->
           add_error(changeset, :agent, "must be a Sagents.Agent struct")
       end
     end
@@ -991,7 +991,7 @@ defmodule Sagents.SubAgent do
         fun when is_function(fun, 1) ->
           changeset
 
-        _ ->
+        _other ->
           add_error(
             changeset,
             :extract_result,
@@ -1017,7 +1017,7 @@ defmodule Sagents.SubAgent do
             add_error(changeset, :initial_messages, "must be a list of Message structs")
           end
 
-        _ ->
+        _other ->
           add_error(changeset, :initial_messages, "must be a list of Message structs")
       end
     end
@@ -1133,7 +1133,7 @@ defmodule Sagents.SubAgent do
   def extract_middleware_module(%Sagents.MiddlewareEntry{module: module}), do: module
   def extract_middleware_module({module, _opts}) when is_atom(module), do: module
   def extract_middleware_module(module) when is_atom(module), do: module
-  def extract_middleware_module(_), do: nil
+  def extract_middleware_module(_other), do: nil
 
   ## Private Functions
 

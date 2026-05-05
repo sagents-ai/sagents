@@ -129,7 +129,7 @@ defmodule Sagents.Persistence.StateSerializer do
         messages when is_list(messages) ->
           Enum.map(messages, &deserialize_message/1)
 
-        _ ->
+        _other ->
           []
       end
 
@@ -141,14 +141,14 @@ defmodule Sagents.Persistence.StateSerializer do
             todo
           end)
 
-        _ ->
+        _other ->
           []
       end
 
     metadata =
       case data["metadata"] do
         metadata when is_map(metadata) -> metadata
-        _ -> %{}
+        _other -> %{}
       end
 
     case State.new(%{agent_id: agent_id, messages: messages, todos: todos, metadata: metadata}) do
@@ -266,7 +266,7 @@ defmodule Sagents.Persistence.StateSerializer do
   end
 
   defp serialize_options(opts) when is_map(opts), do: opts
-  defp serialize_options(_), do: %{}
+  defp serialize_options(_other), do: %{}
 
   defp deserialize_content_part(part) when is_map(part) do
     case ContentPart.new(%{
@@ -275,7 +275,7 @@ defmodule Sagents.Persistence.StateSerializer do
            options: deserialize_options(part["options"])
          }) do
       {:ok, content_part} -> content_part
-      {:error, _} -> raise "Failed to deserialize content part: #{inspect(part)}"
+      {:error, _reason} -> raise "Failed to deserialize content part: #{inspect(part)}"
     end
   end
 
@@ -287,7 +287,7 @@ defmodule Sagents.Persistence.StateSerializer do
   end
 
   defp deserialize_options(opts) when is_list(opts), do: opts
-  defp deserialize_options(_), do: []
+  defp deserialize_options(_other), do: []
 
   defp serialize_tool_call(%ToolCall{} = tool_call) do
     # Arguments can be either a map (when complete) or a string (during streaming)
@@ -355,7 +355,7 @@ defmodule Sagents.Persistence.StateSerializer do
 
     case ToolCall.new(attrs) do
       {:ok, tool_call} -> tool_call
-      {:error, _} -> raise "Failed to deserialize tool call: #{inspect(data)}"
+      {:error, _reason} -> raise "Failed to deserialize tool call: #{inspect(data)}"
     end
   end
 
@@ -382,7 +382,7 @@ defmodule Sagents.Persistence.StateSerializer do
            is_interrupt: data["is_interrupt"] || false
          }) do
       {:ok, tool_result} -> tool_result
-      {:error, _} -> raise "Failed to deserialize tool result: #{inspect(data)}"
+      {:error, _reason} -> raise "Failed to deserialize tool result: #{inspect(data)}"
     end
   end
 
@@ -455,7 +455,7 @@ defmodule Sagents.Persistence.StateSerializer do
   defp rename_subagent_type_arg(%{"name" => name, "arguments" => args} = tc)
        when name in ["task", "get_task_instructions"] and is_map(args) do
     case Map.pop(args, "subagent_type") do
-      {nil, _} -> tc
+      {nil, _rest} -> tc
       {value, rest} -> %{tc | "arguments" => Map.put(rest, "task_name", value)}
     end
   end

@@ -9,10 +9,10 @@ Mimic.copy(LangChain.ChatModels.ChatOpenAI)
 Mimic.copy(Sagents.SubAgentServer)
 
 # Start a shared PubSub for tests
-{:ok, _} = Phoenix.PubSub.Supervisor.start_link(name: :test_pubsub)
+{:ok, _pid} = Phoenix.PubSub.Supervisor.start_link(name: :test_pubsub)
 
 # Start Sagents infrastructure (registry + dynamic supervisors)
-{:ok, _} = Sagents.Supervisor.start_link(name: Sagents.Supervisor)
+{:ok, _pid} = Sagents.Supervisor.start_link(name: Sagents.Supervisor)
 
 # Define a real Presence module for tests (no mocks needed)
 defmodule Sagents.TestPresence do
@@ -22,7 +22,7 @@ defmodule Sagents.TestPresence do
 end
 
 # Start the test Presence (Phoenix.Presence uses Supervisor.start_link/3 internally)
-{:ok, _} = Supervisor.start_link([Sagents.TestPresence], strategy: :one_for_one)
+{:ok, _pid} = Supervisor.start_link([Sagents.TestPresence], strategy: :one_for_one)
 
 Logger.configure(level: :warning)
 ExUnit.configure(exclude: [live_call: true, cluster: true, slow: true])

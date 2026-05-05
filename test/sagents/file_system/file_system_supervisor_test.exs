@@ -302,7 +302,7 @@ defmodule Sagents.FileSystem.FileSystemSupervisorTest do
       {:ok, fs_pid} = FileSystemSupervisor.start_filesystem(scope_key, [config], supervisor: sup)
 
       # Check Registry directly
-      assert [{^fs_pid, _}] =
+      assert [{^fs_pid, _value}] =
                Sagents.ProcessRegistry.lookup({:filesystem_server, scope_key})
 
       # Clean up

@@ -148,7 +148,7 @@ defmodule Sagents.SubAgentServer do
   @spec whereis(String.t()) :: pid() | nil
   def whereis(sub_agent_id) when is_binary(sub_agent_id) do
     case ProcessRegistry.lookup({:sub_agent, sub_agent_id}) do
-      [{pid, _}] -> pid
+      [{pid, _value}] -> pid
       [] -> nil
     end
   end
@@ -210,7 +210,7 @@ defmodule Sagents.SubAgentServer do
   def resume(sub_agent_id, decisions) when is_binary(sub_agent_id) and is_list(decisions) do
     GenServer.call(get_name(sub_agent_id), {:resume, decisions}, :infinity)
   catch
-    :exit, {:noproc, _} ->
+    :exit, {:noproc, _info} ->
       {:error, "SubAgent process #{sub_agent_id} is no longer running"}
   end
 
@@ -259,7 +259,7 @@ defmodule Sagents.SubAgentServer do
       pid -> GenServer.stop(pid, :normal)
     end
   catch
-    :exit, {:noproc, _} -> :ok
+    :exit, {:noproc, _info} -> :ok
   end
 
   @doc """
@@ -291,7 +291,7 @@ defmodule Sagents.SubAgentServer do
         try do
           GenServer.call(pid, :prepare_cancel, 500)
         catch
-          :exit, _ -> :ok
+          :exit, _reason -> :ok
         end
 
         terminate_via_supervisor(pid)
@@ -304,7 +304,7 @@ defmodule Sagents.SubAgentServer do
         %{parent_agent_id: id} = GenServer.call(pid, :get_subagent, 200)
         id
       catch
-        :exit, _ -> nil
+        :exit, _reason -> nil
       end
 
     sup_pid =
@@ -329,7 +329,7 @@ defmodule Sagents.SubAgentServer do
         :ok
     end
   catch
-    :exit, _ -> :ok
+    :exit, _reason -> :ok
   end
 
   ## Server Callbacks
@@ -347,7 +347,7 @@ defmodule Sagents.SubAgentServer do
     # display update on cancel.
     case Keyword.get(opts, :tool_call_id) do
       id when is_binary(id) -> Process.put(:tool_call_id, id)
-      _ -> :ok
+      _other -> :ok
     end
 
     server_state = %ServerState{
@@ -489,7 +489,7 @@ defmodule Sagents.SubAgentServer do
         %{messages: messages} when is_list(messages) and messages != [] ->
           %{error: nil, final_messages: messages, turn_count: length(messages)}
 
-        _ ->
+        _other ->
           %{}
       end
 
@@ -509,7 +509,7 @@ defmodule Sagents.SubAgentServer do
   defp get_subagent_middleware(%ServerState{subagent: subagent}) do
     case subagent.chain do
       %{custom_context: %{parent_middleware: mw}} when is_list(mw) -> mw
-      _ -> []
+      _other -> []
     end
   end
 
@@ -556,7 +556,7 @@ defmodule Sagents.SubAgentServer do
     final_messages =
       case subagent.chain do
         %{messages: messages} when is_list(messages) -> messages
-        _ -> []
+        _other -> []
       end
 
     context = %{
@@ -647,7 +647,7 @@ defmodule Sagents.SubAgentServer do
     end)
   end
 
-  defp extract_token_usage(_), do: nil
+  defp extract_token_usage(_other), do: nil
 
   # Extract a friendly name from the subagent
   defp get_subagent_name(subagent) do
@@ -685,7 +685,7 @@ defmodule Sagents.SubAgentServer do
           %{name: name} when is_binary(name) ->
             %{name: name, description: nil, parameters: [], async: false}
 
-          _ ->
+          _other ->
             %{name: inspect(tool), description: nil, parameters: [], async: false}
         end
       end)
@@ -705,7 +705,7 @@ defmodule Sagents.SubAgentServer do
     end)
   end
 
-  defp extract_parameters(_), do: []
+  defp extract_parameters(_other), do: []
 
   # Extract middleware from the subagent's chain custom_context
   # Returns list of middleware entries (MiddlewareEntry structs) for UI display

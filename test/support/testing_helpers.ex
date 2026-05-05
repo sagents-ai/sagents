@@ -232,15 +232,15 @@ defmodule Sagents.TestingHelpers do
         pid = AgentServer.get_pid(agent_id)
         # Subscribe the calling test process to the agent's main + debug channels
         # via direct subscribe (the new Sagents.Publisher transport).
-        _ = AgentServer.subscribe(agent_id)
-        _ = AgentServer.subscribe_debug(agent_id)
+        _result = AgentServer.subscribe(agent_id)
+        _result = AgentServer.subscribe_debug(agent_id)
         {:ok, %{agent_id: agent_id, pid: pid}}
 
       {:error, {:already_started, _supervisor_pid}} ->
         # Already started - return existing pid
         pid = AgentServer.get_pid(agent_id)
-        _ = AgentServer.subscribe(agent_id)
-        _ = AgentServer.subscribe_debug(agent_id)
+        _result = AgentServer.subscribe(agent_id)
+        _result = AgentServer.subscribe_debug(agent_id)
         {:ok, %{agent_id: agent_id, pid: pid}}
 
       {:error, reason} ->

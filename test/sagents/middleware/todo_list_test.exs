@@ -335,11 +335,11 @@ defmodule Sagents.Middleware.TodoListTest do
         todos: [%{"id" => "1", "content" => "Task", "status" => "pending"}]
       }
 
-      {:ok, merge_msg, _} = tool.function.(params, %{state: state})
+      {:ok, merge_msg, _state} = tool.function.(params, %{state: state})
       assert merge_msg =~ "merged"
 
       params_replace = %{merge: false, todos: params.todos}
-      {:ok, replace_msg, _} = tool.function.(params_replace, %{state: state})
+      {:ok, replace_msg, _state} = tool.function.(params_replace, %{state: state})
       assert replace_msg =~ "replaced"
     end
   end
@@ -354,7 +354,7 @@ defmodule Sagents.Middleware.TodoListTest do
         todos: [%{"id" => "test-id", "content" => "Task", "status" => "pending"}]
       }
 
-      {:ok, _, updated_state} = tool.function.(params, %{state: state})
+      {:ok, _msg, updated_state} = tool.function.(params, %{state: state})
 
       todo = State.get_todo(updated_state, "test-id")
       assert todo.content == "Task"
@@ -373,7 +373,7 @@ defmodule Sagents.Middleware.TodoListTest do
         ]
       }
 
-      {:ok, _, updated_state} = tool.function.(params, %{state: state})
+      {:ok, _msg, updated_state} = tool.function.(params, %{state: state})
 
       pending_todos = State.get_todos_by_status(updated_state, :pending)
       assert length(pending_todos) == 2

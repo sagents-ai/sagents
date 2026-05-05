@@ -1123,7 +1123,7 @@ defmodule Sagents.Middleware.FileSystem do
   end
 
   defp format_search_results(results, max_results, truncated) do
-    if Enum.empty?(results) or Enum.all?(results, fn {_, matches} -> Enum.empty?(matches) end) do
+    if Enum.empty?(results) or Enum.all?(results, fn {_path, matches} -> Enum.empty?(matches) end) do
       {:ok, "No matches found"}
     else
       formatted =
@@ -1262,7 +1262,9 @@ defmodule Sagents.Middleware.FileSystem do
     show_end = min(total_after, edit_end + @replace_edit_context_lines)
     limit = max(show_end - show_start + 1, 1)
 
-    {formatted, _, _, _} = TextLines.render(updated_content, start_line: show_start, limit: limit)
+    {formatted, _start, _end, _truncated} =
+      TextLines.render(updated_content, start_line: show_start, limit: limit)
+
     formatted
   end
 
@@ -1282,7 +1284,7 @@ defmodule Sagents.Middleware.FileSystem do
       val when is_boolean(val) -> val
       "true" -> true
       "false" -> false
-      _ -> default
+      _other -> default
     end
   end
 
@@ -1291,7 +1293,7 @@ defmodule Sagents.Middleware.FileSystem do
       nil -> default
       val when is_integer(val) -> val
       val when is_binary(val) -> String.to_integer(val)
-      _ -> default
+      _other -> default
     end
   end
 

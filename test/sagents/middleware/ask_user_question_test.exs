@@ -110,7 +110,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
         ]
       }
 
-      assert {:interrupt, _, question_data} = tool.function.(args, %{})
+      assert {:interrupt, _msg, question_data} = tool.function.(args, %{})
       assert question_data.response_type == :multi_select
     end
 
@@ -120,7 +120,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
         "response_type" => "freeform"
       }
 
-      assert {:interrupt, _, question_data} = tool.function.(args, %{})
+      assert {:interrupt, _msg, question_data} = tool.function.(args, %{})
       assert question_data.response_type == :freeform
       assert question_data.options == []
     end
@@ -135,7 +135,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
         ]
       }
 
-      assert {:interrupt, _, question_data} = tool.function.(args, %{})
+      assert {:interrupt, _msg, question_data} = tool.function.(args, %{})
       assert hd(question_data.options).description == "Relational"
     end
 
@@ -151,7 +151,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
         "allow_cancel" => false
       }
 
-      assert {:interrupt, _, question_data} = tool.function.(args, %{})
+      assert {:interrupt, _msg, question_data} = tool.function.(args, %{})
       assert question_data.allow_other == true
       assert question_data.allow_cancel == false
     end
@@ -172,7 +172,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
 
     test "empty question returns error", %{tool: tool} do
       args = %{"question" => "", "response_type" => "single_select"}
-      assert {:error, _} = tool.function.(args, %{})
+      assert {:error, _reason} = tool.function.(args, %{})
     end
 
     test "invalid response_type returns error", %{tool: tool} do
@@ -242,7 +242,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
         ]
       }
 
-      assert {:error, _} = tool.function.(args, %{})
+      assert {:error, _reason} = tool.function.(args, %{})
     end
 
     test "freeform with options returns error", %{tool: tool} do
@@ -446,7 +446,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
       }
 
       response = %{type: :answer, other_text: ""}
-      assert {:error, _} = AskUserQuestion.process_response(response, question_data)
+      assert {:error, _reason} = AskUserQuestion.process_response(response, question_data)
     end
 
     test "invalid response format returns error" do
@@ -458,7 +458,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
         allow_cancel: true
       }
 
-      assert {:error, _} = AskUserQuestion.process_response(%{invalid: true}, question_data)
+      assert {:error, _reason} = AskUserQuestion.process_response(%{invalid: true}, question_data)
     end
   end
 
@@ -549,7 +549,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
     test "invalid response returns error", %{config: config, state: state} do
       response = %{type: :answer, selected: ["nonexistent"]}
 
-      assert {:error, _} =
+      assert {:error, _reason} =
                AskUserQuestion.handle_resume(nil, state, response, config, [])
     end
   end

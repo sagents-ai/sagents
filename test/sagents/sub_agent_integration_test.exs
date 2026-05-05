@@ -26,7 +26,7 @@ defmodule Sagents.SubAgentIntegrationTest do
   setup_all do
     # Ensure Registry is started
     unless Process.whereis(Sagents.Registry) do
-      {:ok, _} = Registry.start_link(keys: :unique, name: Sagents.Registry)
+      {:ok, _pid} = Registry.start_link(keys: :unique, name: Sagents.Registry)
     end
 
     # Copy modules for mocking
@@ -80,7 +80,7 @@ defmodule Sagents.SubAgentIntegrationTest do
                %MiddlewareEntry{module: SubAgentMiddleware} ->
                  true
 
-               _ ->
+               _other ->
                  false
              end)
 
@@ -122,7 +122,7 @@ defmodule Sagents.SubAgentIntegrationTest do
                %MiddlewareEntry{module: SubAgent} ->
                  true
 
-               _ ->
+               _other ->
                  false
              end)
 
@@ -131,7 +131,7 @@ defmodule Sagents.SubAgentIntegrationTest do
                %MiddlewareEntry{module: TodoList} ->
                  true
 
-               _ ->
+               _other ->
                  false
              end)
     end

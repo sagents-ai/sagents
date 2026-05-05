@@ -72,7 +72,7 @@ defmodule Mix.Tasks.Sagents.Setup do
   @impl Mix.Task
   def run(args) do
     # Parse arguments
-    {opts, parsed, _} = OptionParser.parse(args, switches: @switches, aliases: @aliases)
+    {opts, parsed, _invalid} = OptionParser.parse(args, switches: @switches, aliases: @aliases)
 
     # Validate context argument
     context_module = parse_context!(parsed)
@@ -113,7 +113,7 @@ defmodule Mix.Tasks.Sagents.Setup do
     prompt_live_helpers(config)
   end
 
-  defp parse_context!([context | _]) do
+  defp parse_context!([context | _rest]) do
     # Validate module name format
     unless context =~ ~r/^[A-Z][A-Za-z0-9.]*$/ do
       Mix.raise("Context module must be a valid Elixir module name")

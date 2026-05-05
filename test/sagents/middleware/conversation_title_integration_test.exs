@@ -182,7 +182,7 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
       )
 
       # Synchronize: ensure the middleware message has been processed
-      _ = AgentServer.get_state(agent_id)
+      _state = AgentServer.get_state(agent_id)
 
       # Mock only ONE ChatAnthropic call - for the agent's response
       # No second call should happen for title generation (verifies middleware skips title gen)

@@ -22,7 +22,7 @@ defmodule Sagents.Middleware.SubAgentTest do
   setup_all do
     # Ensure Registry is started
     unless Process.whereis(Sagents.Registry) do
-      {:ok, _} = Registry.start_link(keys: :unique, name: Sagents.Registry)
+      {:ok, _pid} = Registry.start_link(keys: :unique, name: Sagents.Registry)
     end
 
     # Copy modules for mocking
@@ -688,7 +688,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       ]
 
       {:ok, middleware_config} = SubAgentMiddleware.init(opts)
-      [task_tool | _] = SubAgentMiddleware.tools(middleware_config)
+      [task_tool | _rest] = SubAgentMiddleware.tools(middleware_config)
 
       assert is_binary(task_tool.description)
       assert task_tool.description =~ "Delegate a task"
@@ -708,7 +708,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       ]
 
       {:ok, middleware_config} = SubAgentMiddleware.init(opts)
-      [task_tool | _] = SubAgentMiddleware.tools(middleware_config)
+      [task_tool | _rest] = SubAgentMiddleware.tools(middleware_config)
 
       assert is_binary(task_tool.description)
       assert task_tool.description =~ "Delegate a task"
@@ -741,8 +741,8 @@ defmodule Sagents.Middleware.SubAgentTest do
       {:ok, one_cfg} = SubAgentMiddleware.init(one_opts)
       {:ok, many_cfg} = SubAgentMiddleware.init(many_opts)
 
-      [one_tool | _] = SubAgentMiddleware.tools(one_cfg)
-      [many_tool | _] = SubAgentMiddleware.tools(many_cfg)
+      [one_tool | _rest] = SubAgentMiddleware.tools(one_cfg)
+      [many_tool | _rest] = SubAgentMiddleware.tools(many_cfg)
 
       assert one_tool.description == many_tool.description
     end
@@ -2025,7 +2025,7 @@ defmodule Sagents.Middleware.SubAgentTest do
     test "returns {:interrupt, ...} when sub-agent re-interrupts" do
       new_inner = %{action_requests: [%{tool_name: "file_write"}]}
 
-      expect(SubAgentServer, :resume, fn "sub-1", _ ->
+      expect(SubAgentServer, :resume, fn "sub-1", _decisions ->
         {:interrupt, new_inner}
       end)
 
@@ -2048,7 +2048,7 @@ defmodule Sagents.Middleware.SubAgentTest do
     end
 
     test "returns {:ok, state} with error tool result on sub-agent failure" do
-      expect(SubAgentServer, :resume, fn "sub-1", _ ->
+      expect(SubAgentServer, :resume, fn "sub-1", _arg_2 ->
         {:error, :process_not_found}
       end)
 

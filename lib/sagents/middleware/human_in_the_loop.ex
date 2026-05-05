@@ -387,7 +387,7 @@ defmodule Sagents.Middleware.HumanInTheLoop do
   @impl true
   def handle_resume(
         agent,
-        %State{interrupt_data: %{action_requests: _}} = state,
+        %State{interrupt_data: %{action_requests: _requests}} = state,
         decisions,
         config,
         opts
@@ -500,7 +500,7 @@ defmodule Sagents.Middleware.HumanInTheLoop do
     end)
   end
 
-  defp normalize_interrupt_config(_), do: %{}
+  defp normalize_interrupt_config(_other), do: %{}
 
   defp get_last_assistant_message_with_tools(messages) do
     # Get all tool call IDs that already have results
@@ -532,7 +532,7 @@ defmodule Sagents.Middleware.HumanInTheLoop do
         %{allowed_decisions: decisions} when is_list(decisions) and decisions != [] ->
           true
 
-        _ ->
+        _other ->
           false
       end
     end)
@@ -554,7 +554,7 @@ defmodule Sagents.Middleware.HumanInTheLoop do
       |> Enum.map(fn %ToolCall{name: tool_name} ->
         {tool_name, Map.get(interrupt_on, tool_name, %{allowed_decisions: @default_decisions})}
       end)
-      |> Enum.uniq_by(fn {tool_name, _} -> tool_name end)
+      |> Enum.uniq_by(fn {tool_name, _config} -> tool_name end)
       |> Map.new()
 
     # Track which tool call IDs require HITL decisions
@@ -574,7 +574,7 @@ defmodule Sagents.Middleware.HumanInTheLoop do
     Enum.filter(results, & &1.is_interrupt)
   end
 
-  defp find_interrupt_results(_), do: []
+  defp find_interrupt_results(_other), do: []
 
   # Build interrupt_data from interrupt ToolResults, matching the format
   # produced by LangChain.Chains.LLMChain.Mode.Steps.extract_interrupt_data.
@@ -601,7 +601,7 @@ defmodule Sagents.Middleware.HumanInTheLoop do
     review_configs = Map.get(interrupt_data, :review_configs, %{})
 
     # Validate each decision
-    Enum.reduce_while(paired, :ok, fn {{action_req, decision}, index}, _ ->
+    Enum.reduce_while(paired, :ok, fn {{action_req, decision}, index}, _acc ->
       tool_name = action_req.tool_name
       tool_config = Map.get(review_configs, tool_name, %{allowed_decisions: @default_decisions})
       allowed = tool_config.allowed_decisions || @default_decisions

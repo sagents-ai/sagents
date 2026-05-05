@@ -55,7 +55,7 @@ defmodule Sagents.IntegrationTest do
              ]}
 
           # Second LLM call (after tool execution) - return final response
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("I've created the TODO list for you.")]}
         end
       end)
@@ -124,7 +124,7 @@ defmodule Sagents.IntegrationTest do
              ]}
 
           # Second LLM call (after tool execution) - return final response
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("I've created the file test.txt for you.")]}
         end
       end)
@@ -246,7 +246,7 @@ defmodule Sagents.IntegrationTest do
              ]}
 
           # Final call: respond to user
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("All done! I've completed the task.")]}
         end
       end)
@@ -319,7 +319,7 @@ defmodule Sagents.IntegrationTest do
                })
              ]}
 
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("The file already exists.")]}
         end
       end)
@@ -404,7 +404,7 @@ defmodule Sagents.IntegrationTest do
              ]}
 
           # Third LLM call (after second tool execution) - return final response
-          _ ->
+          _other ->
             {:ok, [Message.new_assistant!("Done!")]}
         end
       end)

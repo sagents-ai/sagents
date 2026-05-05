@@ -51,7 +51,7 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
         Enum.any?(messages, fn msg ->
           case msg do
             %{role: :tool} -> true
-            _ -> false
+            _other -> false
           end
         end)
 
@@ -97,7 +97,7 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
         Enum.any?(messages, fn msg ->
           case msg do
             %{role: :tool} -> true
-            _ -> false
+            _other -> false
           end
         end)
 
@@ -496,7 +496,7 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
           assert %{action_requests: [action]} = interrupt_data
           assert action.tool_name == "write_file"
 
-        _ ->
+        _other ->
           flunk("Expected interrupt")
       end
     end

@@ -329,21 +329,21 @@ defmodule Sagents.FileSystem.FileSystemState do
         # entries are gone).
         affected =
           state.files
-          |> Enum.filter(fn {path, _} ->
+          |> Enum.filter(fn {path, _entry} ->
             path == old_path or String.starts_with?(path, old_path <> "/")
           end)
-          |> Enum.sort_by(fn {path, _} -> String.length(path) end)
+          |> Enum.sort_by(fn {path, _entry} -> String.length(path) end)
 
         case affected do
           [] ->
             {:error, :enoent, state}
 
-          _ ->
+          _other ->
             # Check target doesn't conflict (except with entries we're moving)
-            moving_paths = MapSet.new(affected, fn {path, _} -> path end)
+            moving_paths = MapSet.new(affected, fn {path, _entry} -> path end)
 
             conflict =
-              Enum.any?(affected, fn {path, _} ->
+              Enum.any?(affected, fn {path, _entry} ->
                 target = String.replace_prefix(path, old_path, new_path)
                 Map.has_key?(state.files, target) and not MapSet.member?(moving_paths, target)
               end)
@@ -447,7 +447,7 @@ defmodule Sagents.FileSystem.FileSystemState do
           state
         end
 
-      _ ->
+      _other ->
         # File no longer dirty or doesn't exist - no-op
         state
     end
@@ -668,11 +668,11 @@ defmodule Sagents.FileSystem.FileSystemState do
 
     case invalid_configs do
       [] -> :ok
-      _ -> {:error, :invalid_configs}
+      _other -> {:error, :invalid_configs}
     end
   end
 
-  defp validate_all_configs(_), do: {:error, :invalid_configs}
+  defp validate_all_configs(_other), do: {:error, :invalid_configs}
 
   # Extract agent_id from scope_key for backward compatibility with persistence modules
   # Persistence modules still expect agent_id as first parameter
@@ -731,7 +731,7 @@ defmodule Sagents.FileSystem.FileSystemState do
             state
         end
 
-      _ ->
+      _other ->
         state
     end
   end

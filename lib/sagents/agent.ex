@@ -263,7 +263,7 @@ defmodule Sagents.Agent do
   defp put_agent_id_if_missing(changeset) do
     case get_field(changeset, :agent_id) do
       nil -> put_change(changeset, :agent_id, generate_agent_id())
-      _ -> changeset
+      _existing -> changeset
     end
   end
 
@@ -669,7 +669,7 @@ defmodule Sagents.Agent do
         %{^key => callback} when is_function(callback) ->
           apply(callback, args)
 
-        _ ->
+        _other ->
           :ok
       end
     end)
@@ -729,7 +729,7 @@ defmodule Sagents.Agent do
   defp check_for_streaming_error(%State{messages: messages}) do
     case List.last(messages) do
       %Message{status: :cancelled, metadata: %{streaming_error: error}} -> error
-      _ -> nil
+      _other -> nil
     end
   end
 
@@ -749,7 +749,7 @@ defmodule Sagents.Agent do
         prompt when is_binary(prompt) and prompt != "" ->
           [Message.new_system!(prompt) | messages]
 
-        _ ->
+        _other ->
           messages
       end
 
@@ -957,7 +957,7 @@ defmodule Sagents.Agent do
             end)
             |> Enum.map(& &1.processed_content)
 
-          _ ->
+          _other ->
             []
         end
       end)

@@ -97,7 +97,7 @@ defmodule Sagents.FileSystem.FileEntry do
       String.trim(name) == name
   end
 
-  def valid_name?(_), do: false
+  def valid_name?(_other), do: false
 
   @doc """
   Creates a new file entry.
@@ -174,7 +174,7 @@ defmodule Sagents.FileSystem.FileEntry do
         {:ok, updated_metadata} ->
           {:ok, %{entry | content: content, loaded: true, metadata: updated_metadata}}
 
-        {:error, _} = error ->
+        {:error, _reason} = error ->
           error
       end
     else
@@ -222,7 +222,7 @@ defmodule Sagents.FileSystem.FileEntry do
              metadata: new_metadata
          }}
 
-      {:error, _} = error ->
+      {:error, _reason} = error ->
         error
     end
   end
@@ -254,7 +254,7 @@ defmodule Sagents.FileSystem.FileEntry do
 
       path ->
         # Drop the first empty segment from the leading "/"
-        [_ | segments] = String.split(path, "/")
+        [_leading | segments] = String.split(path, "/")
 
         case Enum.find(segments, fn seg -> not valid_name?(seg) end) do
           nil ->

@@ -56,7 +56,9 @@ defmodule Sagents.AgentSupervisorTest do
 
       # Find the AgentServer child
       children = Supervisor.which_children(sup_pid)
-      {_, agent_server_pid, _, _} = Enum.find(children, fn {id, _, _, _} -> id == AgentServer end)
+
+      {_id, agent_server_pid, _type, _modules} =
+        Enum.find(children, fn {id, _pid, _type, _modules} -> id == AgentServer end)
 
       assert agent_server_pid != nil
 
@@ -129,8 +131,8 @@ defmodule Sagents.AgentSupervisorTest do
       # Get original child PIDs
       children_before = Supervisor.which_children(sup_pid)
 
-      {_, agent_server_pid_before, _, _} =
-        Enum.find(children_before, fn {id, _, _, _} -> id == AgentServer end)
+      {_id, agent_server_pid_before, _type, _modules} =
+        Enum.find(children_before, fn {id, _pid, _type, _modules} -> id == AgentServer end)
 
       sub_sup_pid_before = SubAgentsDynamicSupervisor.whereis(agent.agent_id)
 
@@ -143,8 +145,8 @@ defmodule Sagents.AgentSupervisorTest do
       # Both should restart with new PIDs
       children_after = Supervisor.which_children(sup_pid)
 
-      {_, agent_server_pid_after, _, _} =
-        Enum.find(children_after, fn {id, _, _, _} -> id == AgentServer end)
+      {_id, agent_server_pid_after, _type, _modules} =
+        Enum.find(children_after, fn {id, _pid, _type, _modules} -> id == AgentServer end)
 
       sub_sup_pid_after = SubAgentsDynamicSupervisor.whereis(agent.agent_id)
 
@@ -164,8 +166,8 @@ defmodule Sagents.AgentSupervisorTest do
       # Get original child PIDs
       children_before = Supervisor.which_children(sup_pid)
 
-      {_, agent_server_pid_before, _, _} =
-        Enum.find(children_before, fn {id, _, _, _} -> id == AgentServer end)
+      {_id, agent_server_pid_before, _type, _modules} =
+        Enum.find(children_before, fn {id, _pid, _type, _modules} -> id == AgentServer end)
 
       sub_sup_pid_before = SubAgentsDynamicSupervisor.whereis(agent.agent_id)
 
@@ -178,8 +180,8 @@ defmodule Sagents.AgentSupervisorTest do
       # AgentServer should be the same
       children_after = Supervisor.which_children(sup_pid)
 
-      {_, agent_server_pid_after, _, _} =
-        Enum.find(children_after, fn {id, _, _, _} -> id == AgentServer end)
+      {_id, agent_server_pid_after, _type, _modules} =
+        Enum.find(children_after, fn {id, _pid, _type, _modules} -> id == AgentServer end)
 
       sub_sup_pid_after = SubAgentsDynamicSupervisor.whereis(agent.agent_id)
 
@@ -217,7 +219,9 @@ defmodule Sagents.AgentSupervisorTest do
 
       # Find AgentServer in children
       children = Supervisor.which_children(sup_pid)
-      {_, agent_server_pid, _, _} = Enum.find(children, fn {id, _, _, _} -> id == AgentServer end)
+
+      {_id, agent_server_pid, _type, _modules} =
+        Enum.find(children, fn {id, _pid, _type, _modules} -> id == AgentServer end)
 
       assert agent_server_pid != nil
       assert Process.alive?(agent_server_pid)
@@ -244,7 +248,10 @@ defmodule Sagents.AgentSupervisorTest do
 
       # Get all child PIDs
       children = Supervisor.which_children(sup_pid)
-      {_, agent_server_pid, _, _} = Enum.find(children, fn {id, _, _, _} -> id == AgentServer end)
+
+      {_id, agent_server_pid, _type, _modules} =
+        Enum.find(children, fn {id, _pid, _type, _modules} -> id == AgentServer end)
+
       sub_sup_pid = SubAgentsDynamicSupervisor.whereis(agent_id)
 
       # Verify everything is running
@@ -480,7 +487,10 @@ defmodule Sagents.AgentSupervisorTest do
 
       # Get child PIDs
       children = Supervisor.which_children(sup_pid)
-      {_, agent_server_pid, _, _} = Enum.find(children, fn {id, _, _, _} -> id == AgentServer end)
+
+      {_id, agent_server_pid, _type, _modules} =
+        Enum.find(children, fn {id, _pid, _type, _modules} -> id == AgentServer end)
+
       sub_sup_pid = SubAgentsDynamicSupervisor.whereis(agent_id)
 
       # Monitor the supervisor
