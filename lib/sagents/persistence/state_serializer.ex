@@ -427,8 +427,6 @@ defmodule Sagents.Persistence.StateSerializer do
     _kind, _other -> :error
   end
 
-  defp safe_binary_to_term(_other), do: :error
-
   defp serialize_map_to_string_keys(map) when is_map(map) do
     Map.new(map, fn
       {k, v} when is_atom(k) -> {to_string(k), serialize_value(v)}

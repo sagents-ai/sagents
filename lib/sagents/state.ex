@@ -550,8 +550,6 @@ defmodule Sagents.State do
     any_middleware_claims?(data, middleware)
   end
 
-  defp interrupt_restorable?(_data, _middleware), do: false
-
   defp any_middleware_claims?(data, middleware) when is_map(data) do
     Enum.any?(middleware, &Sagents.Middleware.apply_restorable_interrupt?(&1, data))
   end
