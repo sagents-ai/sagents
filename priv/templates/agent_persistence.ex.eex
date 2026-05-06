@@ -3,7 +3,9 @@ defmodule <%= module %> do
   Implements `Sagents.AgentPersistence` for state snapshots.
 
   Persists full agent state (messages, todos, metadata) to the database
-  via `<%= conversations_module %>.save_agent_state/3`.
+  via `<%= conversations_module %>.save_agent_state/3`, and mirrors the
+  durable interrupt flag onto `conversation.metadata["interrupted"]` via
+  `set_interrupted/3` (called by sagents only on actual transitions).
   """
 
   @behaviour Sagents.AgentPersistence
@@ -15,7 +17,7 @@ defmodule <%= module %> do
     conversation_id = extract_conversation_id(context.agent_id)
 
     case <%= conversations_module %>.save_agent_state(scope, conversation_id, state_data) do
-      {:ok, _} ->
+      {:ok, _agent_state} ->
         Logger.debug("Persisted agent state for #{context.agent_id} (#{context.lifecycle})")
         :ok
 
@@ -43,6 +45,30 @@ defmodule <%= module %> do
   def load_state(scope, context) do
     conversation_id = extract_conversation_id(context.agent_id)
     <%= conversations_module %>.load_agent_state(scope, conversation_id)
+  end
+
+  @impl true
+  def set_interrupted(scope, context, interrupted?) do
+    conversation_id = extract_conversation_id(context.agent_id)
+
+    case <%= conversations_module %>.set_interrupt_status(scope, conversation_id, interrupted?) do
+      {:ok, _conversation} ->
+        :ok
+
+      {:error, :not_found} ->
+        Logger.warning(
+          "Skipping interrupt flag update for #{context.agent_id}: conversation not accessible in scope"
+        )
+
+        :ok
+
+      other ->
+        Logger.warning(
+          "Failed to update interrupt flag for #{context.agent_id}: #{inspect(other)}"
+        )
+
+        :ok
+    end
   end
 
   defp extract_conversation_id(agent_id) do

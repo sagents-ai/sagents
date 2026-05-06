@@ -1134,6 +1134,146 @@ defmodule Sagents.AgentServerTest do
     end
   end
 
+  describe "set_interrupted/3 transition tracking" do
+    alias Sagents.TestAgentPersistence
+
+    setup do
+      pubsub_name = :"test_pubsub_#{:erlang.unique_integer([:positive])}"
+      {:ok, _pubsub_pid} = start_supervised({Phoenix.PubSub, name: pubsub_name})
+
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      TestAgentPersistence.setup()
+
+      {:ok, agent: agent, agent_id: agent_id, pubsub_name: pubsub_name}
+    end
+
+    test "no set_interrupted call when execute completes from idle without interrupt", %{
+      agent: agent,
+      agent_id: agent_id,
+      pubsub_name: pubsub_name
+    } do
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        new_state = State.add_message(state, Message.new_assistant!(%{content: "Done!"}))
+        {:ok, new_state}
+      end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: {Phoenix.PubSub, pubsub_name},
+          id: "test_no_flag_#{:erlang.unique_integer([:positive])}",
+          agent_persistence: TestAgentPersistence
+        )
+
+      :ok = AgentServer.execute(agent_id)
+      Process.sleep(100)
+
+      assert AgentServer.get_status(agent_id) == :idle
+      assert TestAgentPersistence.get_interrupt_calls_for(agent_id) == []
+    end
+
+    test "set_interrupted(true) fires once on interrupt, set_interrupted(false) once on resume completion",
+         %{
+           agent: agent,
+           agent_id: agent_id,
+           pubsub_name: pubsub_name
+         } do
+      initial_state = State.new!(%{messages: [Message.new_user!("Write file")]})
+
+      interrupt_data = %{
+        action_requests: [
+          %{tool_name: "write_file", arguments: %{"path" => "test.txt", "content" => "data"}}
+        ],
+        review_configs: %{}
+      }
+
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        {:interrupt, state, interrupt_data}
+      end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: {Phoenix.PubSub, pubsub_name},
+          id: "test_flag_transition_#{:erlang.unique_integer([:positive])}",
+          agent_persistence: TestAgentPersistence
+        )
+
+      :ok = AgentServer.execute(agent_id)
+      Process.sleep(100)
+
+      assert AgentServer.get_status(agent_id) == :interrupted
+
+      interrupt_calls = TestAgentPersistence.get_interrupt_calls_for(agent_id)
+      assert [{^agent_id, _scope, _ctx, true}] = interrupt_calls
+
+      # Resume — should clear the flag exactly once.
+      decisions = [%{type: :approve}]
+
+      Agent
+      |> expect(:resume, fn ^agent, state, ^decisions, _opts ->
+        new_state = State.add_message(state, Message.new_assistant!(%{content: "Resumed!"}))
+        {:ok, new_state}
+      end)
+
+      :ok = AgentServer.resume(agent_id, decisions)
+      Process.sleep(100)
+
+      assert AgentServer.get_status(agent_id) == :idle
+
+      interrupt_calls = TestAgentPersistence.get_interrupt_calls_for(agent_id)
+      assert length(interrupt_calls) == 2
+
+      flags = Enum.map(interrupt_calls, fn {_id, _scope, _ctx, flag} -> flag end)
+      assert flags == [true, false]
+    end
+
+    test "subsequent successful turns do not re-fire set_interrupted(false)", %{
+      agent: agent,
+      agent_id: agent_id,
+      pubsub_name: pubsub_name
+    } do
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      Agent
+      |> expect(:execute, 2, fn ^agent, state, _opts ->
+        new_state = State.add_message(state, Message.new_assistant!(%{content: "Done!"}))
+        {:ok, new_state}
+      end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          initial_state: initial_state,
+          name: AgentServer.get_name(agent_id),
+          pubsub: {Phoenix.PubSub, pubsub_name},
+          id: "test_no_redundant_#{:erlang.unique_integer([:positive])}",
+          agent_persistence: TestAgentPersistence
+        )
+
+      :ok = AgentServer.execute(agent_id)
+      Process.sleep(100)
+
+      :ok = AgentServer.execute(agent_id)
+      Process.sleep(100)
+
+      assert AgentServer.get_status(agent_id) == :idle
+      # Two completions, neither preceded by an interrupt — the flag never
+      # transitioned, so set_interrupted should never have been called.
+      assert TestAgentPersistence.get_interrupt_calls_for(agent_id) == []
+    end
+  end
+
   describe "publish_debug_event_from/2" do
     test "broadcasts debug event to subscribers on the :debug channel" do
       agent_id = generate_test_agent_id()

@@ -264,7 +264,13 @@ defmodule Sagents.AgentServer do
       execution_seq: 0,
       # Whether this server was restored from persisted state (vs fresh start)
       # Used to broadcast :node_transferred event on startup after Horde migration
-      restored: false
+      restored: false,
+      # Mirrors the durable interrupt flag exposed via
+      # Sagents.AgentPersistence.set_interrupted/3. `true` means we have
+      # written the flag as `true` and not yet cleared it; `false` means
+      # the flag is clear (or we have never written it). Used to suppress
+      # redundant callback invocations.
+      interrupt_persisted: false
     ]
 
     @type t :: %__MODULE__{
@@ -294,7 +300,8 @@ defmodule Sagents.AgentServer do
             display_message_persistence: module() | nil,
             message_preprocessor: module() | nil,
             presence_module: module() | nil,
-            restored: boolean()
+            restored: boolean(),
+            interrupt_persisted: boolean()
           }
   end
 
@@ -1340,7 +1347,11 @@ defmodule Sagents.AgentServer do
       display_message_persistence: display_message_persistence,
       message_preprocessor: message_preprocessor,
       presence_module: presence_module,
-      restored: Keyword.get(opts, :restored, false)
+      restored: Keyword.get(opts, :restored, false),
+      # If we boot in :interrupted, the integrator's durable flag is (or
+      # should be) `true`. Seed the tracker so the next clearing lifecycle
+      # transitions through and fires set_interrupted(false) once.
+      interrupt_persisted: boot_status == :interrupted
     }
 
     # Start the inactivity timer
@@ -1514,7 +1525,7 @@ defmodule Sagents.AgentServer do
 
     # Persist the rolling state — the database now reflects messages produced
     # up to the cancel point, so page reload recovers them.
-    maybe_persist_state(new_state, :on_cancel)
+    new_state = maybe_persist_state(new_state, :on_cancel)
 
     # Persist an assistant display message for the cancellation so it survives
     # page reload. Persisting here (not in the LiveView) avoids duplicate rows
@@ -1800,13 +1811,14 @@ defmodule Sagents.AgentServer do
     broadcast_event(server_state, event)
 
     # Persist state when conversation title is generated
-    case event do
-      {:conversation_title_generated, _title, _agent_id} ->
-        maybe_persist_state(server_state, :on_title_generated)
+    server_state =
+      case event do
+        {:conversation_title_generated, _title, _agent_id} ->
+          maybe_persist_state(server_state, :on_title_generated)
 
-      _other ->
-        :ok
-    end
+        _other ->
+          server_state
+      end
 
     {:noreply, server_state}
   end
@@ -2364,7 +2376,7 @@ defmodule Sagents.AgentServer do
     }
 
     # Persist agent state on completion
-    maybe_persist_state(updated_state, :on_completion)
+    updated_state = maybe_persist_state(updated_state, :on_completion)
 
     broadcast_event(updated_state, {:status_changed, :idle, nil})
     update_presence_status(updated_state, :idle)
@@ -2393,7 +2405,7 @@ defmodule Sagents.AgentServer do
     maybe_update_interrupt_tool_display(updated_state, interrupt_data, :interrupted)
 
     # Persist agent state on interrupt
-    maybe_persist_state(updated_state, :on_interrupt)
+    updated_state = maybe_persist_state(updated_state, :on_interrupt)
 
     broadcast_event(updated_state, {:status_changed, :interrupted, interrupt_data})
     update_presence_status(updated_state, :interrupted)
@@ -2416,7 +2428,7 @@ defmodule Sagents.AgentServer do
     }
 
     # Persist agent state so it can be resumed after restart
-    maybe_persist_state(updated_state, :on_completion)
+    updated_state = maybe_persist_state(updated_state, :on_completion)
 
     broadcast_event(updated_state, {:status_changed, :paused, nil})
     update_presence_status(updated_state, :paused)
@@ -2438,7 +2450,7 @@ defmodule Sagents.AgentServer do
     }
 
     # Persist agent state on error
-    maybe_persist_state(updated_state, :on_error)
+    updated_state = maybe_persist_state(updated_state, :on_error)
 
     # Persist an assistant message describing the error so it survives page reloads
     persist_error_as_display_message(updated_state, reason)
@@ -2657,11 +2669,14 @@ defmodule Sagents.AgentServer do
     }
   end
 
-  # Persist agent state via the AgentPersistence behaviour (if configured)
+  # Persist agent state via the AgentPersistence behaviour (if configured),
+  # then fire set_interrupted/3 if (and only if) the durable interrupt flag
+  # should transition. Returns the (possibly-updated) server_state so the
+  # caller can rebind `interrupt_persisted`.
   defp maybe_persist_state(%ServerState{} = server_state, lifecycle) do
     case server_state.agent_persistence do
       nil ->
-        :ok
+        server_state
 
       module ->
         state_data =
@@ -2684,8 +2699,52 @@ defmodule Sagents.AgentServer do
 
             :ok
         end
+
+        maybe_update_interrupt_flag(server_state, module, lifecycle)
     end
   end
+
+  # Fire set_interrupted/3 only on actual transitions of the durable flag.
+  # The tracker (`server_state.interrupt_persisted`) reflects the last
+  # value we wrote — so steady-state lifecycles (every successful turn,
+  # title generation, shutdown) become no-ops.
+  defp maybe_update_interrupt_flag(%ServerState{} = server_state, module, lifecycle) do
+    case interrupt_flag_for(lifecycle) do
+      :leave_alone ->
+        server_state
+
+      desired when desired == server_state.interrupt_persisted ->
+        server_state
+
+      desired ->
+        if function_exported?(module, :set_interrupted, 3) do
+          scope = current_scope(server_state)
+          context = callback_context(server_state)
+
+          case module.set_interrupted(scope, context, desired) do
+            :ok ->
+              %{server_state | interrupt_persisted: desired}
+
+            {:error, reason} ->
+              Logger.error(
+                "set_interrupted failed for #{server_state.agent.agent_id} (#{lifecycle}): #{inspect(reason)}"
+              )
+
+              # Don't update the tracker on failure so we retry on the
+              # next transition rather than permanently desyncing.
+              server_state
+          end
+        else
+          server_state
+        end
+    end
+  end
+
+  defp interrupt_flag_for(:on_interrupt), do: true
+  defp interrupt_flag_for(:on_completion), do: false
+  defp interrupt_flag_for(:on_cancel), do: false
+  defp interrupt_flag_for(:on_error), do: false
+  defp interrupt_flag_for(_other), do: :leave_alone
 
   # Broadcast tool event and persist via DisplayMessagePersistence (if configured)
   defp broadcast_tool_event(%ServerState{} = server_state, status, tool_info) do

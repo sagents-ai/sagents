@@ -138,6 +138,40 @@ defmodule <%= @context_module %> do
   end
 
   @doc """
+  Records whether the conversation's agent is currently in an interrupted
+  state, by writing a boolean flag to `conversation.metadata["interrupted"]`.
+
+  This is the load-path optimization for restored interrupts: rather than
+  deserializing the full agent state on every conversation open just to find
+  out whether there's a pending question, the load path reads this flag from
+  the conversation row (which it loads anyway) and decides whether to
+  auto-wake the agent.
+
+  Called by `<%= @agent_persistence_module %>.set_interrupted/3`, which sagents
+  invokes only on actual transitions of the durable flag — once on enter
+  (`true`) and once on leave (`false`). Steady-state turns issue no call,
+  so this function is not on the hot path of normal completion.
+  """
+  def set_interrupt_status(%Scope{} = scope, conversation_id, interrupted?)
+      when is_boolean(interrupted?) do
+    with {:ok, conversation} <- get_conversation(scope, conversation_id) do
+      new_metadata = Map.put(conversation.metadata || %{}, "interrupted", interrupted?)
+      update_conversation(conversation, %{metadata: new_metadata})
+    end
+  end
+
+  @doc """
+  Returns `true` if the conversation's metadata indicates a pending
+  interrupt. Cheap to read as it does not deserialize the agent state.
+
+  Used on the load path (e.g. by your generated agent_live_helpers) to
+  decide whether to auto-wake the agent when a host opens an idle
+  conversation whose last persisted status was `:interrupted`.
+  """
+  def interrupted?(%Conversation{metadata: %{"interrupted" => true}}), do: true
+  def interrupted?(_conversation), do: false
+
+  @doc """
   Loads the serialized agent state for a conversation, filtered by scope.
 
   Returns `{:ok, state_data}` on success or `{:error, :not_found}` if no state
