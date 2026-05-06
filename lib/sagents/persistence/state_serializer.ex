@@ -424,7 +424,7 @@ defmodule Sagents.Persistence.StateSerializer do
   rescue
     _other -> :error
   catch
-    _, _ -> :error
+    _, _other -> :error
   end
 
   defp safe_binary_to_term(_), do: :error

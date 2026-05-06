@@ -167,7 +167,7 @@ defmodule <%= @context_module %>.DisplayMessage do
       {"tool_result", %{"tool_call_id" => _, "name" => _, "content" => _}} -> changeset
 
       {nil, _} -> changeset  # Allow nil during build
-      _ -> add_error(changeset, :content, "invalid structure for content_type #{content_type}")
+      _other -> add_error(changeset, :content, "invalid structure for content_type #{content_type}")
     end
   end
 

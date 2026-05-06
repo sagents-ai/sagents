@@ -52,7 +52,7 @@ defmodule <%= module %> do
   defp conversation_deleted?(changeset_errors) do
     Enum.any?(changeset_errors, fn
       {:conversation_id, {_msg, opts}} -> Keyword.get(opts, :constraint) == :foreign
-      _ -> false
+      _other -> false
     end)
   end
 end

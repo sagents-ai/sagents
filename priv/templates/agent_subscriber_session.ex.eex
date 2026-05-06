@@ -369,7 +369,7 @@ defmodule <%= module %> do
     call_id =
       case interrupt_data do
         %{type: :subagent_hitl, tool_call_id: parent_call_id} -> parent_call_id
-        _ -> tool[:tool_call_id]
+        _other -> tool[:tool_call_id]
       end
 
     if call_id && Map.get(state, :current_scope) do

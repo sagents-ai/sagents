@@ -1637,7 +1637,7 @@ defmodule Sagents.AgentServer do
             s when s in [:completed, :error, :cancelled] ->
               {new_state, :idle, server_state.interrupt_data}
 
-            _ ->
+            _other ->
               {new_state, server_state.status, server_state.interrupt_data}
           end
 

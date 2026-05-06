@@ -741,9 +741,9 @@ defmodule Sagents.Middleware do
       module.restorable_interrupt?(interrupt_data) == true
     rescue
       UndefinedFunctionError -> false
-      _ -> false
+      _other -> false
     catch
-      _, _ -> false
+      _, _other -> false
     end
   end
 

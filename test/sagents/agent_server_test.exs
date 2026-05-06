@@ -1871,7 +1871,7 @@ defmodule Sagents.AgentServerTest do
           pubsub: nil
         )
 
-      assert {:ok, _server_pid, _ref} = AgentServer.subscribe_debug(agent_id)
+      assert {:ok, _server_pid, _ref} = AgentServer.subscribe(agent_id, :debug)
 
       # No snapshot on the debug channel — only :main carries status.
       refute_receive {:agent, {:status_changed, _, _}}, 100
