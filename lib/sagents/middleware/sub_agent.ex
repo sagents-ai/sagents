@@ -177,6 +177,12 @@ defmodule Sagents.Middleware.SubAgent do
 
   ## Middleware Callbacks
 
+  # Deliberately does NOT implement `c:Sagents.Middleware.restorable_interrupt?/1`.
+  # SubAgent interrupt_data references a sub-agent process that is gone with
+  # the BEAM after a restart, so the only safe behaviour on cold load is to
+  # demote to an error result. The default `false` from the helper achieves
+  # exactly that.
+
   @impl true
   def init(opts) do
     # Extract configuration

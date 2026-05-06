@@ -99,4 +99,30 @@ defmodule Sagents.AgentPersistence do
   """
   @callback load_state(scope :: term() | nil, context :: load_context()) ::
               {:ok, map()} | {:error, :not_found | term()}
+
+  @doc """
+  Optional. Called when the durable interrupt flag should change.
+
+  Sagents tracks the agent's interrupt status in-process and only invokes
+  this callback on actual transitions: `true` once when entering an
+  interrupted state, `false` once when leaving it (via completion, cancel,
+  or error). Steady-state lifecycles fire no call. This lets integrators
+  expose a cheap "is this conversation paused?" signal — typically a
+  boolean column or metadata flag.
+
+  Implementations should be idempotent. If the callback is not implemented,
+  Sagents simply does not write any flag.
+
+  `scope` is the integrator-defined scope struct. `context` carries
+  `:agent_id` and `:conversation_id`. `interrupted?` is the new flag value.
+
+  Return `:ok` on success. Errors are logged but do not affect agent operation.
+  """
+  @callback set_interrupted(
+              scope :: term() | nil,
+              context :: load_context(),
+              interrupted? :: boolean()
+            ) :: :ok | {:error, term()}
+
+  @optional_callbacks [set_interrupted: 3]
 end

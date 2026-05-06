@@ -49,6 +49,7 @@ defmodule Sagents.State do
 
   use Ecto.Schema
   import Ecto.Changeset
+  require Logger
   alias __MODULE__
 
   @primary_key false
@@ -129,8 +130,89 @@ defmodule Sagents.State do
     - `{:error, reason}` - Deserialization failed
   """
   def from_serialized(agent_id, data) when is_binary(agent_id) and is_map(data) do
-    # StateSerializer.deserialize_state/2 already applies clean_stale_interrupts/1.
-    Sagents.Persistence.StateSerializer.deserialize_state(agent_id, data)
+    # No agent in scope here, so we can't consult middleware on restoring serialized interrupt_data. Fall back to the default of demoting every interrupted tool result.
+    case Sagents.Persistence.StateSerializer.deserialize_state(agent_id, data) do
+      {:ok, state} -> {:ok, clean_stale_interrupts(state, [])}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Load an agent's persisted state via an `Sagents.AgentPersistence`
+  implementation, or return a fresh empty state if nothing is saved or the
+  saved data is unusable.
+
+  Always returns `{:ok, state}` so callers can pattern-match without
+  fallback branches. Failure modes (missing envelope key, malformed
+  serialized data) are logged at warning level and degrade gracefully to a
+  fresh state — restoring a partial conversation is worse than starting
+  fresh, since the user can re-prompt but cannot recover from a server
+  that won't boot.
+
+  ## Parameters
+
+  - `persistence_module` — module implementing `Sagents.AgentPersistence`
+  - `scope` — integrator-defined scope struct (forwarded to `load_state/2`)
+  - `context` — map with `:agent_id` (required) and `:conversation_id`
+    (optional; useful for log lines and is included in the load context)
+
+  ## Examples
+
+      Sagents.State.load_or_new(MyApp.AgentPersistence, scope, %{
+        agent_id: "conversation-123",
+        conversation_id: 123
+      })
+      # => {:ok, %Sagents.State{...}}
+
+  """
+  @spec load_or_new(module(), term() | nil, %{
+          required(:agent_id) => String.t(),
+          optional(:conversation_id) => term()
+        }) :: {:ok, t()}
+  def load_or_new(persistence_module, scope, %{agent_id: agent_id} = context)
+      when is_atom(persistence_module) and is_binary(agent_id) do
+    load_context = %{
+      agent_id: agent_id,
+      conversation_id: Map.get(context, :conversation_id)
+    }
+
+    case persistence_module.load_state(scope, load_context) do
+      {:ok, exported_state} ->
+        Logger.info("Found saved state for agent #{agent_id}, attempting to restore...")
+        restore_or_fresh(agent_id, exported_state)
+
+      {:error, :not_found} ->
+        Logger.info("No saved state found for agent #{agent_id}, creating fresh state")
+        {:ok, new!(%{})}
+    end
+  end
+
+  defp restore_or_fresh(agent_id, exported_state) do
+    case Map.get(exported_state, "state") do
+      nil ->
+        Logger.warning(
+          "Exported state for agent #{agent_id} has no 'state' field, using fresh state"
+        )
+
+        {:ok, new!(%{})}
+
+      nested_state ->
+        case from_serialized(agent_id, nested_state) do
+          {:ok, state} ->
+            Logger.info(
+              "Successfully restored agent state for #{agent_id} with #{length(state.messages)} messages"
+            )
+
+            {:ok, state}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Failed to deserialize agent state for #{agent_id}: #{inspect(reason)}, using fresh state"
+            )
+
+            {:ok, new!(%{})}
+        end
+    end
   end
 
   @doc """
@@ -389,36 +471,42 @@ defmodule Sagents.State do
   end
 
   @doc """
-  Replace any stale interrupt placeholder tool results with error messages.
+  Replace stale interrupt placeholder tool results with error messages,
+  consulting the agent's middleware to decide which interrupts can be
+  restored from cold start.
 
-  Called after loading state from the database. Interrupted tool results
-  reference sub-agent processes that no longer exist, so they must be
-  converted to error results before the LLM sees them.
+  Called after loading state from the database. For each interrupted tool
+  result the decision is:
 
-  This is idempotent — if there are no stale interrupts, it's a no-op.
+  - `interrupt_data == nil` (decode failed, never persisted, or written by
+    older code) → demote to error result.
+  - `interrupt_data` shape is `:multiple_interrupts` → demote *unless* every
+    sub-interrupt is itself claimed by some middleware. Partial restore is a
+    footgun: a resumed agent would dispatch responses that don't all have
+    valid targets.
+  - No middleware in `middleware_entries` says `restorable_interrupt?` for
+    the data → demote.
+  - Otherwise → keep `is_interrupt: true` and `interrupt_data` intact.
+
+  Demoted results carry a clear message so the LLM can see the call failed
+  on the next turn and recover gracefully. Two messages are used to
+  distinguish the failure modes (process-bound vs incompatible data) for
+  debugging. Both are equivalent to the model.
+
+  An empty `middleware_entries` list demotes every interrupt — preserving
+  pre-restorable behaviour for callers that don't have an agent in scope
+  (e.g. `from_serialized/2`).
+
+  Idempotent: a state with no interrupted tool results is unchanged.
   """
-  @spec clean_stale_interrupts(t()) :: t()
-  def clean_stale_interrupts(%State{} = state) do
+  @spec clean_stale_interrupts(t(), [Sagents.MiddlewareEntry.t()]) :: t()
+  def clean_stale_interrupts(%State{} = state, middleware_entries \\ [])
+      when is_list(middleware_entries) do
     cleaned_messages =
       Enum.map(state.messages, fn message ->
         case message do
           %LangChain.Message{role: :tool, tool_results: results} when is_list(results) ->
-            cleaned_results =
-              Enum.map(results, fn
-                %LangChain.Message.ToolResult{is_interrupt: true} = tr ->
-                  %{
-                    tr
-                    | content:
-                        "Tool execution was interrupted and could not be resumed " <>
-                          "(agent was restarted). The sub-agent's work was lost.",
-                      is_interrupt: false,
-                      is_error: true
-                  }
-
-                other ->
-                  other
-              end)
-
+            cleaned_results = Enum.map(results, &maybe_demote(&1, middleware_entries))
             %{message | tool_results: cleaned_results}
 
           other ->
@@ -427,5 +515,120 @@ defmodule Sagents.State do
       end)
 
     %{state | messages: cleaned_messages}
+  end
+
+  defp maybe_demote(
+         %LangChain.Message.ToolResult{is_interrupt: true, interrupt_data: nil} = tr,
+         _middleware
+       ) do
+    demote(tr, :incompatible)
+  end
+
+  defp maybe_demote(
+         %LangChain.Message.ToolResult{is_interrupt: true, interrupt_data: data} = tr,
+         middleware
+       )
+       when is_map(data) do
+    if interrupt_restorable?(data, middleware) do
+      tr
+    else
+      demote(tr, :process_bound)
+    end
+  end
+
+  defp maybe_demote(other, _middleware), do: other
+
+  # `:multiple_interrupts` is restorable if *every* sub-interrupt is
+  # claimed by some middleware. Sub-agents and ask_user questions can mix in
+  # the same wrapper, so partial restore would silently drop some questions.
+  defp interrupt_restorable?(%{type: :multiple_interrupts, interrupts: subs}, middleware)
+       when is_list(subs) do
+    Enum.all?(subs, &any_middleware_claims?(&1, middleware))
+  end
+
+  defp interrupt_restorable?(data, middleware) when is_map(data) do
+    any_middleware_claims?(data, middleware)
+  end
+
+  defp any_middleware_claims?(data, middleware) when is_map(data) do
+    Enum.any?(middleware, &Sagents.Middleware.apply_restorable_interrupt?(&1, data))
+  end
+
+  defp any_middleware_claims?(_data, _middleware), do: false
+
+  defp demote(tr, :process_bound) do
+    %{
+      tr
+      | content:
+          "Tool execution was interrupted and could not be resumed " <>
+            "(agent was restarted). The sub-agent's work was lost.",
+        is_interrupt: false,
+        is_error: true,
+        interrupt_data: nil
+    }
+  end
+
+  defp demote(tr, :incompatible) do
+    %{
+      tr
+      | content:
+          "Tool execution was interrupted and could not be resumed " <>
+            "(saved data was incompatible with current code).",
+        is_interrupt: false,
+        is_error: true,
+        interrupt_data: nil
+    }
+  end
+
+  defp demote(tr, :user_cancelled) do
+    %{
+      tr
+      | content:
+          "Tool execution was interrupted and the user did not respond. " <>
+            "They sent a new message instead — proceed with their new request.",
+        is_interrupt: false,
+        is_error: true,
+        interrupt_data: nil
+    }
+  end
+
+  @doc """
+  Demote every `is_interrupt: true` tool result in the message log to an
+  error result, signaling to the LLM that the user abandoned the pending
+  interrupt and that a new user message follows.
+
+  Used when a user sends a free-text message instead of resuming an
+  interrupted tool call (e.g. ignoring an `ask_user` question and asking
+  something different). Without this demotion the trailing interrupt
+  placeholder would remain in the conversation, causing the next LLM call
+  to be malformed (Anthropic rejects with "must end with a user message").
+
+  Also clears `state.interrupt_data` (the virtual field).
+
+  Idempotent: a state with no interrupts is unchanged.
+  """
+  @spec cancel_pending_interrupts(t()) :: t()
+  def cancel_pending_interrupts(%State{} = state) do
+    cancelled_messages =
+      Enum.map(state.messages, fn message ->
+        case message do
+          %LangChain.Message{role: :tool, tool_results: results} when is_list(results) ->
+            cancelled_results =
+              Enum.map(results, fn
+                %LangChain.Message.ToolResult{is_interrupt: true} = tr ->
+                  demote(tr, :user_cancelled)
+
+                other ->
+                  other
+              end)
+
+            %{message | tool_results: cancelled_results}
+
+          other ->
+            other
+        end
+      end)
+
+    %{state | messages: cancelled_messages, interrupt_data: nil}
   end
 end

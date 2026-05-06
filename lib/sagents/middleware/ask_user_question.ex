@@ -88,6 +88,16 @@ defmodule Sagents.Middleware.AskUserQuestion do
     [build_ask_user_tool(config)]
   end
 
+  # An ask_user interrupt is fully self-contained: the question, options, and
+  # tool_call_id are everything `handle_resume/5` needs. No PIDs, no monitors,
+  # no external state. So this middleware opts in to cold-start restoration.
+  # `:multiple_interrupts` is decomposed by the framework — each sub-interrupt
+  # is checked individually against the middleware list, and the wrapper is
+  # restored only if every sub-interrupt is claimed.
+  @impl true
+  def restorable_interrupt?(%{type: :ask_user_question}), do: true
+  def restorable_interrupt?(_other), do: false
+
   # Claim: resume_data is nil (re-scan from HITL handoff). Surface the interrupt
   # so the user sees it. Don't try to resolve -- there's no answer yet.
   @impl true

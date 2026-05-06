@@ -405,6 +405,11 @@ defmodule Sagents.AgentSupervisor do
         {:ok, exported_state} ->
           case StateSerializer.deserialize_state(agent.agent_id, exported_state["state"]) do
             {:ok, state} ->
+              # Sweep stale interrupts using the agent's middleware. Restorable
+              # interrupt types (e.g. ask_user) survive; process-bound ones
+              # (e.g. sub-agent HITL) get demoted to error results.
+              state = Sagents.State.clean_stale_interrupts(state, agent.middleware)
+
               Logger.info(
                 "Loaded persisted state for #{agent.agent_id} (#{length(state.messages)} messages)"
               )

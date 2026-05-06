@@ -107,6 +107,10 @@ defmodule Sagents.Middleware.ProcessContextTest do
       )
 
     {:ok, _server, _ref} = AgentServer.subscribe(agent.agent_id)
+
+    # Drain the on_subscribed status snapshot so later assert_receive calls
+    # match real status transitions instead of this initial sync event.
+    assert_receive {:agent, {:status_changed, _, _}}, 500
     :ok
   end
 

@@ -246,11 +246,7 @@ defmodule Sagents.Persistence.StateSerializerTest do
       assert tool_call.arguments["expression"] == "2 + 2"
     end
 
-    test "sanitizes stale interrupted tool results on deserialize" do
-      # interrupt_data is a virtual field, so a persisted is_interrupt: true
-      # tool result loses its data on round-trip. clean_stale_interrupts/1
-      # must be applied automatically so the next chain run does not crash on
-      # nil interrupt_data inside extract_interrupt_data/1.
+    test "leaves is_interrupt: true with nil interrupt_data on legacy rows; sweep is the caller's responsibility" do
       serialized = %{
         "version" => 1,
         "state" => %{
@@ -287,6 +283,15 @@ defmodule Sagents.Persistence.StateSerializerTest do
 
       assert [tool_message] = state.messages
       assert [result] = tool_message.tool_results
+      assert result.is_interrupt
+      assert is_nil(result.interrupt_data)
+
+      # And applying clean_stale_interrupts with no middleware list demotes —
+      # the interrupted tool result becomes an error result, matching the
+      # pre-change behaviour.
+      cleaned = Sagents.State.clean_stale_interrupts(state, [])
+      [tool_message] = cleaned.messages
+      [result] = tool_message.tool_results
       refute result.is_interrupt
       assert result.is_error
       assert result.content =~ "interrupted"
@@ -312,6 +317,134 @@ defmodule Sagents.Persistence.StateSerializerTest do
       {:ok, state} = StateSerializer.deserialize_server_state("agent-123", serialized)
 
       assert state.messages == []
+    end
+  end
+
+  describe "interrupt_data persistence" do
+    test "round-trips a non-nil interrupt_data through term_to_binary + Base64" do
+      {:ok, model} = ChatOpenAI.new(%{model: "gpt-4", api_key: "test-key"})
+      {:ok, agent} = Agent.new(%{agent_id: "agent-123", model: model})
+
+      interrupt_data = %{
+        type: :ask_user_question,
+        question: "Which database?",
+        response_type: :single_select,
+        options: [
+          %{label: "Postgres", value: "postgres"},
+          %{label: "MySQL", value: "mysql"}
+        ],
+        allow_other: false,
+        allow_cancel: true,
+        tool_call_id: "call-xyz"
+      }
+
+      result =
+        ToolResult.new!(%{
+          tool_call_id: "call-xyz",
+          name: "ask_user",
+          content: "Waiting for user response...",
+          is_interrupt: true,
+          interrupt_data: interrupt_data
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [result]})
+      state = State.new!(%{messages: [tool_msg]})
+
+      serialized = StateSerializer.serialize_server_state(agent, state)
+
+      # The serialized representation must carry an opaque Base64 string,
+      # not the literal map (JSONB couldn't safely store atom keys anyway).
+      assert [serialized_msg] = serialized["state"]["messages"]
+      assert [serialized_result] = serialized_msg["tool_results"]
+      assert serialized_result["is_interrupt"] == true
+      assert is_binary(serialized_result["interrupt_data_b64"])
+
+      # Round-trip restores the interrupt_data verbatim. is_interrupt remains
+      # true — `clean_stale_interrupts/2` is the caller's responsibility.
+      {:ok, restored} = StateSerializer.deserialize_server_state("agent-123", serialized)
+      [restored_msg] = restored.messages
+      [restored_result] = restored_msg.tool_results
+      assert restored_result.is_interrupt
+      assert restored_result.interrupt_data == interrupt_data
+    end
+
+    test "deserialize tolerates malformed Base64 — returns nil interrupt_data without raising" do
+      serialized = %{
+        "version" => 2,
+        "state" => %{
+          "messages" => [
+            %{
+              "role" => "tool",
+              "content" => nil,
+              "status" => "complete",
+              "tool_results" => [
+                %{
+                  "type" => "function",
+                  "tool_call_id" => "call-1",
+                  "name" => "ask_user",
+                  "content" => "Waiting...",
+                  "is_interrupt" => true,
+                  "interrupt_data_b64" => "@@@not-valid-base64@@@"
+                }
+              ]
+            }
+          ],
+          "todos" => [],
+          "metadata" => %{}
+        },
+        "serialized_at" => "2026-05-04T10:30:00Z"
+      }
+
+      {:ok, state} = StateSerializer.deserialize_server_state("agent-123", serialized)
+      [tool_msg] = state.messages
+      [result] = tool_msg.tool_results
+      assert result.is_interrupt
+      assert is_nil(result.interrupt_data)
+    end
+
+    test "deserialize tolerates a binary payload that decodes to an unknown atom under :safe" do
+      # Build a binary that references an atom guaranteed not to exist at
+      # decode time. We can't use `:erlang.term_to_binary(:never_seen_atom_...)`
+      # directly because compiling this test creates the atom — instead we
+      # generate a random atom name via String.to_atom inside the serializer
+      # call, then drop it from a brand-new VM-style scenario by using a
+      # binary handcrafted to fail :safe decoding. Easiest reliable hack:
+      # use a binary with an obviously-bogus tag byte, which raises ArgumentError.
+      bogus = <<131, 255, 0, 0, 0, 0>>
+      bogus_b64 = Base.encode64(bogus)
+
+      serialized = %{
+        "version" => 2,
+        "state" => %{
+          "messages" => [
+            %{
+              "role" => "tool",
+              "content" => nil,
+              "status" => "complete",
+              "tool_results" => [
+                %{
+                  "type" => "function",
+                  "tool_call_id" => "call-1",
+                  "name" => "ask_user",
+                  "content" => "Waiting...",
+                  "is_interrupt" => true,
+                  "interrupt_data_b64" => bogus_b64
+                }
+              ]
+            }
+          ],
+          "todos" => [],
+          "metadata" => %{}
+        },
+        "serialized_at" => "2026-05-04T10:30:00Z"
+      }
+
+      {:ok, state} = StateSerializer.deserialize_server_state("agent-123", serialized)
+      [tool_msg] = state.messages
+      [result] = tool_msg.tool_results
+      # Decode failed silently — interrupt_data is nil and the caller can
+      # demote with clean_stale_interrupts.
+      assert is_nil(result.interrupt_data)
     end
   end
 

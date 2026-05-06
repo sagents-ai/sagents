@@ -457,4 +457,125 @@ defmodule Sagents.AgentUtilsTest do
       assert result.arguments == %{"path" => "test.txt"}
     end
   end
+
+  describe "interrupt_session_changes/1" do
+    test "returns an empty map for nil" do
+      assert AgentUtils.interrupt_session_changes(nil) == %{}
+    end
+
+    test "presents a single :ask_user_question as the pending question" do
+      question = %{type: :ask_user_question, question: "Continue?"}
+
+      assert %{
+               pending_question: ^question,
+               remaining_questions: [],
+               question_responses: [],
+               pending_tools: []
+             } = AgentUtils.interrupt_session_changes(question)
+    end
+
+    test "presents :multiple_interrupts of all questions in order" do
+      q1 = %{type: :ask_user_question, question: "First?"}
+      q2 = %{type: :ask_user_question, question: "Second?"}
+
+      result =
+        AgentUtils.interrupt_session_changes(%{
+          type: :multiple_interrupts,
+          interrupts: [q1, q2]
+        })
+
+      assert result.pending_question == q1
+      assert result.remaining_questions == [q2]
+      assert result.question_responses == []
+      assert result.pending_tools == []
+    end
+
+    test "presents :multiple_interrupts containing any non-question as HITL tools" do
+      q = %{type: :ask_user_question, question: "?"}
+      tool = %{type: :hitl, action_requests: [%{tool_call_id: "1"}]}
+
+      result =
+        AgentUtils.interrupt_session_changes(%{
+          type: :multiple_interrupts,
+          interrupts: [q, tool]
+        })
+
+      # Mixed lists flatten the action_requests of the constituent
+      # interrupts; the question contributes none, the HITL tool one.
+      assert result.pending_tools == [%{tool_call_id: "1"}]
+      assert result.pending_question == nil
+    end
+
+    test "unwraps :subagent_hitl interrupt data" do
+      action_requests = [%{tool_call_id: "1", tool_name: "write_file"}]
+
+      interrupt = %{
+        type: :subagent_hitl,
+        interrupt_data: %{action_requests: action_requests}
+      }
+
+      assert %{pending_tools: ^action_requests, pending_question: nil} =
+               AgentUtils.interrupt_session_changes(interrupt)
+    end
+
+    test "treats a generic HITL map as pending tools" do
+      action_requests = [%{tool_call_id: "abc"}]
+      interrupt = %{action_requests: action_requests}
+
+      assert %{pending_tools: ^action_requests, pending_question: nil} =
+               AgentUtils.interrupt_session_changes(interrupt)
+    end
+  end
+
+  describe "advance_hitl_decisions/3" do
+    test "returns :more with advanced state when tools remain" do
+      state = %{
+        pending_tools: [%{tool_call_id: "a"}, %{tool_call_id: "b"}, %{tool_call_id: "c"}],
+        hitl_decisions: []
+      }
+
+      assert {:more, changes} = AgentUtils.advance_hitl_decisions(state, 1, :approve)
+
+      assert changes.pending_tools == [%{tool_call_id: "a"}, %{tool_call_id: "c"}]
+      assert changes.hitl_decisions == [%{type: :approve}]
+    end
+
+    test "returns :resume with all decisions when last tool is decided" do
+      state = %{
+        pending_tools: [%{tool_call_id: "only"}],
+        hitl_decisions: [%{type: :approve}, %{type: :reject}]
+      }
+
+      assert {:resume, accumulated, changes} =
+               AgentUtils.advance_hitl_decisions(state, 0, :approve)
+
+      assert accumulated == [%{type: :approve}, %{type: :reject}, %{type: :approve}]
+      assert changes == %{pending_tools: [], interrupt_data: nil, hitl_decisions: []}
+    end
+
+    test "treats missing :hitl_decisions as empty" do
+      state = %{pending_tools: [%{tool_call_id: "a"}, %{tool_call_id: "b"}]}
+
+      assert {:more, changes} = AgentUtils.advance_hitl_decisions(state, 0, :reject)
+
+      assert changes.pending_tools == [%{tool_call_id: "b"}]
+      assert changes.hitl_decisions == [%{type: :reject}]
+    end
+
+    test "treats nil :hitl_decisions as empty" do
+      state = %{pending_tools: [%{tool_call_id: "a"}], hitl_decisions: nil}
+
+      assert {:resume, [%{type: :approve}], _changes} =
+               AgentUtils.advance_hitl_decisions(state, 0, :approve)
+    end
+
+    test "deletes the correct tool by index, preserving order of survivors" do
+      tools = [%{id: 1}, %{id: 2}, %{id: 3}, %{id: 4}]
+      state = %{pending_tools: tools, hitl_decisions: []}
+
+      assert {:more, changes} = AgentUtils.advance_hitl_decisions(state, 2, :approve)
+
+      assert changes.pending_tools == [%{id: 1}, %{id: 2}, %{id: 4}]
+    end
+  end
 end

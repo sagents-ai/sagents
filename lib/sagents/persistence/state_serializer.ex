@@ -152,10 +152,7 @@ defmodule Sagents.Persistence.StateSerializer do
       end
 
     case State.new(%{agent_id: agent_id, messages: messages, todos: todos, metadata: metadata}) do
-      # Always sanitize stale interrupts. `interrupt_data` on a ToolResult is
-      # a virtual field, so any persisted `is_interrupt: true` result loses
-      # its data on round-trip and would crash the chain on the next run.
-      {:ok, state} -> {:ok, State.clean_stale_interrupts(state)}
+      {:ok, state} -> {:ok, state}
       {:error, changeset} -> {:error, {:invalid_state, changeset}}
     end
   end
@@ -360,7 +357,7 @@ defmodule Sagents.Persistence.StateSerializer do
   end
 
   defp serialize_tool_result(%ToolResult{} = tool_result) do
-    %{
+    base = %{
       "type" => to_string(tool_result.type),
       "tool_call_id" => tool_result.tool_call_id,
       "name" => tool_result.name,
@@ -368,22 +365,66 @@ defmodule Sagents.Persistence.StateSerializer do
       "is_error" => tool_result.is_error,
       "is_interrupt" => tool_result.is_interrupt
     }
+
+    # `interrupt_data` is a virtual Ecto field, so it would otherwise be lost
+    # on round-trip. Encode it opaquely as Base64-wrapped term_to_binary —
+    # JSONB just sees a string, and the load path can decide whether to
+    # restore or demote based on the agent's middleware.
+    base =
+      if tool_result.is_interrupt && not is_nil(tool_result.interrupt_data) do
+        Map.put(base, "interrupt_data_b64", encode_interrupt_data(tool_result.interrupt_data))
+      else
+        base
+      end
+
+    base
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
   end
 
   defp deserialize_tool_result(data) when is_map(data) do
+    interrupt_data = decode_interrupt_data(data["interrupt_data_b64"])
+
     case ToolResult.new(%{
            type: String.to_existing_atom(data["type"] || "function"),
            tool_call_id: data["tool_call_id"],
            name: data["name"],
            content: deserialize_content(data["content"]),
            is_error: data["is_error"] || false,
-           is_interrupt: data["is_interrupt"] || false
+           is_interrupt: data["is_interrupt"] || false,
+           interrupt_data: interrupt_data
          }) do
       {:ok, tool_result} -> tool_result
       {:error, _reason} -> raise "Failed to deserialize tool result: #{inspect(data)}"
     end
+  end
+
+  defp encode_interrupt_data(data) do
+    data |> :erlang.term_to_binary() |> Base.encode64()
+  end
+
+  # Best-effort decode. Any failure mode (missing key, bad Base64, malformed
+  # binary, unknown atom under [:safe]) collapses to `nil`, which lets
+  # `clean_stale_interrupts/2` demote the result to an error.
+  defp decode_interrupt_data(nil), do: nil
+
+  defp decode_interrupt_data(b64) when is_binary(b64) do
+    with {:ok, bin} <- Base.decode64(b64),
+         {:ok, term} <- safe_binary_to_term(bin) do
+      term
+    else
+      _other -> nil
+    end
+  end
+
+  defp decode_interrupt_data(_data), do: nil
+
+  defp safe_binary_to_term(bin) when is_binary(bin) do
+    {:ok, :erlang.binary_to_term(bin, [:safe])}
+  rescue
+    _other -> :error
+  catch
+    _kind, _other -> :error
   end
 
   defp serialize_map_to_string_keys(map) when is_map(map) do

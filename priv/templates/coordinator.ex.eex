@@ -233,7 +233,7 @@ defmodule <%= module %> do
         new_subs =
           case Map.get(subs, {:agent, agent_id}) do
             %{state: :subscribed, server_pid: ^pid} -> subs
-            _ -> Subscriber.subscribe_to_agent(subs, agent_id)
+            _other -> Subscriber.subscribe_to_agent(subs, agent_id)
           end
 
         {:ok, %{sagents_subs: new_subs, agent_id: agent_id}}
@@ -414,52 +414,9 @@ defmodule <%= module %> do
   end
 
   defp create_conversation_state(conversation_id, scope) do
-    agent_id = conversation_agent_id(conversation_id)
-
-    load_result =
-      <%= agent_persistence_module %>.load_state(scope, %{
-        agent_id: agent_id,
-        conversation_id: conversation_id
-      })
-
-    case load_result do
-      {:ok, exported_state} ->
-        Logger.info(
-          "Found saved state for conversation #{conversation_id}, attempting to restore..."
-        )
-
-        nested_state = exported_state["state"]
-
-        if is_nil(nested_state) do
-          Logger.warning(
-            "Exported state for conversation #{conversation_id} has no 'state' field, using fresh state"
-          )
-
-          {:ok, State.new!(%{})}
-        else
-          case State.from_serialized(agent_id, nested_state) do
-            {:ok, state} ->
-              Logger.info(
-                "Successfully restored agent state for conversation #{conversation_id} with #{length(state.messages)} messages"
-              )
-
-              {:ok, state}
-
-            {:error, reason} ->
-              Logger.warning(
-                "Failed to deserialize agent state for conversation #{conversation_id}: #{inspect(reason)}, using fresh state"
-              )
-
-              {:ok, State.new!(%{})}
-          end
-        end
-
-      {:error, :not_found} ->
-        Logger.info(
-          "No saved state found for conversation #{conversation_id}, creating fresh state"
-        )
-
-        {:ok, State.new!(%{})}
-    end
+    State.load_or_new(<%= agent_persistence_module %>, scope, %{
+      agent_id: conversation_agent_id(conversation_id),
+      conversation_id: conversation_id
+    })
   end
 end

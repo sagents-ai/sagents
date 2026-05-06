@@ -396,4 +396,47 @@ defmodule Sagents.MiddlewareTest do
       assert Middleware.collect_callbacks([]) == []
     end
   end
+
+  describe "apply_restorable_interrupt?/2" do
+    defmodule RestorableYesMiddleware do
+      @behaviour Middleware
+
+      @impl true
+      def restorable_interrupt?(%{type: :my_type}), do: true
+      def restorable_interrupt?(_other), do: false
+    end
+
+    defmodule RestorableRaisesMiddleware do
+      @behaviour Middleware
+
+      @impl true
+      def restorable_interrupt?(_other), do: raise("boom")
+    end
+
+    test "returns false when middleware does not implement the callback" do
+      entry = Middleware.init_middleware(MinimalMiddleware)
+      refute Middleware.apply_restorable_interrupt?(entry, %{type: :my_type})
+    end
+
+    test "returns true when the middleware claims the interrupt type" do
+      entry = Middleware.init_middleware(RestorableYesMiddleware)
+      assert Middleware.apply_restorable_interrupt?(entry, %{type: :my_type})
+    end
+
+    test "returns false when the middleware does not claim the interrupt type" do
+      entry = Middleware.init_middleware(RestorableYesMiddleware)
+      refute Middleware.apply_restorable_interrupt?(entry, %{type: :other})
+    end
+
+    test "returns false (does not propagate) when the callback raises" do
+      entry = Middleware.init_middleware(RestorableRaisesMiddleware)
+      refute Middleware.apply_restorable_interrupt?(entry, %{type: :anything})
+    end
+
+    test "returns false for non-map interrupt_data" do
+      entry = Middleware.init_middleware(RestorableYesMiddleware)
+      refute Middleware.apply_restorable_interrupt?(entry, nil)
+      refute Middleware.apply_restorable_interrupt?(entry, "string")
+    end
+  end
 end

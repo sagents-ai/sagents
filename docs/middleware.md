@@ -28,10 +28,11 @@ Middleware is the primary extension mechanism in Sagents. Each middleware can:
   {:ok, State.t()} | {:error, reason}
 @callback on_server_start(state :: State.t(), config :: map()) ::
   {:ok, State.t()} | {:error, reason}
+@callback restorable_interrupt?(interrupt_data :: map()) :: boolean()
 @callback state_schema() :: module() | nil
 ```
 
-All callbacks are optional with default implementations that pass through unchanged.
+All callbacks are optional with default implementations that pass through unchanged. `restorable_interrupt?/1` defaults to `false` — see [Restorable Interrupts](#restorable-interrupts-after-process-restart).
 
 ## Basic Middleware
 
@@ -420,6 +421,36 @@ end
 When a middleware returns `{:cont, state}` with new `interrupt_data` on state (different from what the cycle started with), `Agent.resume` automatically re-scans the middleware stack from the beginning with `resume_data = nil`. This allows the owning middleware to claim the interrupt regardless of its position in the stack.
 
 This is how HumanInTheLoop and AskUserQuestion interact when the LLM calls both a gated tool and `ask_user` in the same turn: HITL executes all tools, discovers the ask_user interrupt in the results, sets it on state, and returns `{:cont}`. The re-scan lets AskUserQuestion claim it.
+
+### Restorable Interrupts (After Process Restart)
+
+When an `AgentServer` is shut down (inactivity timeout, deploy, crash) while a tool call is interrupted, the persisted state is reloaded the next time the conversation is opened. By default, every `is_interrupt: true` tool result is **demoted** to an error result on load — the LLM sees a tool failure and the conversation continues. This is a safe floor, but it means walking away from an open `ask_user` question loses the question.
+
+Middleware can opt **its own** interrupt types in to be restored intact via the optional `restorable_interrupt?/1` callback:
+
+```elixir
+@impl true
+def restorable_interrupt?(%{type: :ask_user_question}), do: true
+def restorable_interrupt?(_), do: false
+```
+
+At state-load time the framework asks each middleware in the agent's stack whether it claims the persisted `interrupt_data`. If any middleware returns `true`, the interrupt is preserved (`is_interrupt: true`, `interrupt_data` intact) and the agent resumes in `:interrupted` status. If none claim it, it is demoted to an error result.
+
+#### When to opt in
+
+Only return `true` if your resume path needs **no in-memory context** beyond the data inside `interrupt_data` itself. Pure data — atoms, strings, numbers, lists, maps, tuples — round-trips fine. PIDs, references, ports, anonymous functions, ETS handles, GenServer monitors — never. The classic non-restorable case is `SubAgent`: its interrupt holds a reference to a sub-agent process that no longer exists after restart, so the demotion is correct.
+
+The framework looks for either a `:type` discriminator (the recommended convention) or a structural signature. `AskUserQuestion` uses `%{type: :ask_user_question, ...}`; `HumanInTheLoop` matches structurally on `%{action_requests: list, ...}`. Pick whichever cleanly identifies your interrupt without false positives against other middleware's data.
+
+#### Schema evolution and the failure floor
+
+Persisted `interrupt_data` is decoded with `:erlang.binary_to_term/2` in `:safe` mode, which rejects unknown atoms instead of bloating the atom table. If you change the shape of your `interrupt_data` (rename a field, drop an atom value), old persisted rows may fail to decode. Both decode failures and resume-time crashes are caught and demoted to an error result — the conversation continues, the LLM re-asks if needed.
+
+This is the **intended** failure mode. Do not work around it with an unsafe decoder, and do not write a migration unless users actually feel the pain. The error result is a clean signal to the LLM that the prior call could not be resumed.
+
+#### Multiple interrupts
+
+When a single LLM turn produces several interrupts at once (e.g. via parallel tool calls), they are wrapped as `%{type: :multiple_interrupts, interrupts: [...]}`. The framework restores the wrapper only if **every** sub-interrupt is claimed by some middleware. Partial restoration is a footgun — a resumed agent would dispatch responses against tool calls whose context is already gone — so a single non-restorable sub-interrupt demotes the whole tool result.
 
 ## Async Operations
 

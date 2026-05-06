@@ -511,4 +511,329 @@ defmodule Sagents.StateTest do
       assert cleaned.messages == []
     end
   end
+
+  describe "clean_stale_interrupts/2 (middleware-aware)" do
+    alias LangChain.Message.ToolResult
+    alias Sagents.Middleware
+
+    defp build_interrupt_state(interrupt_data) do
+      result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Waiting...",
+          is_interrupt: true,
+          interrupt_data: interrupt_data
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [result]})
+      State.new!(%{messages: [tool_msg]})
+    end
+
+    test "empty middleware list demotes every interrupt (preserves prior behaviour)" do
+      state = build_interrupt_state(%{type: :ask_user_question, question: "?"})
+      cleaned = State.clean_stale_interrupts(state, [])
+
+      [tool_msg] = cleaned.messages
+      [result] = tool_msg.tool_results
+      refute result.is_interrupt
+      assert result.is_error
+      assert is_nil(result.interrupt_data)
+    end
+
+    test "preserves :ask_user_question when AskUserQuestion is in the middleware list" do
+      state = build_interrupt_state(%{type: :ask_user_question, question: "?"})
+      ask_entry = Middleware.init_middleware(Sagents.Middleware.AskUserQuestion)
+
+      cleaned = State.clean_stale_interrupts(state, [ask_entry])
+
+      [tool_msg] = cleaned.messages
+      [result] = tool_msg.tool_results
+      assert result.is_interrupt
+      refute result.is_error
+      assert result.interrupt_data == %{type: :ask_user_question, question: "?"}
+    end
+
+    test "demotes :subagent_hitl even when AskUserQuestion is in the list" do
+      state = build_interrupt_state(%{type: :subagent_hitl, sub_agent_id: "sa-1"})
+      ask_entry = Middleware.init_middleware(Sagents.Middleware.AskUserQuestion)
+
+      cleaned = State.clean_stale_interrupts(state, [ask_entry])
+
+      [tool_msg] = cleaned.messages
+      [result] = tool_msg.tool_results
+      refute result.is_interrupt
+      assert result.is_error
+      assert result.content =~ "interrupted"
+      assert result.content =~ "sub-agent"
+    end
+
+    test "demotes when interrupt_data is nil regardless of middleware (decode-failed path)" do
+      result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Waiting...",
+          is_interrupt: true,
+          interrupt_data: nil
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [result]})
+      state = State.new!(%{messages: [tool_msg]})
+      ask_entry = Middleware.init_middleware(Sagents.Middleware.AskUserQuestion)
+
+      cleaned = State.clean_stale_interrupts(state, [ask_entry])
+
+      [tool_msg] = cleaned.messages
+      [result] = tool_msg.tool_results
+      refute result.is_interrupt
+      assert result.is_error
+      # The "incompatible data" demotion message
+      assert result.content =~ "incompatible"
+    end
+
+    test "preserves :multiple_interrupts when every sub-interrupt is restorable" do
+      data = %{
+        type: :multiple_interrupts,
+        interrupts: [
+          %{type: :ask_user_question, question: "a"},
+          %{type: :ask_user_question, question: "b"}
+        ]
+      }
+
+      state = build_interrupt_state(data)
+      ask_entry = Middleware.init_middleware(Sagents.Middleware.AskUserQuestion)
+
+      cleaned = State.clean_stale_interrupts(state, [ask_entry])
+
+      [tool_msg] = cleaned.messages
+      [result] = tool_msg.tool_results
+      assert result.is_interrupt
+      assert result.interrupt_data == data
+    end
+
+    test "demotes :multiple_interrupts wholesale if any sub-interrupt is not restorable" do
+      data = %{
+        type: :multiple_interrupts,
+        interrupts: [
+          %{type: :ask_user_question, question: "a"},
+          %{type: :subagent_hitl, sub_agent_id: "sa-1"}
+        ]
+      }
+
+      state = build_interrupt_state(data)
+      ask_entry = Middleware.init_middleware(Sagents.Middleware.AskUserQuestion)
+
+      cleaned = State.clean_stale_interrupts(state, [ask_entry])
+
+      [tool_msg] = cleaned.messages
+      [result] = tool_msg.tool_results
+      refute result.is_interrupt
+      assert result.is_error
+    end
+  end
+
+  describe "cancel_pending_interrupts/1" do
+    alias LangChain.Message.ToolResult
+
+    test "demotes a single is_interrupt: true tool result with the cancellation message" do
+      result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Waiting...",
+          is_interrupt: true,
+          interrupt_data: %{type: :ask_user_question, question: "?"}
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [result]})
+      state = State.new!(%{messages: [tool_msg]})
+
+      cancelled = State.cancel_pending_interrupts(state)
+
+      [tool_msg] = cancelled.messages
+      [result] = tool_msg.tool_results
+
+      refute result.is_interrupt
+      assert result.is_error
+      assert is_nil(result.interrupt_data)
+      assert result.content =~ "user did not respond"
+      assert result.content =~ "proceed with their new request"
+    end
+
+    test "demotes every interrupt in a tool message with multiple results" do
+      r1 =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Q1?",
+          is_interrupt: true,
+          interrupt_data: %{type: :ask_user_question, question: "Q1"}
+        })
+
+      r2 =
+        ToolResult.new!(%{
+          tool_call_id: "call_2",
+          name: "ask_user",
+          content: "Q2?",
+          is_interrupt: true,
+          interrupt_data: %{type: :ask_user_question, question: "Q2"}
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [r1, r2]})
+      state = State.new!(%{messages: [tool_msg]})
+
+      cancelled = State.cancel_pending_interrupts(state)
+
+      [tool_msg] = cancelled.messages
+      [c1, c2] = tool_msg.tool_results
+
+      refute c1.is_interrupt
+      refute c2.is_interrupt
+      assert c1.is_error
+      assert c2.is_error
+    end
+
+    test "leaves non-interrupt tool results untouched" do
+      normal =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "search",
+          content: "results"
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [normal]})
+      state = State.new!(%{messages: [tool_msg]})
+
+      cancelled = State.cancel_pending_interrupts(state)
+
+      [tool_msg] = cancelled.messages
+      [result] = tool_msg.tool_results
+
+      refute result.is_interrupt
+      refute result.is_error
+    end
+
+    test "clears state.interrupt_data (the virtual field)" do
+      state =
+        State.new!(%{
+          messages: [],
+          interrupt_data: %{type: :ask_user_question, question: "?"}
+        })
+
+      cancelled = State.cancel_pending_interrupts(state)
+
+      assert is_nil(cancelled.interrupt_data)
+    end
+
+    test "is a no-op when no interrupts are pending" do
+      state = State.new!(%{messages: [Message.new_user!("hello")]})
+      cancelled = State.cancel_pending_interrupts(state)
+      assert cancelled.messages == state.messages
+      assert is_nil(cancelled.interrupt_data)
+    end
+  end
+
+  describe "load_or_new/3" do
+    # Process-dictionary-backed stub of Sagents.AgentPersistence — each test
+    # seeds the response it wants, then asserts on the resulting state.
+    defmodule StubPersistence do
+      @behaviour Sagents.AgentPersistence
+
+      @impl true
+      def persist_state(_scope, _state_data, _context), do: :ok
+
+      @impl true
+      def load_state(_scope, _context) do
+        case Process.get(:stub_load_response) do
+          nil -> {:error, :not_found}
+          response -> response
+        end
+      end
+    end
+
+    setup do
+      on_exit(fn -> Process.delete(:stub_load_response) end)
+      :ok
+    end
+
+    test "returns a fresh state when persistence has no saved entry" do
+      Process.put(:stub_load_response, {:error, :not_found})
+
+      assert {:ok, %State{} = state} =
+               State.load_or_new(StubPersistence, nil, %{
+                 agent_id: "conversation-1",
+                 conversation_id: 1
+               })
+
+      assert state.messages == []
+      assert state.agent_id == nil
+    end
+
+    test "returns a fresh state when the saved envelope has no 'state' field" do
+      Process.put(:stub_load_response, {:ok, %{"version" => 1}})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %State{} = state} =
+                   State.load_or_new(StubPersistence, nil, %{
+                     agent_id: "conversation-2",
+                     conversation_id: 2
+                   })
+
+          assert state.messages == []
+        end)
+
+      assert log =~ "no 'state' field"
+      assert log =~ "conversation-2"
+    end
+
+    test "restores state from a valid serialized envelope" do
+      # Round-trip a real state through the serializer to produce a valid
+      # envelope, then feed it back in.
+      original =
+        State.new!(%{
+          messages: [Message.new_user!("hello")],
+          metadata: %{"foo" => "bar"}
+        })
+
+      serialized = Sagents.Persistence.StateSerializer.serialize_state(original)
+
+      Process.put(:stub_load_response, {:ok, %{"state" => serialized}})
+
+      assert {:ok, %State{} = restored} =
+               State.load_or_new(StubPersistence, nil, %{
+                 agent_id: "conversation-4",
+                 conversation_id: 4
+               })
+
+      assert restored.agent_id == "conversation-4"
+      assert length(restored.messages) == 1
+
+      assert hd(restored.messages).content == [
+               %LangChain.Message.ContentPart{type: :text, content: "hello", options: []}
+             ] or
+               hd(restored.messages).content == "hello"
+    end
+
+    test "load_state context carries agent_id and conversation_id" do
+      defmodule CapturingPersistence do
+        @behaviour Sagents.AgentPersistence
+        @impl true
+        def persist_state(_scope, _state, _ctx), do: :ok
+        @impl true
+        def load_state(_scope, ctx) do
+          send(self(), {:loaded, ctx})
+          {:error, :not_found}
+        end
+      end
+
+      State.load_or_new(CapturingPersistence, nil, %{
+        agent_id: "agent-X",
+        conversation_id: "conv-Y"
+      })
+
+      assert_received {:loaded, %{agent_id: "agent-X", conversation_id: "conv-Y"}}
+    end
+  end
 end

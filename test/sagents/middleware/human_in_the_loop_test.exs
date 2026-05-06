@@ -82,6 +82,51 @@ defmodule Sagents.Middleware.HumanInTheLoopTest do
     end
   end
 
+  describe "restorable_interrupt?/1" do
+    test "returns true for HITL-shaped interrupt_data with action_requests list" do
+      data = %{
+        action_requests: [
+          %{tool_call_id: "call_1", tool_name: "write_file", arguments: %{}}
+        ],
+        review_configs: %{"write_file" => %{allowed_decisions: [:approve, :reject]}},
+        hitl_tool_call_ids: ["call_1"]
+      }
+
+      assert HumanInTheLoop.restorable_interrupt?(data) == true
+    end
+
+    test "returns true even when action_requests is empty" do
+      data = %{action_requests: [], review_configs: %{}, hitl_tool_call_ids: []}
+      assert HumanInTheLoop.restorable_interrupt?(data) == true
+    end
+
+    test "returns false for AskUserQuestion-shaped interrupt_data" do
+      data = %{type: :ask_user_question, question: "Continue?", options: ["yes", "no"]}
+      assert HumanInTheLoop.restorable_interrupt?(data) == false
+    end
+
+    test "returns false for SubAgent-shaped interrupt_data" do
+      data = %{type: :subagent_hitl, sub_agent_id: "sub-123"}
+      assert HumanInTheLoop.restorable_interrupt?(data) == false
+    end
+
+    test "returns false when action_requests is not a list" do
+      assert HumanInTheLoop.restorable_interrupt?(%{action_requests: "nope"}) == false
+      assert HumanInTheLoop.restorable_interrupt?(%{action_requests: nil}) == false
+    end
+
+    test "returns false for arbitrary maps without action_requests" do
+      assert HumanInTheLoop.restorable_interrupt?(%{}) == false
+      assert HumanInTheLoop.restorable_interrupt?(%{foo: :bar}) == false
+    end
+
+    test "returns false for non-map values" do
+      assert HumanInTheLoop.restorable_interrupt?(nil) == false
+      assert HumanInTheLoop.restorable_interrupt?("string") == false
+      assert HumanInTheLoop.restorable_interrupt?([]) == false
+    end
+  end
+
   describe "check_for_interrupt/2" do
     test "returns :continue when no tool calls", %{agent_id: agent_id} do
       messages = [

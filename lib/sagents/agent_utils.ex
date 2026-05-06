@@ -145,7 +145,135 @@ defmodule Sagents.AgentUtils do
     end
   end
 
+  @doc """
+  Map an interrupt-data payload to the assigns/state changes a host
+  (LiveView, GenServer, etc.) should merge to display the interrupt.
+
+  Routes the three sagents-internal interrupt variants to their UI shapes:
+
+  - `:ask_user_question` — pull the single question to the front
+  - `:multiple_interrupts` — present as questions if all are questions,
+    otherwise as a HITL tool batch
+  - `:subagent_hitl` — unwrap the inner `action_requests`
+  - any other map — treat as a generic HITL tool batch
+
+  Returns an empty map for `nil`, so callers can apply the result
+  unconditionally on top of base assigns.
+
+  ## Returned keys
+
+  When questions are present:
+  `:pending_question`, `:remaining_questions`, `:question_responses`, `:pending_tools`
+
+  When HITL tools are present:
+  `:pending_tools`, `:pending_question`
+
+  ## Example
+
+      base = %{loading: false, agent_status: :interrupted, interrupt_data: data}
+      Map.merge(base, AgentUtils.interrupt_session_changes(data))
+
+  """
+  @spec interrupt_session_changes(map() | nil) :: map()
+  def interrupt_session_changes(nil), do: %{}
+
+  def interrupt_session_changes(%{type: :ask_user_question} = question) do
+    present_questions([question])
+  end
+
+  def interrupt_session_changes(%{type: :multiple_interrupts, interrupts: interrupts}) do
+    if Enum.all?(interrupts, &(&1.type == :ask_user_question)) do
+      present_questions(interrupts)
+    else
+      present_hitl_tools(interrupts)
+    end
+  end
+
+  def interrupt_session_changes(interrupt_data), do: present_hitl_tools(interrupt_data)
+
+  @doc """
+  Compute the state transition for a single HITL approve/reject decision
+  in a host's pending-tool list.
+
+  Reads `:pending_tools` and `:hitl_decisions` from `state` (treating
+  missing keys as empty list / empty list), records `decision_type` for
+  the tool at `index`, and returns:
+
+  - `{:resume, accumulated_decisions, changes}` — all pending tools have
+    been decided. The host should call
+    `Sagents.AgentServer.resume(agent_id, accumulated_decisions)` and then
+    merge `changes` (which clears `:pending_tools`, `:interrupt_data`, and
+    `:hitl_decisions`).
+  - `{:more, changes}` — tools still pending. Merge `changes` (which
+    advances `:pending_tools` and `:hitl_decisions`).
+
+  ## Example
+
+      case AgentUtils.advance_hitl_decisions(socket.assigns, idx, :approve) do
+        {:resume, decisions, changes} ->
+          AgentServer.resume(agent_id, decisions)
+          {:noreply, assign(socket, changes)}
+
+        {:more, changes} ->
+          {:noreply, assign(socket, changes)}
+      end
+
+  """
+  @spec advance_hitl_decisions(map(), non_neg_integer(), atom()) ::
+          {:resume, [map()], map()} | {:more, map()}
+  def advance_hitl_decisions(state, index, decision_type)
+      when is_map(state) and is_integer(index) and is_atom(decision_type) do
+    pending_tools = Map.get(state, :pending_tools, []) || []
+    accumulated = (Map.get(state, :hitl_decisions, []) || []) ++ [%{type: decision_type}]
+    remaining_tools = List.delete_at(pending_tools, index)
+
+    if remaining_tools == [] do
+      {:resume, accumulated,
+       %{
+         pending_tools: [],
+         interrupt_data: nil,
+         hitl_decisions: []
+       }}
+    else
+      {:more,
+       %{
+         pending_tools: remaining_tools,
+         hitl_decisions: accumulated
+       }}
+    end
+  end
+
   # Private helpers
+
+  defp present_questions([first | rest]) do
+    %{
+      pending_question: first,
+      remaining_questions: rest,
+      question_responses: [],
+      pending_tools: []
+    }
+  end
+
+  defp present_hitl_tools(interrupt_data) do
+    %{
+      pending_tools: extract_action_requests(interrupt_data),
+      pending_question: nil
+    }
+  end
+
+  defp extract_action_requests(%{type: :subagent_hitl, interrupt_data: inner}) do
+    Map.get(inner, :action_requests, [])
+  end
+
+  defp extract_action_requests(interrupt_data) when is_list(interrupt_data) do
+    Enum.flat_map(interrupt_data, &extract_action_requests/1)
+  end
+
+  defp extract_action_requests(interrupt_data) when is_map(interrupt_data) do
+    Map.get(interrupt_data, :action_requests, [])
+  end
+
+  defp extract_action_requests(_other), do: []
 
   defp requires_approval?(tool_name, interrupt_on) do
     case Map.get(interrupt_on, tool_name) do
