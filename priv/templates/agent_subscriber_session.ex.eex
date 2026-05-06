@@ -39,6 +39,7 @@ defmodule <%= module %> do
 
   alias <%= conversations_module %>
   alias <%= coordinator_module %>
+  alias Sagents.AgentUtils
   alias Sagents.Subscriber
   alias LangChain.MessageDelta
   alias LangChain.Message.ToolCall
@@ -110,46 +111,9 @@ defmodule <%= module %> do
   def handle_status_interrupted(interrupt_data) do
     Map.merge(
       %{loading: false, agent_status: :interrupted, interrupt_data: interrupt_data},
-      apply_interrupt_assigns(interrupt_data)
+      AgentUtils.interrupt_session_changes(interrupt_data)
     )
   end
-
-  defp apply_interrupt_assigns(%{type: :ask_user_question} = question) do
-    present_questions([question])
-  end
-
-  defp apply_interrupt_assigns(%{type: :multiple_interrupts, interrupts: interrupts}) do
-    if Enum.all?(interrupts, &(&1.type == :ask_user_question)) do
-      present_questions(interrupts)
-    else
-      present_hitl_tools(interrupts)
-    end
-  end
-
-  defp apply_interrupt_assigns(interrupt_data), do: present_hitl_tools(interrupt_data)
-
-  defp present_questions([first | rest]) do
-    %{
-      pending_question: first,
-      remaining_questions: rest,
-      question_responses: [],
-      pending_tools: []
-    }
-  end
-
-  defp present_hitl_tools(interrupt_data) do
-    %{
-      pending_tools: extract_action_requests(interrupt_data),
-      pending_question: nil
-    }
-  end
-
-  defp extract_action_requests(%{type: :subagent_hitl, interrupt_data: inner}) do
-    Map.get(inner, :action_requests, [])
-  end
-
-  defp extract_action_requests(interrupt_data),
-    do: Map.get(interrupt_data, :action_requests, [])
 
   # ===========================================================================
   # Message handlers
@@ -332,24 +296,7 @@ defmodule <%= module %> do
   or `{:more, changes}` when there are still tools to decide.
   """
   def handle_hitl_decision(state, index, decision_type) do
-    pending_tools = Map.get(state, :pending_tools, [])
-    accumulated = (Map.get(state, :hitl_decisions, []) || []) ++ [%{type: decision_type}]
-    remaining_tools = List.delete_at(pending_tools, index)
-
-    if remaining_tools == [] do
-      {:resume, accumulated,
-       %{
-         pending_tools: [],
-         interrupt_data: nil,
-         hitl_decisions: []
-       }}
-    else
-      {:more,
-       %{
-         pending_tools: remaining_tools,
-         hitl_decisions: accumulated
-       }}
-    end
+    AgentUtils.advance_hitl_decisions(state, index, decision_type)
   end
 
   @doc """

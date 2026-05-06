@@ -49,6 +49,7 @@ defmodule Sagents.State do
 
   use Ecto.Schema
   import Ecto.Changeset
+  require Logger
   alias __MODULE__
 
   @primary_key false
@@ -133,6 +134,84 @@ defmodule Sagents.State do
     case Sagents.Persistence.StateSerializer.deserialize_state(agent_id, data) do
       {:ok, state} -> {:ok, clean_stale_interrupts(state, [])}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Load an agent's persisted state via an `Sagents.AgentPersistence`
+  implementation, or return a fresh empty state if nothing is saved or the
+  saved data is unusable.
+
+  Always returns `{:ok, state}` so callers can pattern-match without
+  fallback branches. Failure modes (missing envelope key, malformed
+  serialized data) are logged at warning level and degrade gracefully to a
+  fresh state — restoring a partial conversation is worse than starting
+  fresh, since the user can re-prompt but cannot recover from a server
+  that won't boot.
+
+  ## Parameters
+
+  - `persistence_module` — module implementing `Sagents.AgentPersistence`
+  - `scope` — integrator-defined scope struct (forwarded to `load_state/2`)
+  - `context` — map with `:agent_id` (required) and `:conversation_id`
+    (optional; useful for log lines and is included in the load context)
+
+  ## Examples
+
+      Sagents.State.load_or_new(MyApp.AgentPersistence, scope, %{
+        agent_id: "conversation-123",
+        conversation_id: 123
+      })
+      # => {:ok, %Sagents.State{...}}
+
+  """
+  @spec load_or_new(module(), term() | nil, %{
+          required(:agent_id) => String.t(),
+          optional(:conversation_id) => term()
+        }) :: {:ok, t()}
+  def load_or_new(persistence_module, scope, %{agent_id: agent_id} = context)
+      when is_atom(persistence_module) and is_binary(agent_id) do
+    load_context = %{
+      agent_id: agent_id,
+      conversation_id: Map.get(context, :conversation_id)
+    }
+
+    case persistence_module.load_state(scope, load_context) do
+      {:ok, exported_state} ->
+        Logger.info("Found saved state for agent #{agent_id}, attempting to restore...")
+        restore_or_fresh(agent_id, exported_state)
+
+      {:error, :not_found} ->
+        Logger.info("No saved state found for agent #{agent_id}, creating fresh state")
+        {:ok, new!(%{})}
+    end
+  end
+
+  defp restore_or_fresh(agent_id, exported_state) do
+    case Map.get(exported_state, "state") do
+      nil ->
+        Logger.warning(
+          "Exported state for agent #{agent_id} has no 'state' field, using fresh state"
+        )
+
+        {:ok, new!(%{})}
+
+      nested_state ->
+        case from_serialized(agent_id, nested_state) do
+          {:ok, state} ->
+            Logger.info(
+              "Successfully restored agent state for #{agent_id} with #{length(state.messages)} messages"
+            )
+
+            {:ok, state}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Failed to deserialize agent state for #{agent_id}: #{inspect(reason)}, using fresh state"
+            )
+
+            {:ok, new!(%{})}
+        end
     end
   end
 
