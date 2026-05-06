@@ -743,7 +743,7 @@ defmodule Sagents.Middleware do
       UndefinedFunctionError -> false
       _other -> false
     catch
-      _, _other -> false
+      _kind, _other -> false
     end
   end
 

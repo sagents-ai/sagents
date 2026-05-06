@@ -96,7 +96,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
   # restored only if every sub-interrupt is claimed.
   @impl true
   def restorable_interrupt?(%{type: :ask_user_question}), do: true
-  def restorable_interrupt?(_), do: false
+  def restorable_interrupt?(_other), do: false
 
   # Claim: resume_data is nil (re-scan from HITL handoff). Surface the interrupt
   # so the user sees it. Don't try to resolve -- there's no answer yet.

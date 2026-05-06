@@ -424,10 +424,10 @@ defmodule Sagents.Persistence.StateSerializer do
   rescue
     _other -> :error
   catch
-    _, _other -> :error
+    _kind, _other -> :error
   end
 
-  defp safe_binary_to_term(_), do: :error
+  defp safe_binary_to_term(_other), do: :error
 
   defp serialize_map_to_string_keys(map) when is_map(map) do
     Map.new(map, fn

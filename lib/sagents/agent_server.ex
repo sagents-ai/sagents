@@ -1395,7 +1395,7 @@ defmodule Sagents.AgentServer do
        when not is_nil(data),
        do: true
 
-  defp live_interrupt?(_), do: false
+  defp live_interrupt?(_other), do: false
 
   # Mirror of LangChain's `extract_interrupt_data/1` — keep these in lockstep
   # so restored and freshly-fired interrupts surface identically.

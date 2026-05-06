@@ -286,7 +286,7 @@ defmodule Sagents.Middleware.HumanInTheLoop do
       when is_list(action_requests),
       do: true
 
-  def restorable_interrupt?(_), do: false
+  def restorable_interrupt?(_other), do: false
 
   @doc """
   Check if the current state requires an interrupt for human approval.

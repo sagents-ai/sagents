@@ -820,7 +820,7 @@ defmodule Sagents.StateTest do
       defmodule CapturingPersistence do
         @behaviour Sagents.AgentPersistence
         @impl true
-        def persist_state(_, _, _), do: :ok
+        def persist_state(_scope, _state, _ctx), do: :ok
         @impl true
         def load_state(_scope, ctx) do
           send(self(), {:loaded, ctx})

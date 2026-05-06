@@ -403,14 +403,14 @@ defmodule Sagents.MiddlewareTest do
 
       @impl true
       def restorable_interrupt?(%{type: :my_type}), do: true
-      def restorable_interrupt?(_), do: false
+      def restorable_interrupt?(_other), do: false
     end
 
     defmodule RestorableRaisesMiddleware do
       @behaviour Middleware
 
       @impl true
-      def restorable_interrupt?(_), do: raise("boom")
+      def restorable_interrupt?(_other), do: raise("boom")
     end
 
     test "returns false when middleware does not implement the callback" do
