@@ -1,10 +1,16 @@
 defmodule <%= module %> do
+  @behaviour Sagents.Factory
+
   @moduledoc """
   Factory for creating agents with consistent configuration.
 
-  This module centralizes agent creation, ensuring all agents use the same
-  model, middleware stack, and base configuration. The Coordinator calls
-  `create_agent/1` when starting a conversation session.
+  Pairs with `<%= factory_config_module %>` — read that module to know
+  what's required and how to build a config. This factory just consumes
+  `%<%= factory_config_alias %>{}` and produces a `%Sagents.Agent{}`.
+
+  This module centralizes agent creation, ensuring all agents use the
+  same model, middleware stack, and base configuration. Sagents.Session
+  calls `create_agent/2` when starting a conversation session.
 
   This Factory is automatically configured for your persistence layer:
   - Owner type: :<%= owner_type %>
@@ -13,13 +19,16 @@ defmodule <%= module %> do
 
   ## Customization
 
-  - Change model provider in `get_model_config/0`
-  - Configure fallbacks in `get_fallback_models/0`
-  - Configure title generation model in `get_title_model/0`
-  - Modify system prompt in `base_system_prompt/0`
-  - Add/remove middleware in `build_middleware/2`
-  - Add custom tools in `create_agent/1` under the `:tools` key
-  - Configure HITL in `default_interrupt_on/0`
+  Each helper takes the `%<%= factory_config_alias %>{}` config (`c`)
+  so you can branch on per-request fields without re-threading args:
+
+  - Change model provider in `build_model/1`
+  - Configure fallbacks in `get_fallback_models/1`
+  - Configure title generation model in `get_title_model/1`
+  - Modify system prompt in `base_system_prompt/1`
+  - Add/remove middleware in `build_middleware/1`
+  - Add custom tools in `build_tools/1`
+  - Configure HITL in `default_interrupt_on/1`
 
   ## Understanding the Default Middleware
 
@@ -40,25 +49,9 @@ defmodule <%= module %> do
 
   ## Filesystem Scoping
 
-  The FileSystem middleware supports flexible scoping to control file isolation.
-
-  **For user-facing interactive agents (recommended):**
-  - **User-scoped**: `filesystem_scope: {:user, user_id}`
-    - Files persist across all conversations for the same user
-    - Enables true long-term memory and file accumulation
-    - This is the typical pattern for chat applications
-
-  **Other scoping options:**
-  - **Project-scoped**: `filesystem_scope: {:project, project_id}`
-    - Files shared within a project across multiple users and conversations
-
-  - **Agent-scoped**: `filesystem_scope: nil` (defaults to `{:agent, agent_id}`)
-    - Files isolated per conversation - typically too limiting for user-facing agents
-    - May be appropriate for non-interactive batch processing or isolated task execution
-
-  - **Custom scoping**: Use any tuple like `{:team, team_id}` or `{:session, session_id}`
-
-  **Important:** The Coordinator should pass the appropriate scope when calling `create_agent/1`.
+  Files are scoped to the owner (`{:<%= owner_type %>, <%= owner_field %>}`)
+  so they persist across all conversations for that owner. Edit
+  `ensure_filesystem_for/1` to change the scoping strategy.
 
   """
 
@@ -68,8 +61,13 @@ defmodule <%= module %> do
   # Uncomment for Bedrock:
   # alias LangChain.Utils.BedrockConfig
   alias Sagents.Agent
+  alias Sagents.FileSystem
+  alias Sagents.FileSystem.FileSystemConfig
   alias Sagents.Middleware.ConversationTitle
   alias Sagents.Middleware.HumanInTheLoop
+  alias <%= factory_config_module %>
+
+  require Logger
 
   # ---------------------------------------------------------------------------
   # Model Configuration (edit these module attributes to change models)
@@ -90,89 +88,76 @@ defmodule <%= module %> do
   # @title_model "gpt-4o-mini"
 
   @doc """
-  Creates an agent with the standard configuration.
+  Builds a `%Sagents.Agent{}` from the supplied config.
 
-  ## Options
-
-  - `:agent_id` - Required. Unique identifier for this agent.
-  - `:filesystem_scope` - Required. Scope tuple for filesystem isolation.
-    Examples: `{:<%= owner_type %>, <%= owner_field %>}`, `{:project, 456}`, `{:team, 789}`.
-    Pass `nil` for agent-scoped (isolated per conversation).
-  - `:scope` - Integrator-defined scope struct (e.g., `%MyApp.Accounts.Scope{}`).
-    In production this should be passed by the Coordinator from the caller's session.
-    `nil` is allowed (for tests, admin scripts, or background jobs without a user
-    context) but tenant-scoped queries downstream will have no owner to filter by.
-    Set on `agent.scope`; sagents propagates to persistence callbacks (arg #1) and
-    to tool `context.scope`.
-  - `:interrupt_on` - Optional. Map of tool names requiring approval.
-    Pass `nil` to disable HITL entirely.
-  - `:tool_context` - Optional. Map of caller-supplied data passed to tool functions
-    via `LLMChain.custom_context`. Defaults to `%{}`. Example: `%{user_id: 42}`.
-
-  ## Examples
-
-      # Standard usage with <%= owner_type %> scope
-      {:ok, agent} = Factory.create_agent(
-        agent_id: "conv-123",
-        filesystem_scope: {:<%= owner_type %>, <%= owner_field %>}
-      )
-
-      # Project-scoped filesystem
-      {:ok, agent} = Factory.create_agent(
-        agent_id: "conv-123",
-        filesystem_scope: {:project, project_id}
-      )
-
-      # Agent-scoped (isolated per conversation)
-      {:ok, agent} = Factory.create_agent(
-        agent_id: "conv-123",
-        filesystem_scope: nil
-      )
-
-      # With custom HITL configuration
-      {:ok, agent} = Factory.create_agent(
-        agent_id: "conv-123",
-        filesystem_scope: {:<%= owner_type %>, <%= owner_field %>},
-        interrupt_on: %{
-          "write_file" => true,
-          "delete_file" => true,
-          "execute_command" => true
-        }
-      )
-
+  - `agent_id` is system-supplied by `Sagents.Session` (derived from
+    `conversation_id` via the host's `agent_id_fun`).
+  - `config` is a `%<%= factory_config_alias %>{}` produced by the
+    paired `FactoryRouter` (typically via
+    `<%= factory_config_alias %>.from_inputs/1 |> <%= factory_config_alias %>.build/1`).
   """
-  def create_agent(opts \\ []) do
-    agent_id = Keyword.fetch!(opts, :agent_id)
-    filesystem_scope = Keyword.fetch!(opts, :filesystem_scope)
-    scope = Keyword.get(opts, :scope)
-    interrupt_on = Keyword.get(opts, :interrupt_on, default_interrupt_on())
-    tool_context = Keyword.get(opts, :tool_context, %{})
-
+  @impl Sagents.Factory
+  def create_agent(agent_id, %<%= factory_config_alias %>{} = c) do
     Agent.new(
       %{
         agent_id: agent_id,
-        model: get_model_config(),
-        base_system_prompt: base_system_prompt(),
-        middleware: build_middleware(filesystem_scope, interrupt_on),
-        fallback_models: get_fallback_models(),
-        before_fallback: get_before_fallback(),
+        scope: c.scope,
+        model: build_model(c),
+        base_system_prompt: base_system_prompt(c),
+        middleware: build_middleware(c),
+        fallback_models: get_fallback_models(c),
+        before_fallback: get_before_fallback(c),
         # Add any custom tools here (tools not provided by middleware)
-        tools: [],
-        tool_context: tool_context,
-        scope: scope
+        tools: build_tools(c),
+        tool_context: c.tool_context
       },
       # Since we specify the full middleware stack, don't add defaults
       replace_default_middleware: true
     )
+    |> case do
+      {:ok, agent} -> {:ok, agent, []}
+      {:error, _reason} = err -> err
+    end
   end
+
+  # ---------------------------------------------------------------------------
+  # Filesystem
+  # ---------------------------------------------------------------------------
+
+  # Ensure the owner-scoped filesystem is running before the agent boots.
+  # Returns a `scope_key` tuple to pass into the FileSystem middleware, or
+  # `nil` to fall back to agent-scoped filesystem.
+  defp ensure_filesystem_for(%<%= factory_config_alias %>{
+         scope: %{<%= owner_type %>: %{id: <%= owner_field %>}}
+       })
+       when not is_nil(<%= owner_field %>) do
+    scope_key = {:<%= owner_type %>, <%= owner_field %>}
+    {:ok, fs_config} = FileSystemConfig.new(%{scope_key: scope_key, base_directory: "Memories"})
+
+    case FileSystem.ensure_filesystem(scope_key, [fs_config]) do
+      {:ok, _pid} ->
+        scope_key
+
+      {:error, reason} ->
+        Logger.warning(
+          "Factory could not ensure <%= owner_type %> filesystem (<%= owner_field %>=#{<%= owner_field %>}): #{inspect(reason)}. " <>
+            "Falling back to agent-scoped filesystem."
+        )
+
+        nil
+    end
+  end
+
+  defp ensure_filesystem_for(_c), do: nil
 
   # ---------------------------------------------------------------------------
   # Model Configuration
   # ---------------------------------------------------------------------------
 
   # Primary model configuration.
-  # Modify this function to switch providers or models.
-  defp get_model_config do
+  # Modify this function to switch providers or models. Branch on `c` to
+  # vary the model per request (e.g. agent kind, plan tier).
+  defp build_model(%<%= factory_config_alias %>{} = _c) do
     ChatAnthropic.new!(%{
       model: @main_model,
       api_key: System.fetch_env!("ANTHROPIC_API_KEY"),
@@ -195,8 +180,6 @@ defmodule <%= module %> do
   # Fallback models - same model on different infrastructure for resilience.
   # These are used when the primary provider is unavailable.
   #
-  # This function is called by create_agent/1 and passed to the Agent struct.
-  #
   # Note: To use Bedrock fallback, configure AWS credentials in config.exs:
   #
   #   config :langchain, :bedrock,
@@ -205,23 +188,7 @@ defmodule <%= module %> do
   #     aws_region: System.get_env("AWS_REGION", "us-east-1")
   #
   # Then uncomment the BedrockConfig alias at the top of this file.
-  #
-  @doc """
-  Returns the list of fallback models to use when the primary model fails.
-
-  This is called automatically by `create_agent/1`. The fallback models are
-  used in order when the primary model encounters an error that should be
-  retried (rate limits, service unavailable, etc.).
-
-  **Cost Considerations:**
-  - Fallbacks are only used when the primary model fails
-  - Each fallback attempt incurs API costs
-  - Monitor your primary model's error rate to assess fallback usage
-  - Consider using cheaper models as fallbacks (e.g., Haiku instead of Sonnet)
-
-  See the implementation for examples of configuring Bedrock and Azure fallbacks.
-  """
-  def get_fallback_models do
+  defp get_fallback_models(%<%= factory_config_alias %>{} = _c) do
     [
       # Anthropic via AWS Bedrock (same Claude model, different provider)
       # Uncomment when Bedrock is configured:
@@ -241,55 +208,10 @@ defmodule <%= module %> do
     ]
   end
 
-  @doc """
-  Returns an optional function to modify the chain before each LLM attempt.
-
-  This function is called before EVERY attempt, including the first. This makes
-  it useful for provider-specific modifications like:
-  - Swapping system prompts for different providers (Anthropic vs OpenAI formatting)
-  - Adjusting context or parameters based on the model
-  - Logging or telemetry per attempt
-
-  ## Function Signature
-
-  The function receives an `LLMChain.t()` and returns a modified `LLMChain.t()`:
-
-      fn %LLMChain{} = chain -> modified_chain end
-
-  ## Example: Provider-Specific System Prompts
-
-      def get_before_fallback do
-        fn chain ->
-          case chain.llm do
-            %ChatAnthropic{} ->
-              # Anthropic-specific system prompt
-              new_prompt = Message.new_system!("Anthropic-optimized prompt")
-              %LLMChain{chain | messages:
-                LangChain.Utils.replace_system_message!(chain.messages, new_prompt)}
-
-            %ChatOpenAI{} ->
-              # OpenAI-specific system prompt
-              new_prompt = Message.new_system!("OpenAI-optimized prompt")
-              %LLMChain{chain | messages:
-                LangChain.Utils.replace_system_message!(chain.messages, new_prompt)}
-
-            _other ->
-              chain
-          end
-        end
-      end
-
-  Returns a function `(LLMChain.t() -> LLMChain.t())` or `nil` to skip.
-  """
-  def get_before_fallback do
+  # Optional function to modify the chain before each LLM attempt.
+  # See `Sagents.Agent.before_fallback` docs for the full signature.
+  defp get_before_fallback(%<%= factory_config_alias %>{} = _c) do
     nil
-
-    # Example implementation (commented out):
-    # fn chain ->
-    #   # Example: Log which model is being attempted
-    #   Logger.debug("Attempting LLM call with \#{inspect(chain.llm)}")
-    #   chain
-    # end
   end
 
   # ---------------------------------------------------------------------------
@@ -298,7 +220,7 @@ defmodule <%= module %> do
 
   # Title generation uses a lighter/faster model for cost efficiency.
   # Haiku is ~10x cheaper than Sonnet and sufficient for generating titles.
-  defp get_title_model do
+  defp get_title_model(%<%= factory_config_alias %>{} = _c) do
     ChatAnthropic.new!(%{
       model: @title_model,
       api_key: System.fetch_env!("ANTHROPIC_API_KEY"),
@@ -308,7 +230,7 @@ defmodule <%= module %> do
   end
 
   # Fallback models for title generation
-  defp get_title_fallbacks do
+  defp get_title_fallbacks(%<%= factory_config_alias %>{} = _c) do
     [
       # Uncomment when Bedrock is configured (also uncomment BedrockConfig alias):
       # ChatAnthropic.new!(%{
@@ -324,9 +246,9 @@ defmodule <%= module %> do
   # System Prompt
   # ---------------------------------------------------------------------------
 
-  # Base system prompt for all agents.
-  # Customize this for your agent's purpose and personality.
-  defp base_system_prompt do
+  # Base system prompt for all agents. Branch on `c` for per-request
+  # customizations (e.g. inject project context).
+  defp base_system_prompt(%<%= factory_config_alias %>{} = _c) do
     """
     You are a helpful AI assistant.
     """
@@ -343,14 +265,21 @@ defmodule <%= module %> do
   #   - `true` - Enable with default decisions (approve, edit, reject)
   #   - `false` - No interruption for this tool
   #   - `%{allowed_decisions: [:approve, :reject]}` - Custom decisions
-  #
-  defp default_interrupt_on do
+  defp default_interrupt_on(%<%= factory_config_alias %>{} = _c) do
     %{
       "delete_file" => true
       # "write_file" => true,
       # "execute_command" => true
     }
   end
+
+  # ---------------------------------------------------------------------------
+  # Tools
+  # ---------------------------------------------------------------------------
+
+  # Custom (non-middleware-provided) tools. Branch on `c` to enable/disable
+  # tools per request.
+  defp build_tools(%<%= factory_config_alias %>{} = _c), do: []
 
   # ---------------------------------------------------------------------------
   # Middleware Configuration
@@ -370,8 +299,10 @@ defmodule <%= module %> do
   #
   # Order matters! Early middleware sees messages first (before_model) and
   # processes responses last (after_model).
-  #
-  defp build_middleware(filesystem_scope, interrupt_on) do
+  defp build_middleware(%<%= factory_config_alias %>{} = c) do
+    filesystem_scope = ensure_filesystem_for(c)
+    interrupt_on = default_interrupt_on(c)
+
     [
       # Task management - gives the agent a todo list for tracking work
       Sagents.Middleware.TodoList,
@@ -379,14 +310,15 @@ defmodule <%= module %> do
       # ConversationTitle - auto-generate titles after the first exchange.
       # Positioned early because it's async and should start as soon as possible.
       # Uses a lighter/faster model (Haiku) for cost efficiency.
-      {ConversationTitle, [
-        chat_model: get_title_model(),
-        fallbacks: get_title_fallbacks()
-      ]},
+      {ConversationTitle,
+       [
+         chat_model: get_title_model(c),
+         fallbacks: get_title_fallbacks(c)
+       ]},
 
       # Virtual filesystem - file operations with configurable scope
-      # For user-facing agents, pass {:user, user_id} from the Coordinator
-      # If nil, defaults to {:agent, agent_id} (isolated per conversation)
+      # `filesystem_scope` is derived from `c.scope` in `ensure_filesystem_for/1`.
+      # If nil, defaults to {:agent, agent_id} (isolated per conversation).
       {Sagents.Middleware.FileSystem, [filesystem_scope: filesystem_scope]},
 
       # SubAgent - spawn child agents for complex tasks
@@ -394,13 +326,14 @@ defmodule <%= module %> do
       # inherited by subagents (e.g., Summarization, ConversationTitle).
       # AskUserQuestion is blocked because sub-agents should complete tasks
       # autonomously without pausing to quiz the user.
-      {Sagents.Middleware.SubAgent, [
-        block_middleware: [
-          Sagents.Middleware.Summarization,
-          Sagents.Middleware.ConversationTitle,
-          Sagents.Middleware.AskUserQuestion
-        ]
-      ]},
+      {Sagents.Middleware.SubAgent,
+       [
+         block_middleware: [
+           Sagents.Middleware.Summarization,
+           Sagents.Middleware.ConversationTitle,
+           Sagents.Middleware.AskUserQuestion
+         ]
+       ]},
 
       # Summarization - compress long conversations to fit context window
       Sagents.Middleware.Summarization,

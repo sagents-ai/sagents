@@ -26,7 +26,7 @@ defmodule <%= module %> do
        `handle_publisher_down/2` and `handle_presence_diff/2` here.
 
     3. For the action path (send_message, wake_agent, etc.), call
-       `<%= coordinator_alias %>.ensure_session_running(socket.assigns)`
+       `<%= coordinator_alias %>.ensure_agent_session_running(socket.assigns)`
        and apply the returned changes with `assign(socket, changes)`.
 
   ## Customization
@@ -106,7 +106,7 @@ defmodule <%= module %> do
   isn't running, the subscription is recorded as `:pending`; it
   auto-upgrades to `:subscribed` via `presence_diff` once the agent
   appears (e.g. when the user takes an action that calls
-  `<%= coordinator_alias %>.ensure_session_running/1`).
+  `<%= coordinator_alias %>.ensure_agent_session_running/1`).
 
   ## Parameters
 
@@ -179,11 +179,11 @@ defmodule <%= module %> do
 
   # Boots the agent for a conversation whose persisted metadata indicates a
   # pending interrupt. The LiveView is seeded as initial subscriber inside
-  # ensure_session_running, so the boot broadcast (carrying the restored
+  # ensure_agent_session_running, so the boot broadcast (carrying the restored
   # `:interrupted` status from sagents' derive_boot_status) reaches us via
   # handle_info and surfaces the interrupt UI without polling.
   defp auto_wake_for_pending_interrupt(socket) do
-    case <%= coordinator_alias %>.ensure_session_running(socket.assigns) do
+    case <%= coordinator_alias %>.ensure_agent_session_running(socket.assigns) do
       {:ok, changes} ->
         assign(socket, changes)
 

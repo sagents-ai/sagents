@@ -41,6 +41,8 @@ defmodule Mix.Tasks.Sagents.Setup do
     * `--repo` - Repo module (inferred from app)
     * `--web` - Web module namespace (inferred from app)
     * `--factory` - Factory module name (default: MyApp.Agents.Factory)
+    * `--factory-config` - FactoryConfig module name (default: MyApp.Agents.FactoryConfig)
+    * `--factory-router` - FactoryRouter module name (default: MyApp.Agents.FactoryRouter)
     * `--coordinator` - Coordinator module name (default: MyApp.Agents.Coordinator)
     * `--pubsub` - PubSub module name (default: MyApp.PubSub)
     * `--presence` - Presence module name (default: MyAppWeb.Presence)
@@ -58,6 +60,8 @@ defmodule Mix.Tasks.Sagents.Setup do
     repo: :string,
     web: :string,
     factory: :string,
+    factory_config: :string,
+    factory_router: :string,
     coordinator: :string,
     pubsub: :string,
     presence: :string
@@ -89,6 +93,11 @@ defmodule Mix.Tasks.Sagents.Setup do
     # Generate coordinator
     coordinator_path = generate_coordinator(config)
 
+    # Generate factory + paired config + router
+    factory_config_path = generate_factory_config(config)
+    factory_path = generate_factory(config)
+    factory_router_path = generate_factory_router(config)
+
     # Generate persistence behaviour modules
     agent_persistence_path = generate_agent_persistence(config)
     display_message_persistence_path = generate_display_message_persistence(config)
@@ -99,6 +108,9 @@ defmodule Mix.Tasks.Sagents.Setup do
     # Print all generated files
     all_files = [
       coordinator_path,
+      factory_config_path,
+      factory_path,
+      factory_router_path,
       agent_persistence_path,
       display_message_persistence_path,
       agent_subscriber_session_path | persistence_files
@@ -171,6 +183,8 @@ defmodule Mix.Tasks.Sagents.Setup do
 
     %{
       factory_module: opts[:factory] || "#{app_mod}.Agents.Factory",
+      factory_config_module: opts[:factory_config] || "#{app_mod}.Agents.FactoryConfig",
+      factory_router_module: opts[:factory_router] || "#{app_mod}.Agents.FactoryRouter",
       coordinator_module: opts[:coordinator] || "#{app_mod}.Agents.Coordinator",
       agent_persistence_module: "#{app_mod}.Agents.AgentPersistence",
       agent_subscriber_session_module: "#{app_mod}.Agents.AgentSubscriberSession",
@@ -182,6 +196,8 @@ defmodule Mix.Tasks.Sagents.Setup do
     # Get list of all files that will be generated
     files_to_generate = [
       module_to_path(config.factory_module),
+      module_to_path(config.factory_config_module),
+      module_to_path(config.factory_router_module),
       module_to_path(config.coordinator_module),
       module_to_path(config.agent_persistence_module),
       module_to_path(config.agent_subscriber_session_module),
@@ -268,6 +284,7 @@ defmodule Mix.Tasks.Sagents.Setup do
     binding = [
       module: config.coordinator_module,
       factory_module: config.factory_module,
+      factory_router_module: config.factory_router_module,
       conversations_module: config.context_module,
       agent_persistence_module: config.agent_persistence_module,
       display_message_persistence_module: config.display_message_persistence_module,
@@ -287,6 +304,61 @@ defmodule Mix.Tasks.Sagents.Setup do
     File.write!(coordinator_path, content)
 
     coordinator_path
+  end
+
+  defp generate_factory_config(config) do
+    binding = [
+      module: config.factory_config_module,
+      factory_module: config.factory_module
+    ]
+
+    template_path = Application.app_dir(:sagents, "priv/templates/factory_config.ex.eex")
+    content = EEx.eval_file(template_path, binding)
+
+    file_path = module_to_path(config.factory_config_module)
+    File.mkdir_p!(Path.dirname(file_path))
+    File.write!(file_path, content)
+
+    file_path
+  end
+
+  defp generate_factory(config) do
+    binding = [
+      module: config.factory_module,
+      factory_config_module: config.factory_config_module,
+      factory_config_alias: short_alias(config.factory_config_module),
+      owner_type: config.owner_type,
+      owner_field: config.owner_field,
+      conversations_module: config.context_module
+    ]
+
+    template_path = Application.app_dir(:sagents, "priv/templates/factory.ex.eex")
+    content = EEx.eval_file(template_path, binding)
+
+    file_path = module_to_path(config.factory_module)
+    File.mkdir_p!(Path.dirname(file_path))
+    File.write!(file_path, content)
+
+    file_path
+  end
+
+  defp generate_factory_router(config) do
+    binding = [
+      module: config.factory_router_module,
+      factory_module: config.factory_module,
+      factory_config_module: config.factory_config_module,
+      agents_namespace: parent_namespace(config.factory_config_module),
+      conversations_module: config.context_module
+    ]
+
+    template_path = Application.app_dir(:sagents, "priv/templates/factory_router.ex.eex")
+    content = EEx.eval_file(template_path, binding)
+
+    file_path = module_to_path(config.factory_router_module)
+    File.mkdir_p!(Path.dirname(file_path))
+    File.write!(file_path, content)
+
+    file_path
   end
 
   defp generate_agent_persistence(config) do
@@ -364,6 +436,8 @@ defmodule Mix.Tasks.Sagents.Setup do
 
   defp print_instructions(config) do
     factory_path = module_to_path(config.factory_module)
+    factory_config_path = module_to_path(config.factory_config_module)
+    factory_router_path = module_to_path(config.factory_router_module)
 
     Mix.shell().info([
       :green,
@@ -393,34 +467,73 @@ defmodule Mix.Tasks.Sagents.Setup do
 
            export ANTHROPIC_API_KEY=your_api_key
 
-        4. Customize the Factory (#{factory_path}):
-           * Modify base_system_prompt/0 for your agent's purpose
-           * Add/remove middleware in build_middleware/2
-           * Add custom tools under the :tools key in create_agent/1
-           * Configure HITL in default_interrupt_on/0
-           * Change model provider in get_model_config/0 if needed
+        4. Customize the FactoryConfig (#{factory_config_path}):
+           * Add app-specific fields to the embedded schema
+           * Cast new fields in from_inputs/1 and validate in build/1
+           * Surface request-scoped fields via from_socket_assigns/1
 
-        5. Thread scope through from the caller. When starting a session:
+        5. Customize the Factory (#{factory_path}):
+           * Each helper takes the %FactoryConfig{} struct (`c`) — branch on it
+           * Modify base_system_prompt/1 for your agent's purpose
+           * Add/remove middleware in build_middleware/1
+           * Add custom tools in build_tools/1
+           * Configure HITL in default_interrupt_on/1
+           * Change model provider in build_model/1 if needed
 
-               #{config.coordinator_module}.start_conversation_session(
-                 conversation_id,
-                 scope: socket.assigns.current_scope,
-                 filesystem_scope: {:#{config.owner_type}, socket.assigns.current_scope.#{config.owner_type}.id}
-               )
+        6. (Optional) Customize the FactoryRouter (#{factory_router_path}):
+           The default routes every conversation to the single Factory above.
+           For apps with multiple agent kinds, replace `use Sagents.Routers.Single`
+           with a hand-written resolve/3 — see the moduledoc for the pattern.
 
-           Sagents propagates `:scope` to #{config.context_module} calls (as
-           the first positional argument) and into tool-call `context.scope`.
-           See the Coordinator moduledoc for the full integration pattern.
+        7. Start a session from your action sites (LiveView event handlers,
+           GenServer calls, etc.):
+
+               case #{config.coordinator_module}.ensure_agent_session_running(
+                      socket.assigns,
+                      # Per-request fields your FactoryConfig consumes go
+                      # here. Extend as you add fields to FactoryConfig:
+                      #   timezone: socket.assigns.timezone,
+                      #   tool_context: %{user_id: user_id}
+                    ) do
+                 {:ok, changes} -> {:noreply, assign(socket, changes)}
+                 {:error, reason} -> ...
+               end
+
+           `socket.assigns.current_scope` is read off the state map and
+           threaded through to the FactoryRouter, the FactoryConfig (as
+           `c.scope`), persistence callbacks (#{config.context_module}
+           calls receive it as the first positional arg), and tool-call
+           `context.scope`. Per-request data flows through the explicit
+           second arg — no magic state-map keys.
+
+           See the Coordinator moduledoc for the full integration pattern,
+           including the load path (subscribe-only, no factory config).
 
       Your Sagents infrastructure is configured for:
         - Owner type: :#{config.owner_type}
         - Owner field: #{config.owner_field}
         - Conversations context: #{config.context_module}
         - Factory: #{config.factory_module}
+        - FactoryConfig: #{config.factory_config_module}
+        - FactoryRouter: #{config.factory_router_module}
         - Coordinator: #{config.coordinator_module}
 
       """
     ])
+  end
+
+  # "AgentsDemo.Agents.FactoryConfig" -> "AgentsDemo.Agents".
+  # Falls back to the input string for top-level modules with no parent.
+  defp parent_namespace(module) when is_binary(module) do
+    case String.split(module, ".") do
+      [_only] -> module
+      parts -> parts |> Enum.drop(-1) |> Enum.join(".")
+    end
+  end
+
+  # "AgentsDemo.Agents.FactoryConfig" -> "FactoryConfig".
+  defp short_alias(module) when is_binary(module) do
+    module |> String.split(".") |> List.last()
   end
 
   defp module_to_path(module) when is_binary(module) do
