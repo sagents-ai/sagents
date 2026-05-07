@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.8.0-rc.5
+
+Headline feature: **interrupted agents now resume cleanly across process restart**. An agent that shut down (inactivity timeout, deploy, crash) while waiting on an `ask_user` question or a HITL approval now boots back into `:interrupted` status with the original question/approval intact, rather than silently demoting it to an error. This drove a public-API refactor (`Session` / `Factory` / `FactoryRouter`) that consolidates session-start mechanics into the library and gives per-request data a clean path through the factory.
+
+**Breaking changes** in PRs [#94](https://github.com/sagents-ai/sagents/pull/94) and [#97](https://github.com/sagents-ai/sagents/pull/97). See Upgrading section below.
+
+### Upgrading from v0.8.0-rc.4 to v0.8.0-rc.5
+
+The breaking changes are concentrated in two PRs. The recommended migration path:
+
+**1. Re-run the generators (PR [#97](https://github.com/sagents-ai/sagents/pull/97)).** On a clean, committed workspace, run `mix sagents.setup` with the same options you used originally and merge customizations back in. The setup task now generates a paired `Factory` + `FactoryConfig` + `FactoryRouter` triad in place of the single `factory.ex`, and the generated `coordinator.ex` shrinks from ~390 lines to a thin bridge over the new `Sagents.Session` module.
+
+**2. Convert factory helpers to take `%FactoryConfig{}`.** Helpers that were `get_model/0` / `get_middleware/0` become `build_model/1` / `build_middleware/1` and branch on the config struct directly. Per-request data (timezone, tool_context, project records) flows through `request_opts → FactoryRouter.resolve/3 → %FactoryConfig{} → Factory.create_agent/2` instead of being threaded as positional args.
+
+**3. Rename `ensure_session_running/1` → `ensure_agent_session_running/1`** at every call site (LiveViews, controllers, tests).
+
+**4. Update `subscribe_debug` / `unsubscribe_debug` calls (PR [#94](https://github.com/sagents-ai/sagents/pull/94)).** Replace `AgentServer.subscribe_debug(agent_id)` with `AgentServer.subscribe(agent_id, :debug)`, and likewise for unsubscribe. The single-arg `subscribe(agent_id)` form keeps working unchanged.
+
+**5. Opt middleware into restoration where appropriate (PR [#96](https://github.com/sagents-ai/sagents/pull/96)).** Existing built-in middleware are already configured: `AskUserQuestion` and `HumanInTheLoop` opt in, `SubAgent` deliberately does not (its interrupt holds a dead PID after restart). Custom middleware that produce restorable, data-only `interrupt_data` should implement `restorable_interrupt?/1` returning `true` for matching shapes. The default of `false` means existing custom middleware keeps the old (safe) demote-on-load behaviour with no code changes.
+
+**6. Implement `set_interrupted/3` in your `AgentPersistence` module (PR [#96](https://github.com/sagents-ai/sagents/pull/96)).** The freshly-regenerated `agent_persistence.ex.eex` template includes a default implementation that mirrors the flag onto `conversation.metadata["interrupted"]`. If you hand-wrote your persistence module, add the callback so the cheap "is this conversation pending?" read works on mount without deserializing full state.
+
+### Added
+- Restorable interrupts: an agent that shut down with a pending `ask_user` question or HITL approval boots back into `:interrupted` status on restart, preserving the original `interrupt_data` instead of demoting it to an error. New optional `Sagents.Middleware.restorable_interrupt?/1` callback lets each middleware opt in (default `false` is the safe floor). [#96](https://github.com/sagents-ai/sagents/pull/96)
+- `Sagents.Session` module owns session-start lifecycle (router consult, factory invocation, state seeding, supervisor wiring, subscribers). Idempotent on resume. [#97](https://github.com/sagents-ai/sagents/pull/97)
+- `Sagents.Factory` and `Sagents.FactoryRouter` behaviours, plus `Sagents.Routers.Single` for one-factory apps. Per-request data flows through a typed `%FactoryConfig{}` struct. [#97](https://github.com/sagents-ai/sagents/pull/97)
+- `Sagents.State.load_or_new/3,4` centralizes the load-or-fresh-state decision (lifted from generated coordinator); `:fresh_state_attrs` option seeds initial state on first run only, ignored on resume. [#96](https://github.com/sagents-ai/sagents/pull/96) [#97](https://github.com/sagents-ai/sagents/pull/97)
+- Optional `set_interrupted/3` callback on `Sagents.AgentPersistence`, fired only on actual transitions of the durable interrupt flag. New `interrupted?/1` / `set_interrupt_status/3` in the generated persistence context provide a cheap pre-deserialization read. [#96](https://github.com/sagents-ai/sagents/pull/96)
+- `Publisher.on_subscribed/3` overridable hook delivers a status snapshot the moment a `:main` subscriber registers, so a late-mounting LiveView surfaces a pending question without polling. [#96](https://github.com/sagents-ai/sagents/pull/96)
+- `Sagents.AgentUtils` module lifts `interrupt_session_changes/1` and `advance_hitl_decisions/3` out of generated templates so generated code stays thin. [#96](https://github.com/sagents-ai/sagents/pull/96)
+- Credo wired into `mix precommit` and the CI lint job; `.credo.exs` config with tuned complexity (`max_complexity: 12`) and nesting (`max_nesting: 3`) thresholds. [#93](https://github.com/sagents-ai/sagents/pull/93)
+
+### Changed
+- **BREAKING:** Public API restructured around the `Session` / `Factory` / `FactoryRouter` triad. Generated `coordinator.ex` collapses from ~390 lines of lifecycle ownership to a thin bridge; `factory.ex` becomes a `@behaviour Sagents.Factory` with `build_*` helpers taking the `%FactoryConfig{}` struct. `Coordinator.ensure_session_running/1` is renamed to `ensure_agent_session_running/1`. [#97](https://github.com/sagents-ai/sagents/pull/97)
+- **BREAKING:** `AgentServer.subscribe_debug/1` and `unsubscribe_debug/1` removed in favor of parameterized `subscribe/3` and `unsubscribe/3` (channel and subscriber pid both optional). The single-arg form is unchanged; `:debug` channel and foreign-pid subscriptions now flow through one entry point. [#94](https://github.com/sagents-ai/sagents/pull/94)
+- `StateSerializer` now round-trips `interrupt_data` (Base64-wrapped `term_to_binary` with `[:safe]` decoding); the higher-level cleaner with middleware context owns demotion decisions. Malformed payloads / unknown atoms collapse to `nil`, then through the standard demotion path. [#96](https://github.com/sagents-ai/sagents/pull/96)
+- `Sagents.State.clean_stale_interrupts/2` takes a middleware list and consults each middleware's `restorable_interrupt?/1` per result. Empty middleware list still demotes everything (safe floor preserved). [#96](https://github.com/sagents-ai/sagents/pull/96)
+- `AgentServer` boots in `:interrupted` status when the trailing tool-result placeholder survives the restorable-interrupt sweep, with `interrupt_data` rebuilt to look identical to a freshly-fired interrupt. Free-text user messages while `:interrupted` demote pending placeholders so the next LLM call is well-formed. Crashed-task `{:EXIT, ...}` now drives the agent to `:error` instead of leaving it stuck in `:running`. [#96](https://github.com/sagents-ai/sagents/pull/96)
+- `Sagents.Subscriber` routes through `AgentServer.subscribe/3` instead of building via-tuples by hand, keeping resolution in one place. [#94](https://github.com/sagents-ai/sagents/pull/94)
+- Documentation updates in `sagents.ex` moduledoc — replaced examples to reflect the new public API. [#92](https://github.com/sagents-ai/sagents/pull/92) [#95](https://github.com/sagents-ai/sagents/pull/95)
+- New `docs/middleware.md` "Restorable Interrupts (After Process Restart)" section covering opt-in, the data-only restriction, and `:multiple_interrupts` semantics. [#96](https://github.com/sagents-ai/sagents/pull/96)
+- Mechanical refactors across `lib/` and `test/` to satisfy Credo's tuned ruleset; no behavior changes. [#93](https://github.com/sagents-ai/sagents/pull/93)
+
 ## v0.8.0-rc.4
 
 No breaking changes from `v0.8.0-rc.3`. See the v0.8.0-rc.1 entry below for upgrading from `v0.7.0`.
