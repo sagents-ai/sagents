@@ -327,20 +327,31 @@ This separation means you can:
 
 ### Restoration Pattern
 
+`Sagents.Session.start/3` (called by the generated Coordinator) handles
+this end-to-end: it consults the configured `FactoryRouter`, calls the
+factory with `(agent_id, %FactoryConfig{})`, loads persisted state via
+your `AgentPersistence` module, and starts the supervisor:
+
 ```elixir
-# Load persisted state
-{:ok, persisted_state} = Conversations.load_agent_state(conversation_id)
+# Application code
+{:ok, session} =
+  Coordinator.start_conversation_session(conversation_id,
+    scope: scope,
+    request_opts: [timezone: "America/Denver"]
+  )
 
-# Create fresh agent from code
-{:ok, agent} = AgentFactory.create_agent(agent_id: "conv-#{conversation_id}")
-
-# Combine: code config + persisted state
-{:ok, pid} = AgentServer.start_link(
-  agent: agent,
-  initial_state: persisted_state,
-  pubsub: {Phoenix.PubSub, :my_pubsub}
-)
+# Internally (simplified)
+{:ok, factory, config} = Router.resolve(scope, conversation_id, request_opts)
+{:ok, agent, session_opts} = factory.create_agent(agent_id, config)
+{:ok, state} = State.load_or_new(AgentPersistence, scope, %{...},
+                                 fresh_state_attrs: session_opts[:fresh_state_attrs])
+AgentsDynamicSupervisor.start_agent_sync(agent: agent, initial_state: state, ...)
 ```
+
+The router is consulted on every start (including resume), so a restored
+conversation always rebuilds with the factory it was originally created
+with. `:fresh_state_attrs` is applied only when no persisted state is
+found; restored state always wins.
 
 ## Registry and Discovery
 

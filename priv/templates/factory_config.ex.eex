@@ -1,0 +1,93 @@
+defmodule <%= module %> do
+  @moduledoc """
+  Typed configuration consumed by `<%= factory_module %>.create_agent/2`.
+
+  This is the single home for the struct that the factory pattern-matches
+  on, and for every supported way of constructing one. Add fields and
+  validations here as your agent grows.
+
+  ## Building a config
+
+  From a Phoenix LiveView socket's assigns:
+
+      <%= module %>.from_socket_assigns(socket.assigns)
+      |> <%= module %>.build()
+
+  From a neutral map (GenServer, GraphQL resolver, test):
+
+      <%= module %>.from_inputs(%{
+        scope: scope,
+        conversation_id: conversation_id
+      })
+      |> <%= module %>.build()
+
+  ## Extending
+
+  Add new validatable fields to the embedded schema, cast them in
+  `from_inputs/1`, and validate in `build/1`. Add pipeline steps as
+  `with_*` functions that take and return an `Ecto.Changeset` so the
+  call site can compose them:
+
+      def with_project(%Ecto.Changeset{} = cs, project) do
+        cs
+        |> put_change(:project_id, project.id)
+        |> put_change(:project_title, project.title)
+      end
+
+      <%= module %>.from_inputs(inputs)
+      |> <%= module %>.with_project(project)
+      |> <%= module %>.build()
+  """
+
+  use Ecto.Schema
+  import Ecto.Changeset
+
+  @primary_key false
+  embedded_schema do
+    # Add app-specific validatable fields here (e.g. :project_id).
+    field :tool_context, :map, default: %{}
+
+    # Heavy already-loaded objects — virtual + :any so we don't try to
+    # cast them. Attach via put_change after validation.
+    field :scope, :any, virtual: true
+    field :conversation_id, :any, virtual: true
+  end
+
+  @cast_fields ~w(tool_context)a
+
+  @doc """
+  Start a config build pipeline. Returns a changeset; chain with `with_*`
+  steps your app adds, then finalize with `build/1`.
+  """
+  def from_inputs(%{} = inputs) do
+    attrs = %{tool_context: Map.get(inputs, :tool_context, %{})}
+
+    %__MODULE__{}
+    |> cast(attrs, @cast_fields)
+    |> put_change(:scope, Map.get(inputs, :scope))
+    |> put_change(:conversation_id, Map.get(inputs, :conversation_id))
+  end
+
+  @doc """
+  Build from a Phoenix LiveView socket's assigns. Pulls
+  `:current_scope` and any per-request fields the LiveView exposes. New
+  request-scoped fields get added here in one place.
+  """
+  def from_socket_assigns(assigns) when is_map(assigns) do
+    from_inputs(%{
+      scope: Map.fetch!(assigns, :current_scope),
+      conversation_id: Map.get(assigns, :conversation_id),
+      tool_context: Map.get(assigns, :tool_context, %{})
+    })
+  end
+
+  @doc """
+  Finalize the pipeline. Validates required fields and converts the
+  changeset into a usable struct.
+  """
+  def build(%Ecto.Changeset{} = cs) do
+    cs
+    |> validate_required([:scope, :conversation_id])
+    |> apply_action(:build)
+  end
+end

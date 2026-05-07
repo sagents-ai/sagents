@@ -157,8 +157,7 @@ defmodule Sagents.AgentsDynamicSupervisor do
         startup_timeout: 10_000
       )
   """
-  @spec start_agent_sync(keyword()) ::
-          {:ok, pid()} | {:ok, pid(), :already_started} | {:error, term()}
+  @spec start_agent_sync(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_agent_sync(opts) do
     startup_timeout = Keyword.get(opts, :startup_timeout, 5_000)
     agent_id = Keyword.fetch!(opts, :agent_id)

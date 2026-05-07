@@ -243,8 +243,13 @@ scope = {:user, current_user.id}
 # Creates: conversation row
 # Foreign key: conversation.user_id = current_user.id
 
-# 2. Coordinator starts agent
-{:ok, session} = Coordinator.start_conversation_session(conversation.id)
+# 2. Coordinator starts agent (delegates to Sagents.Session, which consults
+#    the configured FactoryRouter to pick a factory and build its config)
+{:ok, session} =
+  Coordinator.start_conversation_session(conversation.id,
+    scope: scope,
+    request_opts: [timezone: "America/Denver"]
+  )
 # Creates: agent process (AgentServer)
 # Links: agent_id = "conversation-#{conversation.id}"
 ```
@@ -286,17 +291,26 @@ def mount(%{"id" => id}, _session, socket) do
   {:ok, assign(socket, conversation: conversation, messages: display_messages)}
 end
 
-# For agent restart
-def start_conversation_session(conversation_id) do
-  # Load agent state for LLM context
-  {:ok, state} = Conversations.load_agent_state(conversation_id)
-  # => SELECT state_data FROM agent_states WHERE conversation_id = $1
-  # => State.from_serialized/2 deserializes JSONB
+# For agent restart, the generated Coordinator delegates to
+# Sagents.Session, which routes → builds a %FactoryConfig{} → invokes
+# the factory → seeds state from your AgentPersistence module.
+#
+# The router is consulted on every start (including resume), so a
+# restored conversation always rebuilds with the factory it was
+# originally created with.
+{:ok, session} =
+  Coordinator.start_conversation_session(conversation_id,
+    scope: scope,
+    request_opts: [timezone: "America/Denver"]
+  )
 
-  # Create agent with restored state
-  {:ok, agent} = Factory.create_agent(agent_id: "conversation-#{conversation_id}")
-  {:ok, pid} = AgentServer.start_link(agent: agent, initial_state: state)
-end
+# Internally, Sagents.Session does roughly:
+#
+#   {:ok, factory, config} = Router.resolve(scope, conversation_id, request_opts)
+#   {:ok, agent, session_opts} = factory.create_agent(agent_id, config)
+#   {:ok, state} = State.load_or_new(AgentPersistence, scope, %{...},
+#                                    fresh_state_attrs: session_opts[:fresh_state_attrs])
+#   AgentsDynamicSupervisor.start_agent_sync([agent: agent, initial_state: state, ...])
 ```
 
 ## Persistence Callbacks
@@ -417,15 +431,21 @@ messages = Conversations.load_display_messages(conversation_id)
 ### Resuming Conversation
 
 ```elixir
-# Load agent state for context
-{:ok, state} = Conversations.load_agent_state(conversation_id)
+# The generated Coordinator handles resume end-to-end. Sagents.Session
+# loads persisted state via your AgentPersistence module and rebuilds
+# the agent through the FactoryRouter:
+{:ok, session} =
+  Coordinator.start_conversation_session(conversation_id,
+    scope: scope,
+    request_opts: [timezone: "America/Denver"]
+  )
 
-# state: %State{messages: [...], todos: [...], metadata: %{...}}
-
-# Create and start agent with restored state
-{:ok, agent} = Factory.create_agent(agent_id: "conversation-#{conversation_id}")
-{:ok, pid} = AgentServer.start_link(agent: agent, initial_state: state, ...)
+# session = %{agent_id: "conversation-#{id}", pid: pid, conversation_id: id}
 ```
+
+The factory's `:fresh_state_attrs` (a key in the keyword list it returns
+as the third tuple element from `create_agent/2`) is applied **only** on
+fresh starts and is ignored on resume — restored state always wins.
 
 ### Streaming New Messages
 

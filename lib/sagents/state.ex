@@ -155,6 +155,9 @@ defmodule Sagents.State do
   - `scope` — integrator-defined scope struct (forwarded to `load_state/2`)
   - `context` — map with `:agent_id` (required) and `:conversation_id`
     (optional; useful for log lines and is included in the load context)
+  - `opts` — optional keyword list:
+    - `:fresh_state_attrs` — map seeded into `new!/1` only when no
+      persisted state is found (ignored on resume).
 
   ## Examples
 
@@ -164,37 +167,57 @@ defmodule Sagents.State do
       })
       # => {:ok, %Sagents.State{...}}
 
+      Sagents.State.load_or_new(
+        MyApp.AgentPersistence,
+        scope,
+        %{agent_id: "conversation-123", conversation_id: 123},
+        fresh_state_attrs: %{todos: seed_todos}
+      )
+
   """
-  @spec load_or_new(module(), term() | nil, %{
-          required(:agent_id) => String.t(),
-          optional(:conversation_id) => term()
-        }) :: {:ok, t()}
-  def load_or_new(persistence_module, scope, %{agent_id: agent_id} = context)
-      when is_atom(persistence_module) and is_binary(agent_id) do
+  @spec load_or_new(
+          module(),
+          term() | nil,
+          %{
+            required(:agent_id) => String.t(),
+            optional(:conversation_id) => term()
+          },
+          keyword()
+        ) :: {:ok, t()}
+  def load_or_new(persistence_module, scope, context, opts \\ [])
+
+  def load_or_new(persistence_module, scope, %{agent_id: agent_id} = context, opts)
+      when is_atom(persistence_module) and is_binary(agent_id) and is_list(opts) do
     load_context = %{
       agent_id: agent_id,
       conversation_id: Map.get(context, :conversation_id)
     }
 
+    fresh_state_attrs =
+      case Keyword.get(opts, :fresh_state_attrs, %{}) do
+        attrs when is_map(attrs) -> attrs
+        _other -> %{}
+      end
+
     case persistence_module.load_state(scope, load_context) do
       {:ok, exported_state} ->
         Logger.info("Found saved state for agent #{agent_id}, attempting to restore...")
-        restore_or_fresh(agent_id, exported_state)
+        restore_or_fresh(agent_id, exported_state, fresh_state_attrs)
 
       {:error, :not_found} ->
         Logger.info("No saved state found for agent #{agent_id}, creating fresh state")
-        {:ok, new!(%{})}
+        {:ok, new!(fresh_state_attrs)}
     end
   end
 
-  defp restore_or_fresh(agent_id, exported_state) do
+  defp restore_or_fresh(agent_id, exported_state, fresh_state_attrs) do
     case Map.get(exported_state, "state") do
       nil ->
         Logger.warning(
           "Exported state for agent #{agent_id} has no 'state' field, using fresh state"
         )
 
-        {:ok, new!(%{})}
+        {:ok, new!(fresh_state_attrs)}
 
       nested_state ->
         case from_serialized(agent_id, nested_state) do
@@ -210,7 +233,7 @@ defmodule Sagents.State do
               "Failed to deserialize agent state for #{agent_id}: #{inspect(reason)}, using fresh state"
             )
 
-            {:ok, new!(%{})}
+            {:ok, new!(fresh_state_attrs)}
         end
     end
   end
