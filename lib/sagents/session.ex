@@ -20,7 +20,7 @@ defmodule Sagents.Session do
 
   ## Factory contract
 
-  Factories implement `Sagents.Factory.create_agent/2` taking
+  Factories implement `c:Sagents.Factory.create_agent/2` taking
   `(agent_id, config)` and returning `{:ok, agent, session_opts}`. The
   router supplies `config` verbatim — by convention a typed struct from
   a paired `*Config` module. The library recognizes these keys in

@@ -54,7 +54,7 @@ The FileSystem middleware knows nothing about blog posts. The `BlogPostMiddlewar
 
 ### 1. Start the FileSystemServer
 
-Call `FileSystem.ensure_filesystem/3` before starting any agent session. This is idempotent — safe to call on every page load or connection.
+Call `Sagents.FileSystem.ensure_filesystem/3` before starting any agent session. This is idempotent — safe to call on every page load or connection.
 
 ```elixir
 alias Sagents.FileSystem
