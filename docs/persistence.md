@@ -219,16 +219,22 @@ filesystem_scope = {:user, socket.assigns.current_scope.user.id}
   MyApp.Agents.Coordinator.start_conversation_session(
     conversation_id,
     scope: socket.assigns.current_scope,
-    filesystem_scope: filesystem_scope
+    request_opts: [filesystem_scope: filesystem_scope]
   )
 
 # session = %{agent_id: "conversation-123", pid: pid, conversation_id: ...}
 ```
 
-Internally the Coordinator:
-1. Calls `AgentPersistence.load_state(scope, %{agent_id: ..., conversation_id: ...})` to restore saved state (or starts fresh on `{:error, :not_found}`).
-2. Creates the Agent via the Factory with `scope:` set on `agent.scope`.
-3. Starts the `AgentSupervisor` with `:agent_persistence` and `:display_message_persistence` configured.
+Per-request fields like `:filesystem_scope`, `:timezone`, or `:tool_context`
+flow through the `request_opts` keyword list, which the Coordinator
+forwards to the `FactoryRouter`. The router builds your `%FactoryConfig{}`
+from those inputs, and the Factory reads them off the config struct.
+
+Internally the Coordinator (via `Sagents.Session.start/3`):
+1. Calls `FactoryRouter.resolve(scope, conversation_id, request_opts)` to pick the factory and build its `%FactoryConfig{}`.
+2. Calls `Factory.create_agent(agent_id, factory_config)` to build the `%Sagents.Agent{}`.
+3. Calls `AgentPersistence.load_state(scope, %{agent_id: ..., conversation_id: ...})` to restore saved state (or starts fresh on `{:error, :not_found}`, optionally seeded with the factory's `:fresh_state_attrs`).
+4. Starts the `AgentSupervisor` with `:agent_persistence` and `:display_message_persistence` configured.
 
 From that point, AgentServer invokes the callbacks automatically at the right lifecycle points — no callback-function wiring required at the call site.
 
@@ -520,4 +526,4 @@ end
 
 ### 5. Never Persist Scope
 
-`agent.scope` is excluded from serialization on purpose. If you find yourself reaching for `State.put_metadata(state, :scope, scope)` to "remember" it across restores, stop — that would leak scope across sessions. Scope must come from the fresh caller on every agent start, via `Coordinator.start_conversation_session(id, scope: current_scope, ...)`.
+`agent.scope` is excluded from serialization on purpose. If you find yourself reaching for `State.put_metadata(state, :scope, scope)` to "remember" it across restores, stop — that would leak scope across sessions. Scope must come from the fresh caller on every agent start, via `Coordinator.start_conversation_session(id, scope: current_scope, request_opts: [...])` (or `Coordinator.ensure_agent_session_running/2`, which pulls scope from `state.current_scope`).

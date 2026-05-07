@@ -75,25 +75,52 @@ scope_key = {:user, user_id}
 
 On startup, the `Disk` persistence module calls `list_persisted_entries/2` to discover all existing files in the storage path and registers them in the server with `loaded: false`. Files are then loaded lazily on first access — the server only reads the actual content from disk when the agent calls `read_file`.
 
-### 2. Pass the scope to the agent
+### 2. Pass the scope through the FactoryConfig
 
-Pass the same scope key to your `Factory` when creating the agent:
-
-```elixir
-{:ok, agent} = MyApp.Agents.Factory.create_agent(
-  agent_id: agent_id,
-  filesystem_scope: {:user, user_id}
-)
-```
-
-In your `Factory`, this is forwarded to the `FileSystem` middleware:
+Per-request fields like `:filesystem_scope` are declared as fields on
+your generated `FactoryConfig` struct and threaded in via `request_opts`.
+The `FactoryRouter` builds the config; the `Factory` consumes it:
 
 ```elixir
-defp build_middleware(filesystem_scope, ...) do
-  [
-    {Sagents.Middleware.FileSystem, [filesystem_scope: filesystem_scope]},
-    ...
-  ]
+# lib/my_app/agents/factory_config.ex
+defmodule MyApp.Agents.FactoryConfig do
+  use Ecto.Schema
+  import Ecto.Changeset
+
+  embedded_schema do
+    field :scope, :any, virtual: true
+    field :conversation_id, :integer
+    field :filesystem_scope, :any, virtual: true
+    field :tool_context, :map, default: %{}
+  end
+
+  def from_inputs(inputs), do: cast(%__MODULE__{}, inputs, ~w(...)a)
+  def build(changeset), do: apply_action(changeset, :insert)
+end
+
+# lib/my_app/agents/factory.ex
+defmodule MyApp.Agents.Factory do
+  @behaviour Sagents.Factory
+
+  @impl true
+  def create_agent(agent_id, %MyApp.Agents.FactoryConfig{} = c) do
+    agent = Sagents.Agent.new!(%{
+      agent_id: agent_id,
+      scope: c.scope,
+      model: build_model(c),
+      middleware: build_middleware(c),
+      tool_context: c.tool_context
+    })
+
+    {:ok, agent, []}
+  end
+
+  defp build_middleware(c) do
+    [
+      {Sagents.Middleware.FileSystem, [filesystem_scope: c.filesystem_scope]},
+      # ...
+    ]
+  end
 end
 ```
 
@@ -104,9 +131,14 @@ The agent connects to the already-running `FileSystemServer` automatically throu
 ```elixir
 {:ok, session} = MyApp.Agents.Coordinator.start_conversation_session(
   conversation_id,
-  filesystem_scope: {:user, user_id}
+  scope: scope,
+  request_opts: [filesystem_scope: {:user, user_id}]
 )
 ```
+
+The Coordinator forwards `request_opts` to the `FactoryRouter`, which
+folds the values into `%FactoryConfig{}`, which the `Factory` reads to
+configure the `FileSystem` middleware.
 
 ## Where to Start the Filesystem
 

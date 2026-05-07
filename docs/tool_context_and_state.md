@@ -29,16 +29,27 @@ The `context` map is built by the agent system from three distinct sources: **sc
 })
 ```
 
-In practice, the Coordinator forwards scope from the LiveView socket to the Factory, which sets it on the Agent:
+In practice, the Coordinator forwards scope from the LiveView socket through `Sagents.Session` to the `FactoryRouter`, which builds a `%FactoryConfig{}` containing scope plus any per-request fields. The Factory reads them off the config struct and sets `:scope` on the Agent:
 
 ```elixir
-# In Coordinator.start_conversation_session/2
-{:ok, agent} = Factory.create_agent(
-  agent_id: agent_id,
-  scope: scope,                     # <- dedicated channel, not tool_context
-  filesystem_scope: filesystem_scope,
-  tool_context: tool_context
-)
+# In Sagents.Session.do_start/4 (simplified)
+{:ok, factory, %FactoryConfig{} = config} =
+  FactoryRouter.resolve(scope, conversation_id, request_opts)
+
+{:ok, agent, _session_opts} = factory.create_agent(agent_id, config)
+
+# In your Factory implementation
+def create_agent(agent_id, %FactoryConfig{} = c) do
+  agent = Sagents.Agent.new!(%{
+    agent_id: agent_id,
+    scope: c.scope,                # <- dedicated channel, not tool_context
+    model: build_model(c),
+    middleware: build_middleware(c),
+    tool_context: c.tool_context
+  })
+
+  {:ok, agent, []}
+end
 ```
 
 **Characteristics:**
@@ -91,7 +102,7 @@ end
 # At the LiveView / Coordinator call site:
 Coordinator.start_conversation_session(conversation_id,
   scope: MyApp.Accounts.AgentScope.from_scope(socket.assigns.current_scope),
-  filesystem_scope: filesystem_scope
+  request_opts: [filesystem_scope: filesystem_scope]
 )
 ```
 

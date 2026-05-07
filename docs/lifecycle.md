@@ -89,17 +89,34 @@ state = State.new!(%{
 
 ### Start from Persisted State
 
-```elixir
-# Load saved state
-{:ok, persisted_state} = MyApp.Conversations.load_agent_state(conversation_id)
+The generated Coordinator delegates to `Sagents.Session.start/3`, which
+handles the full restore pipeline (router → factory → state load → supervisor):
 
-# Create agent from code (middleware/tools always come from code)
-{:ok, agent} = MyApp.AgentFactory.create_agent(agent_id: "conv-#{conversation_id}")
+```elixir
+{:ok, session} =
+  MyApp.Agents.Coordinator.start_conversation_session(conversation_id,
+    scope: scope,
+    request_opts: [timezone: "America/Denver"]
+  )
+```
+
+If you need the raw building blocks (e.g. for tests or non-conversation
+agents), the contract is:
+
+```elixir
+# Load saved state via your AgentPersistence module
+{:ok, state} =
+  Sagents.State.load_or_new(MyApp.AgentPersistence, scope,
+    %{agent_id: "conv-#{conversation_id}", conversation_id: conversation_id})
+
+# Build %FactoryConfig{} (typically via your Router) and call the factory
+{:ok, agent, _session_opts} =
+  MyApp.AgentFactory.create_agent("conv-#{conversation_id}", factory_config)
 
 # Start with restored state
 {:ok, pid} = AgentServer.start_link(
   agent: agent,
-  initial_state: persisted_state,
+  initial_state: state,
   pubsub: {Phoenix.PubSub, :my_pubsub}
 )
 ```
@@ -334,72 +351,70 @@ Each agent has its own supervisor, so:
 
 ## Coordinator Pattern
 
-For applications managing many conversations, use a Coordinator:
+For applications managing many conversations, the session-start lifecycle
+(idempotent start, router consult, factory invocation, state seeding,
+supervisor config, subscriber wiring) lives in `Sagents.Session`. The
+generated `Coordinator` is a thin per-app bridge that declares config
+and exposes user-editable customization slots:
 
 ```elixir
 defmodule MyApp.Agents.Coordinator do
-  @moduledoc """
-  Maps conversation IDs to agent processes.
-  Handles starting agents on-demand with state restoration.
-  """
+  @config %{
+    factory_router: MyApp.Agents.FactoryRouter,
+    agent_persistence: MyApp.Agents.AgentPersistence,
+    display_message_persistence: MyApp.Agents.DisplayMessagePersistence,
+    pubsub: {Phoenix.PubSub, MyApp.PubSub},
+    presence_module: MyAppWeb.Presence,
+    inactivity_timeout: :timer.minutes(60),
+    agent_id_fun: &__MODULE__.conversation_agent_id/1
+  }
 
-  def start_conversation_session(conversation_id) do
-    agent_id = "conversation-#{conversation_id}"
+  def start_conversation_session(conversation_id, opts \\ []),
+    do: Sagents.Session.start(@config, conversation_id, opts)
 
-    case AgentServer.whereis(agent_id) do
-      nil ->
-        # Agent not running, start it
-        start_agent(agent_id, conversation_id)
+  def ensure_agent_session_running(state, request_opts \\ []),
+    do: Sagents.Session.ensure_running(@config, state, request_opts: request_opts)
 
-      pid ->
-        # Already running
-        {:ok, %{agent_id: agent_id, pid: pid, conversation_id: conversation_id}}
-    end
-  end
-
-  defp start_agent(agent_id, conversation_id) do
-    # Load persisted state (or create fresh)
-    initial_state = load_or_create_state(conversation_id)
-
-    # Create agent from code
-    {:ok, agent} = MyApp.AgentFactory.create_agent(agent_id: agent_id)
-
-    # Start agent server
-    {:ok, pid} = AgentServer.start_link(
-      agent: agent,
-      initial_state: initial_state,
-      pubsub: {Phoenix.PubSub, MyApp.PubSub},
-      inactivity_timeout: 3_600_000,
-      auto_save: [
-        callback: fn _id, state ->
-          MyApp.Conversations.save_agent_state(conversation_id, state)
-        end
-      ]
-    )
-
-    {:ok, %{agent_id: agent_id, pid: pid, conversation_id: conversation_id}}
-  end
-
-  defp load_or_create_state(conversation_id) do
-    case MyApp.Conversations.load_agent_state(conversation_id) do
-      {:ok, state} -> state
-      {:error, :not_found} -> State.new!()
-    end
-  end
+  def conversation_agent_id(conversation_id),
+    do: "conversation-#{conversation_id}"
 end
 ```
+
+Run `mix sagents.setup` to generate the Coordinator along with its paired
+`Factory` + `FactoryConfig` + `FactoryRouter`. See `Sagents.FactoryRouter`
+for routing among multiple factories.
 
 Usage in LiveView:
 
 ```elixir
 def mount(%{"id" => conversation_id}, _session, socket) do
-  # Start or connect to agent
-  {:ok, session} = Coordinator.start_conversation_session(conversation_id)
+  # Load path: subscribe whether or not the agent is running.
+  # Sagents.Subscriber records :pending entries and auto-upgrades
+  # to :subscribed via presence_diff once the agent appears.
+  subs =
+    Sagents.Subscriber.subscribe_to_agent(
+      %{},
+      Coordinator.conversation_agent_id(conversation_id)
+    )
 
-  # Subscribe to events
-  AgentServer.subscribe(session.agent_id)
+  {:ok, assign(socket, conversation_id: conversation_id, sagents_subs: subs)}
+end
 
-  {:ok, assign(socket, agent_id: session.agent_id)}
+# Action path: when the user actually triggers work, ensure the agent
+# is running and the LiveView is subscribed (atomically, via
+# initial_subscribers, to avoid the boot-broadcast race).
+def handle_event("send_message", %{"text" => text}, socket) do
+  case Coordinator.ensure_agent_session_running(socket.assigns,
+         timezone: socket.assigns.timezone
+       ) do
+    {:ok, changes} ->
+      socket = assign(socket, changes)
+      AgentServer.add_message(socket.assigns.agent_id, Message.new_user!(text))
+      {:noreply, socket}
+
+    {:error, reason} ->
+      {:noreply, put_flash(socket, :error, inspect(reason))}
+  end
 end
 ```
 

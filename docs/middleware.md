@@ -780,52 +780,61 @@ end
 One of the key benefits of middleware is that the stack can be assembled programmatically at runtime. This allows you to customize agent capabilities based on account tier, user permissions, project settings, or any other context.
 
 ```elixir
-defmodule MyApp.AgentFactory do
+defmodule MyApp.Agents.Factory do
   @moduledoc """
   Builds agents with middleware tailored to the user's context.
+
+  Conforms to `Sagents.Factory`: takes `agent_id` plus an opaque
+  `%FactoryConfig{}` (built by the FactoryRouter from `request_opts`).
   """
+  @behaviour Sagents.Factory
 
   alias Sagents.Agent
   alias Sagents.Middleware.{TodoList, FileSystem, Summarization, SubAgent}
+  alias MyApp.Agents.FactoryConfig
 
-  def create_agent(user, project) do
-    middleware = build_middleware_stack(user, project)
+  @impl true
+  def create_agent(agent_id, %FactoryConfig{} = c) do
+    agent =
+      Agent.new!(%{
+        agent_id: agent_id,
+        scope: c.scope,
+        model: select_model(c),
+        middleware: build_middleware_stack(c),
+        tool_context: c.tool_context
+      })
 
-    Agent.new(%{
-      agent_id: "project-#{project.id}",
-      model: select_model(user),
-      middleware: middleware
-    })
+    {:ok, agent, []}
   end
 
-  defp build_middleware_stack(user, project) do
+  defp build_middleware_stack(%FactoryConfig{} = c) do
     base = [
       {TodoList, []},
-      {Summarization, [max_tokens: token_limit(user)]}
+      {Summarization, [max_tokens: token_limit(c)]}
     ]
 
     # Add filesystem access based on project settings
-    base = if project.filesystem_enabled do
+    base = if c.project.filesystem_enabled do
       base ++ [{FileSystem, [
-        enabled_tools: filesystem_tools(user),
-        filesystem_scope: {:project, project.id}
+        enabled_tools: filesystem_tools(c),
+        filesystem_scope: {:project, c.project.id}
       ]}]
     else
       base
     end
 
     # Add sub-agents for premium users
-    base = if user.plan == :premium do
+    base = if c.user.plan == :premium do
       base ++ [{SubAgent, [max_concurrent: 3]}]
     else
       base
     end
 
     # Add custom middleware from project config
-    base ++ project.custom_middleware
+    base ++ c.project.custom_middleware
   end
 
-  defp filesystem_tools(user) do
+  defp filesystem_tools(%FactoryConfig{user: user}) do
     case user.role do
       :admin -> ["ls", "read_file", "write_file", "delete_file"]
       :developer -> ["ls", "read_file", "write_file"]
@@ -833,7 +842,7 @@ defmodule MyApp.AgentFactory do
     end
   end
 
-  defp token_limit(user) do
+  defp token_limit(%FactoryConfig{user: user}) do
     case user.plan do
       :enterprise -> 500_000
       :premium -> 200_000
@@ -841,7 +850,7 @@ defmodule MyApp.AgentFactory do
     end
   end
 
-  defp select_model(user) do
+  defp select_model(%FactoryConfig{user: user}) do
     # Different models based on user tier
     case user.plan do
       :enterprise -> ChatAnthropic.new!(%{model: "claude-sonnet-4-20250514"})
