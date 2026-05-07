@@ -225,9 +225,6 @@ defmodule Sagents.Session do
         {:ok, _supervisor_pid} ->
           {:ok, session_info(agent_id, conversation_id)}
 
-        {:ok, _supervisor_pid, :already_started} ->
-          {:ok, session_info(agent_id, conversation_id)}
-
         {:error, reason} ->
           Logger.error("Failed to start agent session: #{inspect(reason)}")
           {:error, reason}
