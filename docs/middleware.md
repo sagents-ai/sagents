@@ -808,30 +808,23 @@ defmodule MyApp.Agents.Factory do
   end
 
   defp build_middleware_stack(%FactoryConfig{} = c) do
-    base = [
+    [
       {TodoList, []},
-      {Summarization, [max_tokens: token_limit(c)]}
+      {Summarization, [max_tokens: token_limit(c)]},
+      # Filesystem access only when the project enables it
+      if(c.project.filesystem_enabled,
+        do:
+          {FileSystem,
+           [
+             enabled_tools: filesystem_tools(c),
+             filesystem_scope: {:project, c.project.id}
+           ]}
+      ),
+      # Sub-agents for premium users only
+      if(c.user.plan == :premium, do: {SubAgent, [max_concurrent: 3]})
     ]
-
-    # Add filesystem access based on project settings
-    base = if c.project.filesystem_enabled do
-      base ++ [{FileSystem, [
-        enabled_tools: filesystem_tools(c),
-        filesystem_scope: {:project, c.project.id}
-      ]}]
-    else
-      base
-    end
-
-    # Add sub-agents for premium users
-    base = if c.user.plan == :premium do
-      base ++ [{SubAgent, [max_concurrent: 3]}]
-    else
-      base
-    end
-
-    # Add custom middleware from project config
-    base ++ c.project.custom_middleware
+    |> Enum.reject(&is_nil/1)
+    |> Kernel.++(c.project.custom_middleware)
   end
 
   defp filesystem_tools(%FactoryConfig{user: user}) do
