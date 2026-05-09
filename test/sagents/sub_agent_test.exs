@@ -1685,6 +1685,40 @@ defmodule Sagents.SubAgentTest do
     end
   end
 
+  describe "new_from_config/1 with :initial_messages" do
+    test "defaults to no extra messages — chain is [system, user]" do
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "parent",
+          instructions: "Do work",
+          agent_config: test_agent()
+        )
+
+      assert [%LangChain.Message{role: :system}, %LangChain.Message{role: :user}] =
+               subagent.chain.messages
+    end
+
+    test "slots :initial_messages between system and user" do
+      msg_a = LangChain.Message.new_assistant!("preamble A")
+      msg_b = LangChain.Message.new_assistant!("preamble B")
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "parent",
+          instructions: "Do work",
+          agent_config: test_agent(),
+          initial_messages: [msg_a, msg_b]
+        )
+
+      assert [
+               %LangChain.Message{role: :system},
+               ^msg_a,
+               ^msg_b,
+               %LangChain.Message{role: :user}
+             ] = subagent.chain.messages
+    end
+  end
+
   # Helper function to extract errors from changeset
   defp errors_on(changeset) do
     Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->

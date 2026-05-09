@@ -170,6 +170,10 @@ defmodule Sagents.SubAgent do
   - `:parent_agent_id` - Parent's agent ID (required)
   - `:instructions` - Task description (required)
   - `:agent_config` - Agent struct with tools, model, middleware (required)
+  - `:initial_messages` - Optional list of `%LangChain.Message{}` structs to
+    slot between the system messages and the user instruction. Use this to
+    inject established context (e.g. a `<references>` synthetic
+    preamble) for the sub-agent's first turn. Defaults to `[]`.
   - `:parent_tool_context` - Parent's tool_context map to inherit (optional).
     Static, caller-supplied data (e.g., `user_id`, feature flags) that tools
     access as flat top-level keys on context. Defaults to `%{}`.
@@ -198,8 +202,11 @@ defmodule Sagents.SubAgent do
   def new_from_config(opts) do
     agent_config = Keyword.fetch!(opts, :agent_config)
     instructions = Keyword.fetch!(opts, :instructions)
+    initial_messages = Keyword.get(opts, :initial_messages, [])
 
-    messages = build_initial_messages(agent_config.assembled_system_prompt, instructions)
+    system_messages = build_initial_messages(agent_config.assembled_system_prompt)
+    user_message = Message.new_user!(instructions)
+    messages = system_messages ++ initial_messages ++ [user_message]
 
     build_subagent(agent_config, messages, opts)
   end
@@ -246,7 +253,7 @@ defmodule Sagents.SubAgent do
     instructions = Keyword.fetch!(opts, :instructions)
     initial_messages = Keyword.get(opts, :initial_messages, [])
 
-    system_messages = build_initial_messages(compiled_agent.assembled_system_prompt, nil)
+    system_messages = build_initial_messages(compiled_agent.assembled_system_prompt)
     user_message = Message.new_user!(instructions)
     messages = system_messages ++ initial_messages ++ [user_message]
 
@@ -636,19 +643,12 @@ defmodule Sagents.SubAgent do
 
   ## Private Helper Functions
 
-  defp build_initial_messages(system_prompt, instructions)
+  defp build_initial_messages(system_prompt)
        when is_binary(system_prompt) and system_prompt != "" do
-    case instructions do
-      nil -> [Message.new_system!(system_prompt)]
-      _other -> [Message.new_system!(system_prompt), Message.new_user!(instructions)]
-    end
+    [Message.new_system!(system_prompt)]
   end
 
-  defp build_initial_messages(_system_prompt, instructions) when is_binary(instructions) do
-    [Message.new_user!(instructions)]
-  end
-
-  defp build_initial_messages(_system_prompt, nil), do: []
+  defp build_initial_messages(_system_prompt), do: []
 
   # Extract interrupt_on configuration from middleware list
   defp extract_interrupt_on_from_middleware(middleware) when is_list(middleware) do
