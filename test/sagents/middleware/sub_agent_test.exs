@@ -1450,6 +1450,295 @@ defmodule Sagents.Middleware.SubAgentTest do
     end
   end
 
+  describe "start_subagent/5 with config[:initial_messages]" do
+    setup do
+      agent_id = "parent-#{System.unique_integer([:positive])}"
+
+      {:ok, _sup} =
+        start_supervised({
+          SubAgentsDynamicSupervisor,
+          agent_id: agent_id
+        })
+
+      config_subagent = build_subagent_config("config_task", "Config-based task")
+
+      compiled_agent =
+        Agent.new!(%{
+          model: test_model(),
+          system_prompt: "Compiled prompt",
+          replace_default_middleware: true,
+          middleware: []
+        })
+
+      compiled_subagent =
+        SubAgent.Compiled.new!(%{
+          name: "compiled_task",
+          description: "Compiled task",
+          agent: compiled_agent,
+          initial_messages: [
+            Message.new_user!("registered foundation A"),
+            Message.new_assistant!("registered foundation B")
+          ]
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: agent_id,
+          model: test_model(),
+          middleware: [],
+          subagents: [config_subagent, compiled_subagent]
+        )
+
+      context = %{
+        agent_id: agent_id,
+        state: State.new!(%{messages: []}),
+        parent_middleware: []
+      }
+
+      parent = self()
+
+      LLMChain
+      |> stub(:run, fn chain, _opts ->
+        send(parent, {:chain_messages, chain.messages})
+
+        assistant_message = Message.new_assistant!(%{content: "done"})
+
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_message])
+          |> Map.put(:last_message, assistant_message)
+          |> Map.put(:needs_response, false)
+
+        {:ok, updated_chain}
+      end)
+
+      %{
+        agent_id: agent_id,
+        middleware_config: middleware_config,
+        context: context
+      }
+    end
+
+    test "Compiled task: omitted key is no-op (only registered initial_messages slot in)",
+         %{middleware_config: config, context: context} do
+      args = %{"instructions" => "Do work", "task_name" => "compiled_task"}
+
+      assert {:ok, _result} =
+               SubAgentMiddleware.start_subagent(
+                 "Do work",
+                 "compiled_task",
+                 args,
+                 context,
+                 config
+               )
+
+      assert_receive {:chain_messages, messages}
+
+      assert [
+               %Message{role: :system},
+               %Message{role: :user} = reg_a,
+               %Message{role: :assistant} = reg_b,
+               %Message{role: :user} = user
+             ] = messages
+
+      assert message_text(reg_a) == "registered foundation A"
+      assert message_text(reg_b) == "registered foundation B"
+      assert message_text(user) == "Do work"
+    end
+
+    test "Compiled task: empty list is identical to omitted key", %{
+      middleware_config: config,
+      context: context
+    } do
+      args = %{"instructions" => "Do work", "task_name" => "compiled_task"}
+      config = Map.put(config, :initial_messages, [])
+
+      assert {:ok, _result} =
+               SubAgentMiddleware.start_subagent(
+                 "Do work",
+                 "compiled_task",
+                 args,
+                 context,
+                 config
+               )
+
+      assert_receive {:chain_messages, messages}
+
+      assert [
+               %Message{role: :system},
+               %Message{role: :user} = reg_a,
+               %Message{role: :assistant} = reg_b,
+               %Message{role: :user} = user
+             ] = messages
+
+      assert message_text(reg_a) == "registered foundation A"
+      assert message_text(reg_b) == "registered foundation B"
+      assert message_text(user) == "Do work"
+    end
+
+    test "Compiled task: per-call messages append after registered ones", %{
+      middleware_config: config,
+      context: context
+    } do
+      msg_a = Message.new_user!("per-call A")
+      msg_b = Message.new_assistant!("per-call B")
+
+      args = %{"instructions" => "Do work", "task_name" => "compiled_task"}
+      config = Map.put(config, :initial_messages, [msg_a, msg_b])
+
+      assert {:ok, _result} =
+               SubAgentMiddleware.start_subagent(
+                 "Do work",
+                 "compiled_task",
+                 args,
+                 context,
+                 config
+               )
+
+      assert_receive {:chain_messages, messages}
+
+      assert [
+               %Message{role: :system},
+               %Message{role: :user} = reg_a,
+               %Message{role: :assistant} = reg_b,
+               %Message{role: :user} = pc_a,
+               %Message{role: :assistant} = pc_b,
+               %Message{role: :user} = user
+             ] = messages
+
+      assert message_text(reg_a) == "registered foundation A"
+      assert message_text(reg_b) == "registered foundation B"
+      assert message_text(pc_a) == "per-call A"
+      assert message_text(pc_b) == "per-call B"
+      assert message_text(user) == "Do work"
+    end
+
+    test "Config task: omitted key behaves as before", %{
+      middleware_config: config,
+      context: context
+    } do
+      args = %{"instructions" => "Do work", "task_name" => "config_task"}
+
+      assert {:ok, _result} =
+               SubAgentMiddleware.start_subagent(
+                 "Do work",
+                 "config_task",
+                 args,
+                 context,
+                 config
+               )
+
+      assert_receive {:chain_messages, messages}
+      roles = Enum.map(messages, & &1.role)
+
+      assert roles == [:system, :user]
+    end
+
+    test "Config task: per-call messages slot between system and user", %{
+      middleware_config: config,
+      context: context
+    } do
+      msg_a = Message.new_user!("per-call A")
+      msg_b = Message.new_assistant!("per-call B")
+
+      args = %{"instructions" => "Do work", "task_name" => "config_task"}
+      config = Map.put(config, :initial_messages, [msg_a, msg_b])
+
+      assert {:ok, _result} =
+               SubAgentMiddleware.start_subagent(
+                 "Do work",
+                 "config_task",
+                 args,
+                 context,
+                 config
+               )
+
+      assert_receive {:chain_messages, messages}
+      roles = Enum.map(messages, & &1.role)
+      contents = Enum.map(messages, &message_text/1)
+
+      assert roles == [:system, :user, :assistant, :user]
+      assert Enum.at(contents, 1) == "per-call A"
+      assert Enum.at(contents, 2) == "per-call B"
+      assert Enum.at(contents, 3) == "Do work"
+    end
+
+    test "Dynamic general-purpose task: per-call messages slot between system and user",
+         %{middleware_config: config, context: context} do
+      msg_a = Message.new_user!("per-call A")
+      msg_b = Message.new_assistant!("per-call B")
+
+      args = %{"instructions" => "Do work", "task_name" => "general-purpose"}
+      config = Map.put(config, :initial_messages, [msg_a, msg_b])
+
+      assert {:ok, _result} =
+               SubAgentMiddleware.start_subagent(
+                 "Do work",
+                 "general-purpose",
+                 args,
+                 context,
+                 config
+               )
+
+      assert_receive {:chain_messages, messages}
+      roles = Enum.map(messages, & &1.role)
+      contents = Enum.map(messages, &message_text/1)
+
+      assert roles == [:system, :user, :assistant, :user]
+      assert Enum.at(contents, 1) == "per-call A"
+      assert Enum.at(contents, 2) == "per-call B"
+      assert Enum.at(contents, 3) == "Do work"
+    end
+
+    test "raises ArgumentError when :initial_messages is not a list", %{
+      middleware_config: config,
+      context: context
+    } do
+      config = Map.put(config, :initial_messages, "nope")
+      args = %{"instructions" => "Do work", "task_name" => "compiled_task"}
+
+      assert_raise ArgumentError, ~r/must be a list of LangChain.Message structs/, fn ->
+        SubAgentMiddleware.start_subagent(
+          "Do work",
+          "compiled_task",
+          args,
+          context,
+          config
+        )
+      end
+    end
+
+    test "raises ArgumentError when list contains a non-Message element", %{
+      middleware_config: config,
+      context: context
+    } do
+      config =
+        Map.put(config, :initial_messages, [Message.new_assistant!("ok"), "not a message"])
+
+      args = %{"instructions" => "Do work", "task_name" => "compiled_task"}
+
+      assert_raise ArgumentError, ~r/must be a list of LangChain.Message structs/, fn ->
+        SubAgentMiddleware.start_subagent(
+          "Do work",
+          "compiled_task",
+          args,
+          context,
+          config
+        )
+      end
+    end
+  end
+
+  defp message_text(%Message{content: content}) when is_binary(content), do: content
+
+  defp message_text(%Message{content: parts}) when is_list(parts) do
+    parts
+    |> Enum.map_join("", fn
+      %LangChain.Message.ContentPart{type: :text, content: text} -> text
+      _other -> ""
+    end)
+  end
+
   describe "dynamic general-purpose subagent middleware filtering" do
     test "dynamic general-purpose subagent does not have task tool" do
       # This integration test verifies that when a general-purpose subagent is created,

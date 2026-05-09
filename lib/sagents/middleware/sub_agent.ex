@@ -584,6 +584,18 @@ defmodule Sagents.Middleware.SubAgent do
     - `:descriptions` - Map of task_name -> description string
     - `:agent_id` - Parent agent ID
     - `:model` - Model configuration
+    - `:initial_messages` (optional) - List of `%LangChain.Message{}` structs
+      to slot between the sub-agent's system messages and the user instruction.
+      Use this to inject per-call reference content (e.g. a
+      `<references>` synthetic preamble) as established context for
+      the sub-agent's first turn. Empty list or omitted key means no
+      augmentation. Supported on all task types: for Compiled subagents,
+      these are appended *after* the registered `Compiled.initial_messages`.
+
+  ## Raises
+
+  - `ArgumentError` if `config[:initial_messages]` is supplied but is not a
+    list of `%LangChain.Message{}` structs.
 
   ## Returns
 
@@ -640,7 +652,7 @@ defmodule Sagents.Middleware.SubAgent do
   - For "general-purpose" type, tools and middleware are inherited from parent
   - SubAgents are supervised and cleaned up automatically
   """
-  @spec start_subagent(String.t(), String.t(), map(), map(), map()) ::
+  @spec start_subagent(String.t(), String.t(), args :: map(), context :: map(), config :: map()) ::
           {:ok, String.t()}
           | {:ok, String.t(), term()}
           | {:interrupt, map()}
@@ -648,11 +660,18 @@ defmodule Sagents.Middleware.SubAgent do
   def start_subagent(instructions, task_name, args, context, config) do
     Logger.debug("Starting SubAgent: #{task_name}")
 
+    per_call_initial = Map.get(config, :initial_messages, [])
+
+    if not valid_initial_messages?(per_call_initial) do
+      raise ArgumentError,
+            "config[:initial_messages] must be a list of LangChain.Message structs, got: #{inspect(per_call_initial)}"
+    end
+
     # Get agent from lookup map
     case Map.fetch(config.agent_map, task_name) do
       {:ok, :dynamic} ->
         # Handle "general-purpose" dynamic subagent with tool inheritance
-        start_dynamic_subagent(instructions, args, context, config)
+        start_dynamic_subagent(instructions, args, context, config, per_call_initial)
 
       {:ok, agent_config} ->
         # Look up until_tool configuration for this subagent type
@@ -673,12 +692,13 @@ defmodule Sagents.Middleware.SubAgent do
         subagent =
           case agent_config do
             %SubAgent.Compiled{} = compiled ->
-              # Use new_from_compiled to include initial_messages
+              final_initial = (compiled.initial_messages || []) ++ per_call_initial
+
               SubAgent.new_from_compiled(
                 parent_agent_id: config.agent_id,
                 instructions: instructions,
                 compiled_agent: compiled.agent,
-                initial_messages: compiled.initial_messages || [],
+                initial_messages: final_initial,
                 until_tool: until_tool,
                 parent_tool_context: parent_tool_context,
                 parent_metadata: parent_metadata,
@@ -692,6 +712,7 @@ defmodule Sagents.Middleware.SubAgent do
                 parent_agent_id: config.agent_id,
                 instructions: instructions,
                 agent_config: agent,
+                initial_messages: per_call_initial,
                 until_tool: until_tool,
                 parent_tool_context: parent_tool_context,
                 parent_metadata: parent_metadata,
@@ -735,9 +756,14 @@ defmodule Sagents.Middleware.SubAgent do
     end
   end
 
+  defp valid_initial_messages?(list) when is_list(list),
+    do: Enum.all?(list, &is_struct(&1, LangChain.Message))
+
+  defp valid_initial_messages?(_other), do: false
+
   ## Starting Dynamic SubAgent (general-purpose with tool inheritance)
 
-  defp start_dynamic_subagent(instructions, args, context, config) do
+  defp start_dynamic_subagent(instructions, args, context, config, per_call_initial) do
     Logger.debug("Starting dynamic general-purpose SubAgent")
 
     # Extract parent capabilities from context (set by Agent.build_chain)
@@ -787,6 +813,7 @@ defmodule Sagents.Middleware.SubAgent do
             parent_agent_id: config.agent_id,
             instructions: instructions,
             agent_config: agent_config,
+            initial_messages: per_call_initial,
             parent_tool_context: parent_tool_context,
             parent_metadata: parent_metadata,
             parent_runtime: parent_runtime,
