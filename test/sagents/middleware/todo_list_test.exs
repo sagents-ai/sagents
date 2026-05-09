@@ -383,6 +383,116 @@ defmodule Sagents.Middleware.TodoListTest do
     end
   end
 
+  describe "inline mode" do
+    # Each test registers self() under the AgentServer's via-tuple name in the
+    # real Sagents.Registry so the middleware's whereis guard sees a "live"
+    # AgentServer and the GenServer.cast lands on this test process. We can
+    # then assert_received the cast payload to verify the synthetic-message
+    # save call.
+    setup do
+      agent_id = "todo-list-inline-test-#{System.unique_integer([:positive])}"
+      {:ok, _owner} = Registry.register(Sagents.Registry, {:agent_server, agent_id}, nil)
+      {:ok, agent_id: agent_id}
+    end
+
+    test "inline: false (default) does not save a synthetic message", %{agent_id: agent_id} do
+      {:ok, config} = TodoList.init([])
+      [tool] = TodoList.tools(config)
+
+      state = State.new!(%{agent_id: agent_id})
+
+      params = %{
+        merge: false,
+        todos: [%{"id" => "1", "content" => "Task", "status" => "pending"}]
+      }
+
+      {:ok, _msg, _state} = tool.function.(params, %{state: state})
+
+      refute_received {:"$gen_cast", {:save_synthetic_message, _attrs}}
+    end
+
+    test "inline: true saves a todo_snapshot synthetic message", %{agent_id: agent_id} do
+      {:ok, config} = TodoList.init(inline: true)
+      [tool] = TodoList.tools(config)
+
+      state = State.new!(%{agent_id: agent_id})
+
+      params = %{
+        merge: false,
+        todos: [
+          %{"id" => "1", "content" => "Task A", "status" => "pending"},
+          %{"id" => "2", "content" => "Task B", "status" => "in_progress"},
+          %{"id" => "3", "content" => "Task C", "status" => "completed"}
+        ]
+      }
+
+      {:ok, _msg, _state} = tool.function.(params, %{state: state})
+
+      assert_received {:"$gen_cast", {:save_synthetic_message, attrs}}
+      assert attrs.message_type == "system"
+      assert attrs.content_type == "todo_snapshot"
+
+      assert [%{"id" => "1"}, %{"id" => "2"}, %{"id" => "3"}] = attrs.content["todos"]
+      assert Enum.find(attrs.content["todos"], &(&1["id"] == "2"))["status"] == "in_progress"
+
+      assert attrs.content["summary"]["total"] == 3
+      assert attrs.content["summary"]["pending"] == 1
+      assert attrs.content["summary"]["in_progress"] == 1
+      assert attrs.content["summary"]["completed"] == 1
+    end
+
+    test "inline: true snapshots the pre-clear state when auto-clear fires",
+         %{agent_id: agent_id} do
+      # When all todos are completed, the agent's state is auto-cleared, but
+      # the inline snapshot should still show the fully-checked list — that
+      # final completed roster is the celebratory "everything done" view we
+      # want preserved in the transcript.
+      {:ok, config} = TodoList.init(inline: true)
+      [tool] = TodoList.tools(config)
+
+      state = State.new!(%{agent_id: agent_id})
+
+      params = %{
+        merge: false,
+        todos: [
+          %{"id" => "1", "content" => "Task A", "status" => "completed"},
+          %{"id" => "2", "content" => "Task B", "status" => "completed"}
+        ]
+      }
+
+      {:ok, _msg, returned_state} = tool.function.(params, %{state: state})
+
+      # Returned state delta still reflects the auto-clear (sidebar collapses).
+      assert returned_state.todos == []
+
+      # But the inline snapshot preserves the completed list.
+      assert_received {:"$gen_cast", {:save_synthetic_message, attrs}}
+      assert attrs.content_type == "todo_snapshot"
+      assert length(attrs.content["todos"]) == 2
+      assert Enum.all?(attrs.content["todos"], &(&1["status"] == "completed"))
+      assert attrs.content["summary"]["total"] == 2
+      assert attrs.content["summary"]["completed"] == 2
+    end
+
+    test "inline: true is a silent no-op when no AgentServer is registered" do
+      # No Registry registration here — agent_id is not associated with any
+      # process. The whereis guard in save_todo_snapshot/2 should short-circuit.
+      {:ok, config} = TodoList.init(inline: true)
+      [tool] = TodoList.tools(config)
+
+      state = State.new!(%{agent_id: "todo-list-no-server-#{System.unique_integer([:positive])}"})
+
+      params = %{
+        merge: false,
+        todos: [%{"id" => "1", "content" => "Task", "status" => "pending"}]
+      }
+
+      assert {:ok, _msg, updated_state} = tool.function.(params, %{state: state})
+      assert length(updated_state.todos) == 1
+      refute_received {:"$gen_cast", {:save_synthetic_message, _attrs}}
+    end
+  end
+
   describe "auto-cleanup when all todos completed" do
     test "clears todo list when all todos marked as completed in replace mode" do
       state = State.new!()
