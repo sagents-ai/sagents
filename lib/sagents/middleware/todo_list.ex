@@ -21,14 +21,54 @@ defmodule Sagents.Middleware.TodoList do
     internally by the agent (e.g. self-organization during an onboarding
     flow) and the default label would leak implementation detail to users.
 
+  - `:inline` - Controls how todo updates surface to the UI. Defaults to
+    `false`. See "Display modes" below.
+
+  ## Display modes
+
+  Every successful `write_todos` call produces a state change. Two delivery
+  channels are available — the choice is purely about *where* in the UI the
+  todo list appears:
+
+  - **Default (`inline: false`)** — only emits the `{:todos_updated, todos}`
+    event over the AgentServer's broadcast channel. Subscribers (typically a
+    sidebar or status panel in the LiveView) re-render from that snapshot.
+    The chat transcript itself shows nothing about the todo list; the
+    transcript stays focused on the agent's textual reasoning and tool
+    calls. Best when the UI has dedicated "task list" real estate, or when
+    todos are an internal planning detail you don't want surfacing to the
+    end user.
+
+  - **Inline (`inline: true`)** — emits the same `{:todos_updated, todos}`
+    event *and additionally* persists a synthetic display message
+    (content_type `"todo_snapshot"`) into the conversation transcript. Each
+    snapshot is a separate message, so the chat shows the plan evolving
+    over time threaded with the agent's other output. Best when there is no
+    sidebar, or when seeing the plan unfold inside the conversation is part
+    of the desired UX.
+
+  Inline mode requires the AgentServer to be configured with a
+  `Sagents.DisplayMessagePersistence` module that implements
+  `save_synthetic_message/3`. Without it the inline-mode call is a silent
+  no-op (the existing `{:todos_updated, _}` broadcast still fires).
+
   ## Usage
 
-      # default label
+      # default: only the {:todos_updated, todos} broadcast — sidebar UIs
       {:ok, agent} = Agent.new(middleware: [TodoList])
 
       # custom label for a user-facing flow where todos are internal
       {:ok, agent} = Agent.new(
         middleware: [{TodoList, display_text: "Updating my notes"}]
+      )
+
+      # inline mode: also emit a todo_snapshot display message per update
+      # so the plan appears inline in the chat transcript
+      {:ok, agent} = Agent.new(middleware: [{TodoList, inline: true}])
+
+      # inline mode + custom label, both options together
+      {:ok, agent} = Agent.new(
+        middleware: [{TodoList, inline: true, display_text: "Replanning"}]
       )
   """
 
@@ -129,8 +169,12 @@ defmodule Sagents.Middleware.TodoList do
 
   @impl true
   def init(opts) do
-    display_text = Keyword.get(opts, :display_text, @default_display_text)
-    {:ok, %{display_text: display_text}}
+    config = %{
+      display_text: Keyword.get(opts, :display_text, @default_display_text),
+      inline: Keyword.get(opts, :inline, false)
+    }
+
+    {:ok, config}
   end
 
   @impl true
@@ -157,6 +201,12 @@ defmodule Sagents.Middleware.TodoList do
       case config do
         %{display_text: text} when is_binary(text) -> text
         _other -> @default_display_text
+      end
+
+    inline =
+      case config do
+        %{inline: value} when is_boolean(value) -> value
+        _other -> false
       end
 
     Function.new!(%{
@@ -197,11 +247,11 @@ defmodule Sagents.Middleware.TodoList do
         },
         required: ["merge", "todos"]
       },
-      function: &execute_write_todos/2
+      function: fn args, context -> execute_write_todos(args, context, inline) end
     })
   end
 
-  defp execute_write_todos(args, context) do
+  defp execute_write_todos(args, context, inline) do
     # Args come from LLM as string-keyed map
     merge = get_boolean_arg(args, "merge", false)
     todos_data = get_arg(args, "todos")
@@ -209,14 +259,28 @@ defmodule Sagents.Middleware.TodoList do
     # Parse TODO data from tool call
     case parse_todos(todos_data) do
       {:ok, parsed_todos} ->
-        updated_state =
-          context.state
-          |> update_todos(parsed_todos, merge)
-          |> clear_if_all_completed()
+        # Compute the post-update state, then apply the auto-clear that
+        # collapses a fully-completed list. We hold both: the inline-mode
+        # snapshot uses the pre-clear state (so the chat preserves the
+        # final celebratory checked list), while the actual state delta
+        # and sidebar broadcast use the post-clear state (so the agent
+        # and sidebar see the list as resolved).
+        state_after_update = update_todos(context.state, parsed_todos, merge)
+        updated_state = clear_if_all_completed(state_after_update)
 
         # Broadcast todos immediately for real-time UI updates
         # This is the point where todos are actually committed to state
         broadcast_todos(context.state.agent_id, updated_state.todos)
+
+        # Inline mode: persist a synthetic display message so the snapshot
+        # appears inline in the chat transcript. Snapshot the pre-clear
+        # state so the user sees the completed list, not an empty card.
+        # The AgentServer guards on display_message_persistence +
+        # conversation_id being configured; without them the call is a
+        # silent no-op.
+        if inline do
+          save_todo_snapshot(context.state.agent_id, state_after_update.todos)
+        end
 
         # Return only the state changes (todos), not messages
         state_delta = %State{todos: updated_state.todos}
@@ -226,6 +290,50 @@ defmodule Sagents.Middleware.TodoList do
       {:error, reason} ->
         {:error, "Failed to parse TODOs: #{reason}"}
     end
+  end
+
+  defp save_todo_snapshot(nil, _todos), do: :ok
+
+  defp save_todo_snapshot(agent_id, todos) do
+    # Mirror the broadcast_todos guard: only emit when AgentServer is running.
+    # AgentServer.save_synthetic_message_from is itself a no-op when the
+    # server lacks display_message_persistence/conversation_id, but checking
+    # here keeps unit tests free of a live AgentServer process.
+    case GenServer.whereis(AgentServer.get_name(agent_id)) do
+      nil ->
+        :ok
+
+      _pid ->
+        AgentServer.save_synthetic_message_from(agent_id, %{
+          message_type: "system",
+          content_type: "todo_snapshot",
+          content: build_todo_snapshot_content(todos)
+        })
+    end
+  end
+
+  defp build_todo_snapshot_content(todos) do
+    %{
+      "todos" =>
+        Enum.map(todos, fn todo ->
+          %{
+            "id" => todo.id,
+            "content" => todo.content,
+            "status" => to_string(todo.status)
+          }
+        end),
+      "summary" => %{
+        "total" => length(todos),
+        "pending" => count_status(todos, :pending),
+        "in_progress" => count_status(todos, :in_progress),
+        "completed" => count_status(todos, :completed),
+        "cancelled" => count_status(todos, :cancelled)
+      }
+    }
+  end
+
+  defp count_status(todos, status) do
+    Enum.count(todos, fn todo -> todo.status == status end)
   end
 
   defp get_arg(args, key) when is_map(args) do
