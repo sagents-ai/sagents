@@ -18,6 +18,9 @@ defmodule <%= @context_module %>.DisplayMessage do
   - `"error"` - Error message
   - `"tool_call"` - Tool invocation request from assistant
   - `"tool_result"` - Tool execution result
+  - `"todo_snapshot"` - Point-in-time snapshot of an agent's todo list,
+    emitted by `Sagents.Middleware.TodoList` when configured with
+    `inline: true`
 
   ## Content Structure
 
@@ -30,6 +33,7 @@ defmodule <%= @context_module %>.DisplayMessage do
   - File: `%{"path" => "/path", "name" => "report.pdf"}`
   - Tool call: `%{"call_id" => "call_123", "name" => "search", "arguments" => %{...}}`
   - Tool result: `%{"tool_call_id" => "call_123", "name" => "search", "content" => "...", "is_error" => false}`
+  - Todo snapshot: `%{"todos" => [%{"id" => "1", "content" => "Plan", "status" => "completed"}, ...], "summary" => %{"total" => 3, "pending" => 1, "in_progress" => 1, "completed" => 1, "cancelled" => 0}}`
 
   ## Sequence Field (Message-Local Ordering)
 
@@ -87,7 +91,10 @@ defmodule <%= @context_module %>.DisplayMessage do
   @foreign_key_type :binary_id
 
   # Valid content types
-  @content_types ~w(text thinking image file_reference structured_data notification error tool_call tool_result)
+  @content_types ~w(text thinking image file_reference structured_data notification error tool_call tool_result todo_snapshot)
+
+  # Valid TODO statuses (matches Sagents.Todo.status enum)
+  @todo_statuses ~w(pending in_progress completed cancelled)
 
   schema "<%= @table_prefix %>display_messages" do
     belongs_to :conversation, Conversation
@@ -144,32 +151,51 @@ defmodule <%= @context_module %>.DisplayMessage do
     )
   end
 
-  # Validate content structure based on content_type
-  # NOTE: content keys are strings (from JSONB), not atoms
+  # Validate content structure based on content_type.
+  # Delegates to multi-clause `validate_content/2` so each shape is its own
+  # function head. Pattern-matched heads don't contribute to cyclomatic
+  # complexity, leaving room to grow the whitelist without tripping Credo.
+  # NOTE: content keys are strings (from JSONB), not atoms.
   defp validate_content_structure(changeset) do
     content_type = get_field(changeset, :content_type)
     content = get_field(changeset, :content)
 
-    case {content_type, content} do
-      {"text", %{"text" => _}} -> changeset
-      {"thinking", %{"text" => _}} -> changeset
-      {"image", %{"url" => _}} -> changeset
-      {"image", %{"data" => _, "mime_type" => _}} -> changeset
-      {"file_reference", %{"path" => _, "name" => _}} -> changeset
-      {"structured_data", %{"format" => _, "data" => _}} -> changeset
-      {"notification", %{"text" => _}} -> changeset
-      {"error", %{"text" => _}} -> changeset
-
-      # Tool call validation
-      {"tool_call", %{"call_id" => _, "name" => _, "arguments" => _}} -> changeset
-
-      # Tool result validation
-      {"tool_result", %{"tool_call_id" => _, "name" => _, "content" => _}} -> changeset
-
-      {nil, _} -> changeset  # Allow nil during build
-      _other -> add_error(changeset, :content, "invalid structure for content_type #{content_type}")
+    case validate_content(content_type, content) do
+      :ok -> changeset
+      {:error, msg} -> add_error(changeset, :content, msg)
     end
   end
+
+  # Allow nil during build
+  defp validate_content(nil, _content), do: :ok
+  defp validate_content("text", %{"text" => _text}), do: :ok
+  defp validate_content("thinking", %{"text" => _text}), do: :ok
+  defp validate_content("image", %{"url" => _url}), do: :ok
+  defp validate_content("image", %{"data" => _data, "mime_type" => _mime_type}), do: :ok
+  defp validate_content("file_reference", %{"path" => _path, "name" => _name}), do: :ok
+  defp validate_content("structured_data", %{"format" => _format, "data" => _data}), do: :ok
+  defp validate_content("notification", %{"text" => _text}), do: :ok
+  defp validate_content("error", %{"text" => _text}), do: :ok
+  defp validate_content("tool_call", %{"call_id" => _call_id, "name" => _name, "arguments" => _arguments}), do: :ok
+
+  defp validate_content("tool_result", %{"tool_call_id" => _tool_call_id, "name" => _name, "content" => _content}),
+    do: :ok
+
+  defp validate_content("todo_snapshot", %{"todos" => todos}) when is_list(todos) do
+    if Enum.all?(todos, &valid_todo_entry?/1),
+      do: :ok,
+      else: {:error, "todo_snapshot has invalid todo entries"}
+  end
+
+  defp validate_content(content_type, _content),
+    do: {:error, "invalid structure for content_type #{content_type}"}
+
+  defp valid_todo_entry?(%{"id" => id, "content" => content, "status" => status})
+       when is_binary(id) and is_binary(content) and is_binary(status) do
+    status in @todo_statuses
+  end
+
+  defp valid_todo_entry?(_other), do: false
 
   @doc """
   Returns the text representation of any content type for searching/indexing.
@@ -196,5 +222,15 @@ defmodule <%= @context_module %>.DisplayMessage do
       }) do
     "Tool result from #{name}: #{content}"
   end
+
+  def to_text(%DisplayMessage{content_type: "todo_snapshot", content: %{"summary" => s}})
+      when is_map(s) do
+    "Todo list: #{Map.get(s, "pending", 0)} pending, #{Map.get(s, "in_progress", 0)} in progress, #{Map.get(s, "completed", 0)} completed"
+  end
+
+  def to_text(%DisplayMessage{content_type: "todo_snapshot", content: %{"todos" => todos}}) do
+    "Todo list (#{length(todos)} items)"
+  end
+
   def to_text(_), do: ""
 end
