@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.8.0-rc.6
+
+No breaking changes from `v0.8.0-rc.5`. See the v0.8.0-rc.5 entry below for upgrading from `v0.8.0-rc.4`, and the v0.8.0-rc.1 entry for upgrading from `v0.7.0`.
+
+This RC focuses on inline todo snapshots in the chat transcript, per-call sub-agent message seeding, and hardening lifecycle calls against races (server shutdown, Horde registry propagation, sibling tool calls in flight).
+
+### Added
+- Optional `:initial_messages` config on `Sagents.Middleware.SubAgent.start_subagent/5` for slotting per-call `%LangChain.Message{}` structs between the sub-agent's system messages and its user instruction. Supported uniformly across compiled, config-based, and dynamic general-purpose branches. [#100](https://github.com/sagents-ai/sagents/pull/100)
+- `:inline` option on `Sagents.Middleware.TodoList` (default `false`). When enabled, each successful `write_todos` additionally persists a `content_type: "todo_snapshot"` synthetic display message into the transcript via `AgentServer.save_synthetic_message_from/2` — alongside, not in place of, the existing `{:todos_updated, _}` broadcast. [#101](https://github.com/sagents-ai/sagents/pull/101)
+- `todo_snapshot` content type in the generated `DisplayMessage` persistence template, with structural validation against `Sagents.Todo` statuses and a `to_text/1` clause for search/indexing. Pairs with the new TodoList inline mode. [#102](https://github.com/sagents-ai/sagents/pull/102)
+- New `Sagents.StreamingSession` module — host-agnostic helpers (`handle_tool_call_identified/2`, `handle_tool_execution_update/3`) extracted from the `agent_subscriber_session.ex.eex` template. Returns *changes maps* the host merges however it wants. The generated template now `defdelegate`s to it, so hosts inherit multi-tool-safe delta semantics automatically. [#104](https://github.com/sagents-ai/sagents/pull/104)
+
+### Changed
+- `Sagents.AgentServer` lifecycle action functions (`execute/1`, `cancel/1`, `resume/2`, `add_message/2`, `reset/1`) route through a new `safe_call/3` wrapper that returns `{:error, :agent_not_running}` instead of crashing the caller when the target server has shut down. Specs for `add_message/2` and `reset/1` widened to `:ok | {:error, term()}` accordingly. [#104](https://github.com/sagents-ai/sagents/pull/104)
+- `:streaming_delta` is now only cleared once **every** tool call in the delta has reached a terminal status, so sibling tool calls still in flight keep their UI state. Behavioural change inherited by any host using the regenerated subscriber-session template. [#104](https://github.com/sagents-ai/sagents/pull/104)
+
+### Fixed
+- `FileSystemSupervisor.start_filesystem/3` now explicitly matches `{:error, {:already_started, pid}}` from `start_child/2` and surfaces the tuple verbatim after awaiting registry propagation, so the eventually-consistent Horde lookup-miss race resolves into a clean idempotent return instead of falling through to the generic error logger. [#104](https://github.com/sagents-ai/sagents/pull/104)
+- `Sagents.Middleware.SubAgent` matches `{:error, {:already_started, _pid}}` in both `start_pre_configured_subagent` and the general-purpose path with a loud, distinct error — guards against the "shouldn't happen" duplicate-`subagent.id` case rather than failing silently. [#104](https://github.com/sagents-ai/sagents/pull/104)
+
 ## v0.8.0-rc.5
 
 Headline feature: **interrupted agents now resume cleanly across process restart**. An agent that shut down (inactivity timeout, deploy, crash) while waiting on an `ask_user` question or a HITL approval now boots back into `:interrupted` status with the original question/approval intact, rather than silently demoting it to an error. This drove a public-API refactor (`Session` / `Factory` / `FactoryRouter`) that consolidates session-start mechanics into the library and gives per-request data a clean path through the factory.
