@@ -768,7 +768,7 @@ defmodule Sagents.AgentServer do
   """
   @spec execute(String.t()) :: :ok | {:error, term()}
   def execute(agent_id) do
-    GenServer.call(get_name(agent_id), :execute, :infinity)
+    safe_call(agent_id, :execute, :infinity)
   end
 
   @doc """
@@ -783,7 +783,7 @@ defmodule Sagents.AgentServer do
   """
   @spec cancel(String.t()) :: :ok | {:error, term()}
   def cancel(agent_id) do
-    GenServer.call(get_name(agent_id), :cancel)
+    safe_call(agent_id, :cancel)
   end
 
   @doc """
@@ -810,7 +810,7 @@ defmodule Sagents.AgentServer do
   """
   @spec resume(String.t(), term()) :: :ok | {:error, term()}
   def resume(agent_id, resume_data) do
-    GenServer.call(get_name(agent_id), {:resume, resume_data}, :infinity)
+    safe_call(agent_id, {:resume, resume_data}, :infinity)
   end
 
   # The `get_state/1` function is available to aid in testing and not intended as a general public API.
@@ -938,9 +938,9 @@ defmodule Sagents.AgentServer do
       :ok = AgentServer.add_message("my-agent-1", Message.new_user!("What's next?"))
       :ok = AgentServer.execute("my-agent-1")
   """
-  @spec add_message(String.t(), LangChain.Message.t()) :: :ok
+  @spec add_message(String.t(), LangChain.Message.t()) :: :ok | {:error, term()}
   def add_message(agent_id, %LangChain.Message{} = message) do
-    case GenServer.call(get_name(agent_id), {:add_message, message}) do
+    case safe_call(agent_id, {:add_message, message}) do
       :ok ->
         execute(agent_id)
 
@@ -976,9 +976,9 @@ defmodule Sagents.AgentServer do
       # Now you can execute again with clean state
       :ok = AgentServer.execute("my-agent-1")
   """
-  @spec reset(String.t()) :: :ok
+  @spec reset(String.t()) :: :ok | {:error, term()}
   def reset(agent_id) do
-    GenServer.call(get_name(agent_id), :reset)
+    safe_call(agent_id, :reset)
   end
 
   @doc """
@@ -3246,5 +3246,20 @@ defmodule Sagents.AgentServer do
     agent_id = server_state.agent.agent_id
 
     Sagents.Presence.untrack(presence_mod, @agent_presence_topic, agent_id)
+  end
+
+  # Wrap GenServer.call against an agent's via-tuple name with try/catch so
+  # callers get a clear {:error, :agent_not_running} tuple when the
+  # AgentServer has shut down (inactivity timeout, supervisor restart, Horde
+  # migration in flight) instead of a raw `(EXIT) no process` signal.
+  #
+  # Same intent as the existing pattern in `get_metadata/1` and `get_agent/1`,
+  # but routed through the via-tuple registry name so a single helper covers
+  # every lifecycle-action callsite (execute/1, cancel/1, resume/2,
+  # add_message/2, reset/1).
+  defp safe_call(agent_id, request, timeout \\ 5000) do
+    GenServer.call(get_name(agent_id), request, timeout)
+  catch
+    :exit, _reason -> {:error, :agent_not_running}
   end
 end

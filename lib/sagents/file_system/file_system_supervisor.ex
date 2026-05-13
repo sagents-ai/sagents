@@ -173,6 +173,17 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
 
                 {:ok, pid}
 
+              # Race: another caller registered the same scope between our
+              # get_filesystem/1 check above and this start_child. With
+              # Horde the registry is eventually consistent, so the lookup
+              # can miss a process that's already alive on another node.
+              # Surface the same {:error, {:already_started, pid}} as the
+              # cache-hit branch above; ensure_filesystem/3 collapses both
+              # into {:ok, pid} for idempotent callers.
+              {:error, {:already_started, pid}} = error ->
+                await_registry_propagation({:filesystem_server, scope_key}, pid)
+                error
+
               {:error, reason} = error ->
                 Logger.error(
                   "Failed to start filesystem for scope #{inspect(scope_key)}: #{inspect(reason)}"

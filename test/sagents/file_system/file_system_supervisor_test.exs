@@ -1,5 +1,6 @@
 defmodule Sagents.FileSystem.FileSystemSupervisorTest do
   use ExUnit.Case, async: false
+  use Mimic
 
   alias Sagents.FileSystem.FileSystemSupervisor
   alias Sagents.FileSystem.FileSystemConfig
@@ -79,6 +80,31 @@ defmodule Sagents.FileSystem.FileSystemSupervisorTest do
                FileSystemSupervisor.start_filesystem(scope_key, [config], supervisor: sup)
 
       # Clean up
+      FileSystemSupervisor.stop_filesystem(scope_key, supervisor: sup)
+    end
+
+    test "returns {:already_started, pid} when start_child loses the registration race",
+         %{supervisor_pid: sup} do
+      # Simulates Horde.Registry's eventual-consistency window: the
+      # get_filesystem/1 lookup misses an existing process (returns
+      # :not_found), but by the time we call start_child, another caller
+      # has registered the same scope. The supervisor's start_child
+      # returns {:error, {:already_started, pid}} and the wrapper must
+      # surface that exact tuple — not a generic startup failure — so
+      # idempotent callers like FileSystem.ensure_filesystem/3 can
+      # collapse it into {:ok, pid}.
+      scope_key = {:user, System.unique_integer([:positive])}
+      config = create_test_config(scope_key)
+
+      # Start the "winning" filesystem first.
+      {:ok, fs_pid} = FileSystemSupervisor.start_filesystem(scope_key, [config], supervisor: sup)
+
+      # Force the lookup to miss so we take the start_child path.
+      stub(FileSystemSupervisor, :get_filesystem, fn ^scope_key -> {:error, :not_found} end)
+
+      assert {:error, {:already_started, ^fs_pid}} =
+               FileSystemSupervisor.start_filesystem(scope_key, [config], supervisor: sup)
+
       FileSystemSupervisor.stop_filesystem(scope_key, supervisor: sup)
     end
 
