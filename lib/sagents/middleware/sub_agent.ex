@@ -743,6 +743,13 @@ defmodule Sagents.Middleware.SubAgent do
               # Execute SubAgent synchronously (blocks until complete or interrupt)
               execute_subagent(subagent.id, task_name)
 
+            # A duplicate subagent.id should be impossible by construction
+            # (fresh UUID per spawn). Surface it as a distinct error so the
+            # bug is loud instead of masquerading as a generic startup
+            # failure or silently reusing an unrelated SubAgentServer.
+            {:error, {:already_started, _pid}} ->
+              {:error, "Duplicate SubAgent id #{inspect(subagent.id)} — refusing to start"}
+
             {:error, reason} ->
               {:error, "Failed to start task: #{inspect(reason)}"}
           end
@@ -835,6 +842,11 @@ defmodule Sagents.Middleware.SubAgent do
           case DynamicSupervisor.start_child(supervisor_name, child_spec) do
             {:ok, _pid} ->
               execute_subagent(subagent.id, "general-purpose")
+
+            # See start_pre_configured_subagent/3 above — duplicate ids
+            # are impossible by construction, so surface explicitly.
+            {:error, {:already_started, _pid}} ->
+              {:error, "Duplicate SubAgent id #{inspect(subagent.id)} — refusing to start"}
 
             {:error, reason} ->
               {:error, "Failed to start task: #{inspect(reason)}"}

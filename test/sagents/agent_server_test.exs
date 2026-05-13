@@ -2105,4 +2105,43 @@ defmodule Sagents.AgentServerTest do
       assert List.last(messages).role == :user
     end
   end
+
+  describe "safe_call: action functions when the AgentServer is not running" do
+    # Every lifecycle-action call routes through a single `safe_call/3`
+    # helper that wraps GenServer.call against the via-tuple registry name
+    # with try/catch. If the server has shut down (inactivity timeout,
+    # crash, Horde migration in flight) callers should see
+    # `{:error, :agent_not_running}` rather than a raw `(EXIT) no process`.
+
+    test "execute/1 returns {:error, :agent_not_running}" do
+      assert {:error, :agent_not_running} =
+               AgentServer.execute("nonexistent-agent-#{System.unique_integer([:positive])}")
+    end
+
+    test "cancel/1 returns {:error, :agent_not_running}" do
+      assert {:error, :agent_not_running} =
+               AgentServer.cancel("nonexistent-agent-#{System.unique_integer([:positive])}")
+    end
+
+    test "resume/2 returns {:error, :agent_not_running}" do
+      assert {:error, :agent_not_running} =
+               AgentServer.resume(
+                 "nonexistent-agent-#{System.unique_integer([:positive])}",
+                 %{type: :approve}
+               )
+    end
+
+    test "add_message/2 returns {:error, :agent_not_running}" do
+      assert {:error, :agent_not_running} =
+               AgentServer.add_message(
+                 "nonexistent-agent-#{System.unique_integer([:positive])}",
+                 Message.new_user!("Hi")
+               )
+    end
+
+    test "reset/1 returns {:error, :agent_not_running}" do
+      assert {:error, :agent_not_running} =
+               AgentServer.reset("nonexistent-agent-#{System.unique_integer([:positive])}")
+    end
+  end
 end
