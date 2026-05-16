@@ -49,7 +49,7 @@ defmodule Sagents.MixProject do
   defp deps do
     [
       # Core dependency - the LangChain library
-      {:langchain, ">= 0.8.9"},
+      {:langchain, ">= 0.8.11"},
       # {:langchain, path: "../my_langchain"},
 
       # Required dependencies
@@ -58,7 +58,7 @@ defmodule Sagents.MixProject do
       {:jason, "~> 1.0"},
 
       # Optional dependencies
-      {:phoenix, "~> 1.7", optional: true},
+      {:phoenix, "~> 1.7 or ~> 1.8", optional: true},
       {:horde, "~> 0.10", optional: true},
 
       # Development dependencies
@@ -73,7 +73,9 @@ defmodule Sagents.MixProject do
 
       # Static analysis
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false, warn_if_outdated: true},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
     ]
   end
 
@@ -84,6 +86,9 @@ defmodule Sagents.MixProject do
         "deps.unlock --unused",
         "format",
         "credo",
+        # TODO: Add full CI support for
+        # "sobelow",
+        "deps.audit",
         "test --include cluster --include slow"
       ]
     ]
