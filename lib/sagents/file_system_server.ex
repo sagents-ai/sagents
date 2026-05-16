@@ -162,6 +162,13 @@ defmodule Sagents.FileSystemServer do
     ProcessRegistry.via_tuple({:filesystem_server, scope_key})
   end
 
+  # The `get_state/1` function is available to aid in testing and not intended as a general public API.
+  @doc false
+  @spec get_state(term()) :: FileSystemState.t()
+  def get_state(scope_key) do
+    GenServer.call(get_name(scope_key), :get_state)
+  end
+
   @doc """
   Write content to a file path.
 
@@ -505,6 +512,11 @@ defmodule Sagents.FileSystemServer do
   @impl true
   def handle_call(:get_scope, _from, state) do
     {:reply, {:ok, state.scope_key}, state}
+  end
+
+  @impl true
+  def handle_call(:get_state, _from, state) do
+    {:reply, state, state}
   end
 
   @impl true
