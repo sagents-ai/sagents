@@ -107,7 +107,7 @@ defmodule Sagents.FileSystemServerTest do
 
   describe "write_file/4" do
     test "writes a memory file", %{agent_id: agent_id} do
-      {:ok, pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
       path = "/scratch/test.txt"
       content = "test content"
@@ -119,7 +119,7 @@ defmodule Sagents.FileSystemServerTest do
       assert {:ok, %{content: ^content}} = FileSystemServer.read_file({:agent, agent_id}, path)
 
       # Verify internal state
-      state = :sys.get_state(pid)
+      state = FileSystemServer.get_state({:agent, agent_id})
       entry = Map.get(state.files, path)
       assert entry.path == path
       assert entry.content == content
@@ -131,7 +131,7 @@ defmodule Sagents.FileSystemServerTest do
     test "writes to unconfigured directory as memory-only", %{
       agent_id: agent_id
     } do
-      {:ok, pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
       path = "/Memories/important.txt"
       content = "important data"
@@ -141,7 +141,7 @@ defmodule Sagents.FileSystemServerTest do
 
       # No persistence config matched, so the file lives in memory only
       # (the state machine has nothing to persist it to)
-      state = :sys.get_state(pid)
+      state = FileSystemServer.get_state({:agent, agent_id})
       entry = Map.get(state.files, path)
       assert entry.dirty_content == false
     end
@@ -158,7 +158,7 @@ defmodule Sagents.FileSystemServerTest do
 
       config = make_config(TestPersistence, "Memories")
 
-      {:ok, pid} =
+      {:ok, _pid} =
         FileSystemServer.start_link(
           scope_key: {:agent, agent_id},
           configs: [config]
@@ -170,7 +170,7 @@ defmodule Sagents.FileSystemServerTest do
       assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, content)
 
       # New file should be persisted immediately (dirty == false)
-      state = :sys.get_state(pid)
+      state = FileSystemServer.get_state({:agent, agent_id})
       entry = Map.get(state.files, path)
       assert entry.dirty_content == false
       assert entry.loaded == true
@@ -188,7 +188,7 @@ defmodule Sagents.FileSystemServerTest do
 
       config = make_config(TestPersistenceUpdate, "Memories")
 
-      {:ok, pid} =
+      {:ok, _pid} =
         FileSystemServer.start_link(
           scope_key: {:agent, agent_id},
           configs: [config]
@@ -198,12 +198,12 @@ defmodule Sagents.FileSystemServerTest do
 
       # Create file first (persists immediately)
       assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, "initial")
-      state = :sys.get_state(pid)
+      state = FileSystemServer.get_state({:agent, agent_id})
       assert Map.get(state.files, path).dirty_content == false
 
       # Update existing file (should debounce)
       assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, "updated")
-      state = :sys.get_state(pid)
+      state = FileSystemServer.get_state({:agent, agent_id})
       entry = Map.get(state.files, path)
       assert entry.dirty_content == true
 
@@ -211,7 +211,7 @@ defmodule Sagents.FileSystemServerTest do
       Process.sleep(150)
 
       # File should now be clean
-      state = :sys.get_state(pid)
+      state = FileSystemServer.get_state({:agent, agent_id})
       clean_entry = Map.get(state.files, path)
       assert clean_entry.dirty_content == false
     end
@@ -780,7 +780,7 @@ defmodule Sagents.FileSystemServerTest do
     end
 
     test "subscriber crash auto-cleans subscription", %{agent_id: agent_id} do
-      {:ok, server_pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+      {:ok, _server_pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 
       sub =
         spawn(fn ->
@@ -792,15 +792,25 @@ defmodule Sagents.FileSystemServerTest do
         end)
 
       # Synchronize: wait until the server has processed the subscribe call
-      _state = :sys.get_state(server_pid)
-      assert Sagents.Publisher.State.count(:sys.get_state(server_pid).publisher) == 1
+      assert Sagents.Publisher.State.count(
+               FileSystemServer.get_state({:agent, agent_id}).publisher
+             ) == 1
 
+      # Monitor `sub` from the test so we know when the kill has taken effect.
+      # This alone isn't enough — the test's DOWN and the server's DOWN are
+      # delivered independently by the runtime — so we follow up with a
+      # bounded poll on the publisher count. The server's DOWN handler runs
+      # within microseconds of ours in practice; the poll just absorbs any
+      # scheduling jitter (notably on slower CI runners).
+      ref = Process.monitor(sub)
       Process.exit(sub, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^sub, _}, 500
 
-      # Synchronize again: a follow-up call serializes after the :DOWN handler
-      _state1 = :sys.get_state(server_pid)
-      _state2 = :sys.get_state(server_pid)
-      assert Sagents.Publisher.State.count(:sys.get_state(server_pid).publisher) == 0
+      assert wait_until(fn ->
+               Sagents.Publisher.State.count(
+                 FileSystemServer.get_state({:agent, agent_id}).publisher
+               ) == 0
+             end)
     end
   end
 
