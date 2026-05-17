@@ -26,7 +26,8 @@ defmodule Sagents.TextLines do
     # trailing empty element is an artifact of the line terminator, not a
     # real line. Keeping it mis-renders file lengths and misleads LLMs into
     # editing a phantom "last line". Drop it so line counts match human /
-    # editor conventions. `replace_range/4` re-adds the terminator on save.
+    # editor conventions. Callers that rebuild bodies must re-add the
+    # terminator themselves if the original input had one.
     lines =
       body
       |> String.split("\n")
@@ -81,76 +82,6 @@ defmodule Sagents.TextLines do
       end
 
     {formatted, start_line, end_line, total}
-  end
-
-  @doc """
-  Replaces lines `start_line..end_line` (1-indexed, inclusive) with
-  `new_lines_text` and returns the rejoined body.
-
-  `new_lines_text` semantics:
-    - `""` deletes the targeted range (zero lines inserted)
-    - `"\\n"` inserts exactly one blank line
-    - A trailing `"\\n"` on non-empty content is a line terminator, not an
-      extra blank line: `"foo\\n"` and `"foo"` both insert one line `"foo"`
-
-  Returns `{:ok, new_body, lines_replaced}` or `{:error, reason}`.
-  """
-  @spec replace_range(String.t() | nil, pos_integer(), pos_integer(), String.t()) ::
-          {:ok, String.t(), non_neg_integer()} | {:error, String.t()}
-  def replace_range(body, start_line, end_line, new_lines_text) do
-    {lines, total} = split(body)
-    had_trailing_newline? = is_binary(body) and String.ends_with?(body, "\n")
-
-    cond do
-      start_line < 1 ->
-        {:error, "start_line must be >= 1 (line numbers are 1-based)"}
-
-      end_line < start_line ->
-        {:error, "end_line (#{end_line}) must be >= start_line (#{start_line})"}
-
-      start_line > total ->
-        {:error,
-         "start_line #{start_line} is beyond content length (#{total} lines). " <>
-           "Re-read the content to get current line numbers."}
-
-      end_line > total ->
-        {:error,
-         "end_line #{end_line} is beyond content length (#{total} lines). " <>
-           "Re-read the content to get current line numbers."}
-
-      true ->
-        start_idx = start_line - 1
-        end_idx = end_line - 1
-        lines_replaced = end_idx - start_idx + 1
-
-        before = Enum.slice(lines, 0, start_idx)
-        after_lines = Enum.slice(lines, end_idx + 1, total - end_idx - 1)
-        new_lines = split_new_content(new_lines_text)
-
-        new_body = Enum.join(before ++ new_lines ++ after_lines, "\n")
-        new_body = if had_trailing_newline?, do: new_body <> "\n", else: new_body
-
-        {:ok, new_body, lines_replaced}
-    end
-  end
-
-  # Splits replacement content into the list of lines to insert.
-  #   ""          -> []           (delete the range)
-  #   "\n"        -> [""]         (one blank line)
-  #   "foo"       -> ["foo"]
-  #   "foo\n"     -> ["foo"]      (trailing \n is a terminator)
-  #   "foo\nbar"  -> ["foo", "bar"]
-  defp split_new_content(""), do: []
-
-  defp split_new_content(text) when is_binary(text) do
-    stripped =
-      if String.ends_with?(text, "\n") do
-        binary_part(text, 0, byte_size(text) - 1)
-      else
-        text
-      end
-
-    String.split(stripped, "\n")
   end
 
   @doc """
