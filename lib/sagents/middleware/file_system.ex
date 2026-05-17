@@ -7,7 +7,6 @@ defmodule Sagents.Middleware.FileSystem do
   - `read_file`: Read file contents with line numbers and pagination
   - `create_file`: Create new files (errors if file exists)
   - `replace_file_text`: Make targeted edits with string replacement
-  - `replace_file_lines`: Replace a range of lines by line number
   - `find_in_file`: Find text or regex matches within a single file
   - `delete_file`: Delete files from the filesystem
   - `move_file`: Move or rename files and directories
@@ -46,7 +45,7 @@ defmodule Sagents.Middleware.FileSystem do
       )
 
   Available tools: `"list_files"`, `"read_file"`, `"create_file"`, `"replace_file_text"`,
-  `"replace_file_lines"`, `"find_in_file"`, `"delete_file"`, `"move_file"`
+  `"find_in_file"`, `"delete_file"`, `"move_file"`
 
   ### Custom Tool Descriptions
 
@@ -112,7 +111,6 @@ defmodule Sagents.Middleware.FileSystem do
     "read_file",
     "create_file",
     "replace_file_text",
-    "replace_file_lines",
     "find_in_file",
     "delete_file",
     "move_file"
@@ -126,7 +124,6 @@ defmodule Sagents.Middleware.FileSystem do
     "read_file" => "Reading file",
     "create_file" => "Creating file",
     "replace_file_text" => "Replacing file text",
-    "replace_file_lines" => "Replacing file lines",
     "find_in_file" => "Searching file",
     "delete_file" => "Deleting file",
     "move_file" => "Moving file"
@@ -142,8 +139,6 @@ defmodule Sagents.Middleware.FileSystem do
       "`create_file`: Create a new file with content. Errors if the file already exists.",
     "replace_file_text" =>
       "`replace_file_text`: Replace a string with another string in an existing file. The old_string must appear exactly once unless replace_all is set.",
-    "replace_file_lines" =>
-      "`replace_file_lines`: Replace a range of lines (by line number) with new content. More token-efficient than replace_file_text for large block replacements.",
     "find_in_file" =>
       "`find_in_file`: Find text or regex matches within a single file. Requires an exact file path — use `list_files` first to discover paths.",
     "delete_file" => "`delete_file`: Delete a file from the filesystem.",
@@ -160,9 +155,6 @@ defmodule Sagents.Middleware.FileSystem do
     "replace_file_text" => [
       "Use `replace_file_text` for small, targeted edits where you have the exact text",
       "Provide sufficient context in `old_string` for `replace_file_text` to ensure unique matches"
-    ],
-    "replace_file_lines" => [
-      "Use `replace_file_lines` for large block replacements (more token-efficient)"
     ],
     "find_in_file" => [],
     "move_file" => ["Use `move_file` to rename files or move them to a different path"],
@@ -219,25 +211,21 @@ defmodule Sagents.Middleware.FileSystem do
   - `read_file` displays each line in `cat -n` format: `    N\\t<content>`
     (6-char right-aligned line number, a tab, then the line). The `    N\\t`
     prefix is rendering metadata, NOT part of the file. When passing text to
-    `replace_file_text`'s `old_string`/`new_string` or `replace_file_lines`'s
-    `new_content`, include only what appears AFTER the tab. Preserve the exact
-    indentation (tabs/spaces) that appears after the tab — that IS file content.
-  - Line numbers are 1-based and consistent across `read_file`,
-    `replace_file_lines`, and `find_in_file` — the same number refers to the
-    same line in every tool.
-  - Line numbers shift after every edit. Always `read_file` between sequential
-    edits to the same file to pick up the new numbering.
+    `replace_file_text`'s `old_string`/`new_string`, include only what appears
+    AFTER the tab. Preserve the exact indentation (tabs/spaces) that appears
+    after the tab — that IS file content.
+  - Line numbers are 1-based and consistent across `read_file` and
+    `find_in_file` — the same number refers to the same line in every tool.
   - A trailing `\\n` on a file is a line terminator, not a blank line. A 3-line
-    file ending in `\\n` has 3 lines, not 4 — don't try to edit a phantom
-    "line 4" past the terminator.\
+    file ending in `\\n` has 3 lines, not 4.\
   """
 
   # Edit tools that consume text the agent may have copied from `read_file`'s
   # `cat -n` output. The line-number rules section is emitted only when at
   # least one of these is enabled: without an edit tool in the config, the
-  # cat-n-prefix and line-shift rules aren't actionable, and naming edit tools
-  # in the prompt when they're disabled would mislead the agent.
-  @line_aware_tools ~w(replace_file_text replace_file_lines)
+  # cat-n-prefix rules aren't actionable, and naming edit tools in the prompt
+  # when they're disabled would mislead the agent.
+  @line_aware_tools ~w(replace_file_text)
 
   @impl true
   def init(opts) do
@@ -407,7 +395,6 @@ defmodule Sagents.Middleware.FileSystem do
       "read_file" => build_read_file_tool(config),
       "create_file" => build_create_file_tool(config),
       "replace_file_text" => build_replace_text_tool(config),
-      "replace_file_lines" => build_replace_lines_tool(config),
       "find_in_file" => build_find_in_file_tool(config),
       "delete_file" => build_delete_file_tool(config),
       "move_file" => build_move_file_tool(config)
@@ -466,9 +453,9 @@ defmodule Sagents.Middleware.FileSystem do
     Read a file's contents with line numbers.
 
     Returns content in `cat -n` format (6-char line number, tab, content). Line
-    numbers are 1-based and match `replace_file_lines` and `find_in_file`. See
-    "Working with Line Numbers and File Content" in the system prompt for rules
-    on passing this text back to edit tools.
+    numbers are 1-based and match `find_in_file`. See "Working with Line Numbers
+    and File Content" in the system prompt for rules on passing this text back
+    to edit tools.
 
     Supports pagination via `start_line` and `limit` for large files.
     """
@@ -488,10 +475,7 @@ defmodule Sagents.Middleware.FileSystem do
           },
           start_line: %{
             type: "integer",
-            description:
-              "1-based line number to start reading from. Matches " <>
-                "`replace_file_lines`'s start_line so the same number refers " <>
-                "to the same line across tools. Default: 1 (start of file).",
+            description: "1-based line number to start reading from. Default: 1 (start of file).",
             default: 1
           },
           limit: %{
@@ -511,7 +495,7 @@ defmodule Sagents.Middleware.FileSystem do
     Create a new file with content.
 
     This tool only creates new files. If the file already exists, an error will be
-    returned — use replace_file_text or replace_file_lines to modify existing files instead.
+    returned — use replace_file_text to modify existing files instead.
     """
 
     description = get_custom_description(config, "create_file", default_description)
@@ -544,9 +528,6 @@ defmodule Sagents.Middleware.FileSystem do
 
     By default, the old_string must appear exactly once in the file (for safety).
     Use replace_all: true to replace every occurrence.
-
-    For large block replacements where you have line numbers, prefer replace_file_lines —
-    it is significantly more token-efficient.
 
     When copying text from `read_file`'s output into `old_string` or `new_string`,
     include only the content that appears AFTER the tab separator — never the
@@ -722,102 +703,6 @@ defmodule Sagents.Middleware.FileSystem do
     })
   end
 
-  defp build_replace_lines_tool(config) do
-    default_description = """
-    Replace a range of lines (by line number) with new content. Line numbers are
-    1-based and the range is inclusive (both start_line and end_line are replaced).
-
-    This tool is significantly more token-efficient than replace_file_text for large
-    block replacements — you don't need to send the original content character-
-    for-character, just the line range.
-
-    The return value includes a preview of the edited region (2 lines of
-    context before and after the affected range, with post-edit line numbers)
-    so you can verify the edit succeeded without issuing a follow-up read_file.
-
-    ## Deleting lines and inserting blank lines
-
-    `new_content` has two special values you should know about:
-
-    - `new_content: ""` — **DELETES** the targeted line(s) entirely. The lines
-      are removed and the surrounding content closes up. Use this whenever you
-      want a line gone. Example: to delete line 69, call with start_line=69,
-      end_line=69, new_content="".
-    - `new_content: "\\n"` — **INSERTS** exactly one blank line in place of the
-      range. Use this (not "") when you deliberately want to replace the range
-      with an empty line rather than remove it.
-
-    A trailing `\\n` on non-empty content (e.g. "foo\\n") is treated as a line
-    terminator, not as an instruction to append a blank line — so "foo" and
-    "foo\\n" produce the same result: one line containing "foo".
-
-    ## Best Practices
-
-    - ALWAYS `read_file` first to see the current line numbers before editing.
-    - Carefully verify start_line and end_line before calling. Wrong line numbers
-      will destructively replace the wrong content with no way to undo.
-    - For small, targeted edits where you know the exact text, use replace_file_text
-      instead — it has a built-in safety check (the old_string must match).
-    - For multi-line replacements where you have line numbers from a recent
-      read_file, this tool is the right choice.
-    - To APPEND content to a file, replace the real last line with itself plus
-      the new content (e.g. if the file has 41 lines, call with start_line=41,
-      end_line=41, new_content="<line 41's current content>\\n<new lines>").
-      A file's trailing newline is a terminator — there is no "line 42" to
-      target. The trailing newline is preserved automatically on save.
-
-    ## Examples
-
-    Call with a JSON object matching the schema:
-
-    - Replace lines 10-15:
-      {"file_path": "/doc.txt", "start_line": 10, "end_line": 15, "new_content": "new text"}
-    - Replace a single line:
-      {"file_path": "/doc.txt", "start_line": 42, "end_line": 42, "new_content": "new line"}
-    - Replace a large block:
-      {"file_path": "/notes/research.md", "start_line": 120, "end_line": 135, "new_content": "..."}
-    - Delete lines 30-32 entirely:
-      {"file_path": "/doc.txt", "start_line": 30, "end_line": 32, "new_content": ""}
-    - Replace line 10 with a single blank line:
-      {"file_path": "/doc.txt", "start_line": 10, "end_line": 10, "new_content": "\\n"}
-    """
-
-    description = get_custom_description(config, "replace_file_lines", default_description)
-
-    Function.new!(%{
-      name: "replace_file_lines",
-      description: description,
-      display_text: get_display_text(config, "replace_file_lines"),
-      parameters_schema: %{
-        type: "object",
-        properties: %{
-          file_path: %{
-            type: "string",
-            description: "Path to the file to edit"
-          },
-          start_line: %{
-            type: "integer",
-            description: "Starting line number (1-based, inclusive)"
-          },
-          end_line: %{
-            type: "integer",
-            description: "Ending line number (1-based, inclusive)"
-          },
-          new_content: %{
-            type: "string",
-            description:
-              "New content to replace the line range. Can be multi-line. " <>
-                "Special values: \"\" deletes the range entirely (lines are removed); " <>
-                "\"\\n\" inserts a single blank line. " <>
-                "A trailing newline on non-empty content is treated as a terminator, not an extra blank line."
-          }
-        },
-        required: ["file_path", "start_line", "end_line", "new_content"]
-      },
-      function: fn args, context -> execute_replace_lines_tool(args, context, config) end
-    })
-  end
-
   # Tool execution functions
 
   defp execute_list_files_tool(args, _context, config) do
@@ -904,8 +789,7 @@ defmodule Sagents.Middleware.FileSystem do
 
   defp create_new_file(scope, path, content) do
     if FileSystemServer.file_exists?(scope, path) do
-      {:error,
-       "File already exists: #{path}. Use replace_file_text or replace_file_lines to modify existing files."}
+      {:error, "File already exists: #{path}. Use replace_file_text to modify existing files."}
     else
       case FileSystemServer.write_file(scope, path, content) do
         {:ok, entry} -> {:ok, Jason.encode!(FileEntry.to_llm_map(entry))}
@@ -1065,53 +949,6 @@ defmodule Sagents.Middleware.FileSystem do
       {:error, "Search failed: #{Exception.message(e)}"}
   end
 
-  defp execute_replace_lines_tool(args, _context, config) do
-    file_path = get_arg(args, "file_path")
-    start_line = get_integer_arg(args, "start_line", nil)
-    end_line = get_integer_arg(args, "end_line", nil)
-    new_content = get_arg(args, "new_content")
-
-    cond do
-      is_nil(file_path) ->
-        {:error, "file_path is required"}
-
-      is_nil(start_line) or is_nil(end_line) ->
-        {:error, "start_line and end_line are required"}
-
-      is_nil(new_content) ->
-        {:error, "new_content is required"}
-
-      start_line < 1 ->
-        {:error, "start_line must be >= 1 (line numbers are 1-based)"}
-
-      end_line < start_line ->
-        {:error, "end_line must be >= start_line"}
-
-      true ->
-        with {:ok, normalized_path} <- validate_path(file_path),
-             {:ok, entry} <-
-               FileSystemServer.read_file(config.filesystem_scope, normalized_path) do
-          perform_line_replacement(
-            config.filesystem_scope,
-            normalized_path,
-            entry.content || "",
-            start_line,
-            end_line,
-            new_content
-          )
-        else
-          {:error, :enoent} ->
-            {:error, "File not found: #{file_path}"}
-
-          {:error, reason} ->
-            {:error, "Failed to read file: #{inspect(reason)}"}
-        end
-    end
-  rescue
-    e ->
-      {:error, "Edit failed: #{Exception.message(e)}"}
-  end
-
   defp format_search_results(results, max_results, truncated) do
     if Enum.empty?(results) or Enum.all?(results, fn {_path, matches} -> Enum.empty?(matches) end) do
       {:ok, "No matches found"}
@@ -1195,67 +1032,6 @@ defmodule Sagents.Middleware.FileSystem do
       {:error, reason} ->
         {:error, "Failed to save edit: #{inspect(reason)}"}
     end
-  end
-
-  # Number of context lines to include on each side of an edit's affected
-  # range in the post-edit preview. Saves the model from issuing a follow-up
-  # read_file just to verify the edit landed correctly. Kept small because
-  # a single "line" can be an entire paragraph in markdown / prose content —
-  # 2 on each side gives enough context to see what's adjacent without
-  # inflating token cost for long-form documents.
-  @replace_edit_context_lines 2
-
-  defp perform_line_replacement(
-         filesystem_scope,
-         file_path,
-         content,
-         start_line,
-         end_line,
-         new_content
-       ) do
-    case TextLines.replace_range(content, start_line, end_line, new_content) do
-      {:ok, updated_content, lines_replaced_count} ->
-        case FileSystemServer.write_file(filesystem_scope, file_path, updated_content) do
-          {:ok, _entry} ->
-            preview = build_edit_preview(updated_content, start_line, new_content)
-
-            {:ok,
-             "File edited successfully: #{file_path}\n" <>
-               "Replaced #{lines_replaced_count} lines (#{start_line}-#{end_line})\n\n" <>
-               "Context after edit:\n#{preview}"}
-
-          {:error, reason} ->
-            {:error, "Failed to save edit: #{inspect(reason)}"}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  # Render a slice of the post-edit file showing the affected range plus
-  # `@replace_edit_context_lines` lines on each side. For insertions/
-  # replacements, the new lines are included. For deletions (new_content
-  # is empty), just the context around the former range is shown.
-  defp build_edit_preview(updated_content, start_line, new_content) do
-    {_lines, total_after} = TextLines.split(updated_content)
-
-    new_line_count =
-      case new_content do
-        "" -> 0
-        other -> length(String.split(other, "\n"))
-      end
-
-    edit_end = start_line + max(new_line_count - 1, 0)
-
-    show_start = max(1, start_line - @replace_edit_context_lines)
-    show_end = min(total_after, edit_end + @replace_edit_context_lines)
-    limit = max(show_end - show_start + 1, 1)
-
-    {formatted, _start, _end, _truncated} =
-      TextLines.render(updated_content, start_line: show_start, limit: limit)
-
-    formatted
   end
 
   defp get_arg(nil = _args, _key), do: nil

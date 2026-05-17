@@ -28,7 +28,6 @@ defmodule Sagents.Middleware.FileSystemTest do
                "read_file",
                "create_file",
                "replace_file_text",
-               "replace_file_lines",
                "find_in_file",
                "delete_file",
                "move_file"
@@ -212,7 +211,6 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert by_name["read_file"] == "Reading file"
       assert by_name["create_file"] == "Creating file"
       assert by_name["replace_file_text"] == "Replacing file text"
-      assert by_name["replace_file_lines"] == "Replacing file lines"
       assert by_name["find_in_file"] == "Searching file"
       assert by_name["delete_file"] == "Deleting file"
       assert by_name["move_file"] == "Moving file"
@@ -248,7 +246,6 @@ defmodule Sagents.Middleware.FileSystemTest do
       "read_file",
       "create_file",
       "replace_file_text",
-      "replace_file_lines",
       "find_in_file",
       "delete_file",
       "move_file"
@@ -277,7 +274,7 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert prompt =~ "Pattern Filtering"
 
       for tool <-
-            ~w(create_file replace_file_text replace_file_lines find_in_file delete_file move_file) do
+            ~w(create_file replace_file_text find_in_file delete_file move_file) do
         refute prompt =~ tool, "did not expect #{tool} in read-only prompt"
       end
     end
@@ -290,7 +287,7 @@ defmodule Sagents.Middleware.FileSystemTest do
         assert prompt =~ tool
       end
 
-      for tool <- ~w(replace_file_text replace_file_lines find_in_file delete_file move_file) do
+      for tool <- ~w(replace_file_text find_in_file delete_file move_file) do
         refute prompt =~ tool
       end
     end
@@ -321,7 +318,7 @@ defmodule Sagents.Middleware.FileSystemTest do
   end
 
   describe "tools/1" do
-    test "returns all eight filesystem tools by default", %{agent_id: agent_id} do
+    test "returns all seven filesystem tools by default", %{agent_id: agent_id} do
       tools =
         FileSystem.tools(%{
           filesystem_scope: {:agent, agent_id},
@@ -330,20 +327,18 @@ defmodule Sagents.Middleware.FileSystemTest do
             "read_file",
             "create_file",
             "replace_file_text",
-            "replace_file_lines",
             "find_in_file",
             "delete_file",
             "move_file"
           ]
         })
 
-      assert length(tools) == 8
+      assert length(tools) == 7
       tool_names = Enum.map(tools, & &1.name)
       assert "list_files" in tool_names
       assert "read_file" in tool_names
       assert "create_file" in tool_names
       assert "replace_file_text" in tool_names
-      assert "replace_file_lines" in tool_names
       assert "find_in_file" in tool_names
       assert "delete_file" in tool_names
       assert "move_file" in tool_names
@@ -547,7 +542,7 @@ defmodule Sagents.Middleware.FileSystemTest do
 
       assert {:error, message} = tool.function.(args, %{state: State.new!()})
       assert message =~ "already exists"
-      assert message =~ "replace_file_text or replace_file_lines"
+      assert message =~ "replace_file_text"
     end
 
     test "rejects paths without leading slash", %{tool: tool} do
@@ -1191,534 +1186,6 @@ defmodule Sagents.Middleware.FileSystemTest do
       assert log_result =~ "/app.log"
       assert log_result =~ "     2\t2024-01-01 10:05:00 ERROR: Connection failed"
       assert log_result =~ "     4\t2024-01-01 10:15:00 ERROR: Timeout occurred"
-    end
-  end
-
-  defp get_replace_lines_tool(tools) when is_list(tools) do
-    Enum.find(tools, fn tool -> tool.name == "replace_file_lines" end)
-  end
-
-  describe "replace_file_lines tool - basic functionality" do
-    test "replace_file_lines tool is enabled in FileSystem", %{agent_id: agent_id} do
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-      assert replace_lines_tool != nil
-    end
-
-    test "replaces a single line", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", """
-      Line 1
-      Line 2
-      Line 3
-      Line 4
-      Line 5
-      """)
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 3,
-        "end_line" => 3,
-        "new_content" => "REPLACED LINE 3"
-      }
-
-      {:ok, result} = replace_lines_tool.function.(args, %{})
-
-      assert result =~ "File edited successfully"
-      assert result =~ "Replaced 1 lines (3-3)"
-
-      # Verify file content
-      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
-      assert content =~ "Line 1"
-      assert content =~ "Line 2"
-      assert content =~ "REPLACED LINE 3"
-      assert content =~ "Line 4"
-      assert content =~ "Line 5"
-      refute content =~ "Line 3\n"
-    end
-
-    test "replaces multiple lines", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", """
-      Line 1
-      Line 2
-      Line 3
-      Line 4
-      Line 5
-      """)
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 2,
-        "end_line" => 4,
-        "new_content" => "NEW LINE A\nNEW LINE B"
-      }
-
-      {:ok, result} = replace_lines_tool.function.(args, %{})
-
-      assert result =~ "File edited successfully"
-      assert result =~ "Replaced 3 lines (2-4)"
-
-      # Verify file content
-      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
-      lines = String.split(content, "\n", trim: true)
-      assert lines == ["Line 1", "NEW LINE A", "NEW LINE B", "Line 5"]
-    end
-
-    test "replaces with multi-line content", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/story.txt", """
-      Chapter 1
-      Old paragraph 1
-      Old paragraph 2
-      Chapter 2
-      """)
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      new_content = """
-      New paragraph 1
-      New paragraph 2
-      New paragraph 3
-      """
-
-      args = %{
-        "file_path" => "/story.txt",
-        "start_line" => 2,
-        "end_line" => 3,
-        "new_content" => String.trim(new_content)
-      }
-
-      {:ok, result} = replace_lines_tool.function.(args, %{})
-      assert result =~ "Replaced 2 lines"
-
-      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/story.txt")
-      assert content =~ "Chapter 1"
-      assert content =~ "New paragraph 1"
-      assert content =~ "New paragraph 2"
-      assert content =~ "New paragraph 3"
-      assert content =~ "Chapter 2"
-      refute content =~ "Old paragraph"
-    end
-  end
-
-  describe "replace_file_lines tool - boundary conditions" do
-    test "replaces first line only", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", """
-      Line 1
-      Line 2
-      Line 3
-      """)
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 1,
-        "end_line" => 1,
-        "new_content" => "REPLACED FIRST LINE"
-      }
-
-      {:ok, result} = replace_lines_tool.function.(args, %{})
-      assert result =~ "Replaced 1 lines (1-1)"
-
-      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
-      lines = String.split(content, "\n", trim: true)
-      assert lines == ["REPLACED FIRST LINE", "Line 2", "Line 3"]
-    end
-
-    test "replaces last line only", %{agent_id: agent_id} do
-      # Heredoc produces "Line 1\nLine 2\nLine 3\n" — 3 content lines plus a
-      # terminating newline. The file has 3 lines; the trailing \n is not a
-      # fourth line. Replacing line 3 with new content produces a file that
-      # still ends with \n.
-      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", """
-      Line 1
-      Line 2
-      Line 3
-      """)
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 3,
-        "end_line" => 3,
-        "new_content" => "REPLACED LAST LINE"
-      }
-
-      {:ok, result} = replace_lines_tool.function.(args, %{})
-      assert result =~ "Replaced 1 lines (3-3)"
-
-      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
-      assert content == "Line 1\nLine 2\nREPLACED LAST LINE\n"
-    end
-
-    test "errors when asked to replace a line beyond content length", %{agent_id: agent_id} do
-      # Regression: previously a 3-line file with trailing \n was treated as
-      # having 4 lines (phantom terminator). The tool silently allowed edits
-      # at line 4, producing off-by-one bugs when LLMs mis-counted.
-      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", """
-      Line 1
-      Line 2
-      Line 3
-      """)
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 4,
-        "end_line" => 4,
-        "new_content" => "past the end"
-      }
-
-      {:error, msg} = replace_lines_tool.function.(args, %{})
-      assert msg =~ "start_line 4 is beyond content length (3 lines)"
-    end
-
-    test "replaces entire file", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", """
-      Line 1
-      Line 2
-      Line 3
-      """)
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 1,
-        "end_line" => 3,
-        "new_content" => "Completely new content"
-      }
-
-      {:ok, result} = replace_lines_tool.function.(args, %{})
-      assert result =~ "Replaced 3 lines (1-3)"
-
-      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
-      # Trailing newline preserved since the original file had one.
-      assert content == "Completely new content\n"
-    end
-
-    test "returns a post-edit preview with line numbers and surrounding context", %{
-      agent_id: agent_id
-    } do
-      # Preview lets the model verify the edit landed correctly without a
-      # follow-up read_file. Should include lines around the affected range
-      # with post-edit line numbers.
-      FileSystemServer.write_file(
-        {:agent, agent_id},
-        "/test.txt",
-        "alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\n"
-      )
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 5,
-        "end_line" => 5,
-        "new_content" => "ECHO-REPLACED"
-      }
-
-      {:ok, result} = replace_lines_tool.function.(args, %{})
-
-      assert result =~ "Context after edit:"
-      # Edited line 5 + 2 context lines each side → expect lines 3..7.
-      assert result =~ "     3\tcharlie"
-      assert result =~ "     4\tdelta"
-      assert result =~ "     5\tECHO-REPLACED"
-      assert result =~ "     6\tfoxtrot"
-      assert result =~ "     7\tgolf"
-      # Lines outside the ±2 window should not appear.
-      refute result =~ "     2\tbravo"
-      refute result =~ "     8\thotel"
-    end
-
-    test "preview expands correctly when replacement adds lines", %{agent_id: agent_id} do
-      FileSystemServer.write_file(
-        {:agent, agent_id},
-        "/test.txt",
-        "a\nb\nc\nd\ne\n"
-      )
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      # Replace line 3 with 3 new lines — preview should show all 3 new
-      # lines plus ±2 context.
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 3,
-        "end_line" => 3,
-        "new_content" => "C1\nC2\nC3"
-      }
-
-      {:ok, result} = replace_lines_tool.function.(args, %{})
-
-      # The 3 inserted lines all appear with their post-edit numbers.
-      assert result =~ "     3\tC1"
-      assert result =~ "     4\tC2"
-      assert result =~ "     5\tC3"
-      # Context on each side (±2).
-      assert result =~ "     1\ta"
-      assert result =~ "     2\tb"
-      assert result =~ "     6\td"
-      assert result =~ "     7\te"
-    end
-
-    test "deletes the range when new_content is empty", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", """
-      Line 1
-      Line 2
-      Line 3
-      """)
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 2,
-        "end_line" => 2,
-        "new_content" => ""
-      }
-
-      {:ok, result} = replace_lines_tool.function.(args, %{})
-      assert result =~ "Replaced 1 lines"
-
-      {:ok, %{content: content}} = FileSystemServer.read_file({:agent, agent_id}, "/test.txt")
-      assert content == "Line 1\nLine 3\n"
-    end
-  end
-
-  describe "replace_file_lines tool - error cases" do
-    test "returns error for non-existent file", %{agent_id: agent_id} do
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/nonexistent.txt",
-        "start_line" => 1,
-        "end_line" => 2,
-        "new_content" => "content"
-      }
-
-      {:error, error_msg} = replace_lines_tool.function.(args, %{})
-      assert error_msg =~ "File not found"
-    end
-
-    test "returns error when start_line is less than 1", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "Line 1\nLine 2")
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 0,
-        "end_line" => 1,
-        "new_content" => "content"
-      }
-
-      {:error, error_msg} = replace_lines_tool.function.(args, %{})
-      assert error_msg =~ "start_line must be >= 1"
-    end
-
-    test "returns error when end_line is less than start_line", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "Line 1\nLine 2\nLine 3")
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 3,
-        "end_line" => 1,
-        "new_content" => "content"
-      }
-
-      {:error, error_msg} = replace_lines_tool.function.(args, %{})
-      assert error_msg =~ "end_line must be >= start_line"
-    end
-
-    test "returns error when start_line is beyond file length", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "Line 1\nLine 2")
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 10,
-        "end_line" => 15,
-        "new_content" => "content"
-      }
-
-      {:error, error_msg} = replace_lines_tool.function.(args, %{})
-      assert error_msg =~ "start_line 10 is beyond content length"
-    end
-
-    test "returns error when end_line is beyond file length", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/test.txt", "Line 1\nLine 2\nLine 3")
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 2,
-        "end_line" => 10,
-        "new_content" => "content"
-      }
-
-      {:error, error_msg} = replace_lines_tool.function.(args, %{})
-      assert error_msg =~ "end_line 10 is beyond content length"
-    end
-
-    test "returns error for invalid path", %{agent_id: agent_id} do
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "no-slash.txt",
-        "start_line" => 1,
-        "end_line" => 1,
-        "new_content" => "content"
-      }
-
-      {:error, error_msg} = replace_lines_tool.function.(args, %{})
-      assert error_msg =~ "Path must start with '/'"
-    end
-
-    test "returns error when file_path is missing", %{agent_id: agent_id} do
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "start_line" => 1,
-        "end_line" => 1,
-        "new_content" => "content"
-      }
-
-      {:error, error_msg} = replace_lines_tool.function.(args, %{})
-      assert error_msg =~ "file_path is required"
-    end
-
-    test "returns error when start_line is missing", %{agent_id: agent_id} do
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "end_line" => 1,
-        "new_content" => "content"
-      }
-
-      {:error, error_msg} = replace_lines_tool.function.(args, %{})
-      assert error_msg =~ "start_line and end_line are required"
-    end
-
-    test "returns error when new_content is missing", %{agent_id: agent_id} do
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      args = %{
-        "file_path" => "/test.txt",
-        "start_line" => 1,
-        "end_line" => 1
-      }
-
-      {:error, error_msg} = replace_lines_tool.function.(args, %{})
-      assert error_msg =~ "new_content is required"
-    end
-  end
-
-  describe "replace_file_lines tool - integration scenarios" do
-    test "read then replace_lines workflow", %{agent_id: agent_id} do
-      FileSystemServer.write_file({:agent, agent_id}, "/document.md", """
-      # Title
-
-      ## Section 1
-      Old content here.
-      More old content.
-
-      ## Section 2
-      Keep this section.
-      """)
-
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      tools = FileSystem.tools(config)
-
-      # First, read the file to see line numbers
-      read_tool = Enum.find(tools, fn tool -> tool.name == "read_file" end)
-      {:ok, read_result} = read_tool.function.(%{"file_path" => "/document.md"}, %{})
-
-      # Verify we can see the lines
-      assert read_result =~ "4\tOld content here."
-      assert read_result =~ "5\tMore old content."
-
-      # Now use replace_lines to replace lines 4-5
-      replace_lines_tool = Enum.find(tools, fn tool -> tool.name == "replace_file_lines" end)
-
-      args = %{
-        "file_path" => "/document.md",
-        "start_line" => 4,
-        "end_line" => 5,
-        "new_content" => "Brand new content.\nCompletely rewritten."
-      }
-
-      {:ok, edit_result} = replace_lines_tool.function.(args, %{})
-      assert edit_result =~ "Replaced 2 lines"
-
-      # Read again to verify
-      {:ok, final_result} = read_tool.function.(%{"file_path" => "/document.md"}, %{})
-      assert final_result =~ "Brand new content."
-      assert final_result =~ "Completely rewritten."
-      refute final_result =~ "Old content here."
-    end
-
-    test "replace_file_lines can be disabled via config", %{agent_id: agent_id} do
-      {:ok, config} =
-        FileSystem.init(
-          filesystem_scope: {:agent, agent_id},
-          enabled_tools: ["list_files", "read_file", "create_file"]
-        )
-
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-      assert replace_lines_tool == nil
-    end
-
-    test "replace_file_lines tool has correct schema", %{agent_id: agent_id} do
-      {:ok, config} = FileSystem.init(agent_id: agent_id)
-      replace_lines_tool = config |> FileSystem.tools() |> get_replace_lines_tool()
-
-      assert replace_lines_tool.name == "replace_file_lines"
-      assert is_binary(replace_lines_tool.description)
-
-      # Verify parameters schema
-      schema = replace_lines_tool.parameters_schema
-      assert schema.type == "object"
-      assert "file_path" in schema.required
-      assert "start_line" in schema.required
-      assert "end_line" in schema.required
-      assert "new_content" in schema.required
-
-      properties = schema.properties
-      assert Map.has_key?(properties, :file_path)
-      assert Map.has_key?(properties, :start_line)
-      assert Map.has_key?(properties, :end_line)
-      assert Map.has_key?(properties, :new_content)
     end
   end
 end
