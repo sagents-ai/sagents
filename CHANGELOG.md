@@ -13,10 +13,10 @@ If your project's agents rely on `replace_file_lines` (e.g. it appears in your `
 1. Drop it — `replace_file_text` covers the same use cases for most agents.
 2. Re-add it as a project-local tool. The previous implementation lives in the PR [#110](https://github.com/sagents-ai/sagents/pull/110) diff and can be lifted into your own middleware or `Function`.
 
-If your config passes `tools:` or `tool_descriptions:` to `Sagents.Middleware.FileSystem` and includes `"replace_file_lines"`, remove that entry — leaving it in will raise on startup because the tool name is no longer recognized.
+If your config passes `tools:` or `tool_descriptions:` to `Sagents.Middleware.FileSystem` and includes `"replace_file_lines"`, remove that entry.
 
 ### Added
-- `Sagents.Extract` — single-shot structured extraction that flows through the agent's middleware stack. [#108](https://github.com/sagents-ai/sagents/pull/108)
+- `Sagents.Extract` — structured extraction that flows through the agent's middleware stack. [#108](https://github.com/sagents-ai/sagents/pull/108)
 - `Sagents.AgentResult` — read helpers for pulling tool results, arguments, processed content, or final text out of `Agent.execute/3` return values. [#107](https://github.com/sagents-ai/sagents/pull/107)
 - `Sagents.FileSystemServer.get_state/1` introspection helper. [#109](https://github.com/sagents-ai/sagents/pull/109)
 - `sobelow` and `mix_audit` wired into `mix precommit`. [#106](https://github.com/sagents-ai/sagents/pull/106)
