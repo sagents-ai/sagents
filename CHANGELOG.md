@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.8.0-rc.7
+
+**Breaking change** in PR [#110](https://github.com/sagents-ai/sagents/pull/110) — the `replace_file_lines` tool is removed from `Sagents.Middleware.FileSystem`. See the v0.8.0-rc.5 entry below for upgrading from `v0.8.0-rc.4`, and the v0.8.0-rc.1 entry for upgrading from `v0.7.0`.
+
+Headline: structured data extraction through the full agent middleware stack via the new `Sagents.Extract` module, with `Sagents.AgentResult` as the supporting reader for `Agent.execute/3` return shapes.
+
+### Upgrading from v0.8.0-rc.6 to v0.8.0-rc.7
+
+If your project's agents rely on `replace_file_lines` (e.g. it appears in your `FileSystem` middleware config, prompts, or evals), you have two options:
+
+1. Drop it — `replace_file_text` covers the same use cases for most agents.
+2. Re-add it as a project-local tool. The previous implementation lives in the PR [#110](https://github.com/sagents-ai/sagents/pull/110) diff and can be lifted into your own middleware or `Function`.
+
+If your config passes `tools:` or `tool_descriptions:` to `Sagents.Middleware.FileSystem` and includes `"replace_file_lines"`, remove that entry — leaving it in will raise on startup because the tool name is no longer recognized.
+
+### Added
+- `Sagents.Extract` — single-shot structured extraction that flows through the agent's middleware stack. [#108](https://github.com/sagents-ai/sagents/pull/108)
+- `Sagents.AgentResult` — read helpers for pulling tool results, arguments, processed content, or final text out of `Agent.execute/3` return values. [#107](https://github.com/sagents-ai/sagents/pull/107)
+- `Sagents.FileSystemServer.get_state/1` introspection helper. [#109](https://github.com/sagents-ai/sagents/pull/109)
+- `sobelow` and `mix_audit` wired into `mix precommit`. [#106](https://github.com/sagents-ai/sagents/pull/106)
+
+### Changed
+- Trimmed the default `FileSystem` middleware tool set: `replace_file_lines` (and the `TextLines.replace_range/4` helper) removed in favor of letting projects add specialized editors as needed. [#110](https://github.com/sagents-ai/sagents/pull/110)
+- Bumped `langchain` floor to `>= 0.8.11` and updated lock past the vulnerable `decimal` version. [#106](https://github.com/sagents-ai/sagents/pull/106)
+
+### Fixed
+- Flaky CI test `"subscriber crash auto-cleans subscription"`. [#109](https://github.com/sagents-ai/sagents/pull/109)
+
 ## v0.8.0-rc.6
 
 No breaking changes from `v0.8.0-rc.5`. See the v0.8.0-rc.5 entry below for upgrading from `v0.8.0-rc.4`, and the v0.8.0-rc.1 entry for upgrading from `v0.7.0`.
