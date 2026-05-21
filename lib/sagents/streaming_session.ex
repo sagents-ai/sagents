@@ -18,10 +18,14 @@ defmodule Sagents.StreamingSession do
       delta.
 
     * **Tool execution update** — fired as a tool moves through
-      `:executing → :completed | :failed`. Updates the call's execution
-      status metadata. The `:streaming_delta` is only cleared once every
-      tool call in the delta has reached a terminal status, so sibling
-      calls still in flight keep their UI state.
+      `:executing → :completed | :failed`, or pauses on `:interrupted`
+      (e.g. `ask_user` or a human-in-the-loop approval). Updates the
+      call's execution status metadata. The `:streaming_delta` is only
+      cleared once every tool call in the delta has reached a terminal
+      status (`"completed"` or `"failed"`); `:interrupted` is *not*
+      terminal — the call is paused, not finished — so sibling calls
+      still in flight (and the interrupted call itself) keep their UI
+      state.
 
   Both functions return an empty map (`%{}`) when the event has no
   `:call_id`, leaving the host's state untouched.
@@ -44,7 +48,7 @@ defmodule Sagents.StreamingSession do
           optional(:display_text) => String.t() | nil
         }
 
-  @type lifecycle_status :: :executing | :completed | :failed
+  @type lifecycle_status :: :executing | :completed | :failed | :interrupted
 
   @doc """
   Apply a "tool call identified" event to the session state. Returns a
@@ -97,14 +101,17 @@ defmodule Sagents.StreamingSession do
 
     * If there is no `:streaming_delta` to update, returns `%{}`.
     * Updates the matching call's `"execution_status"` metadata
-      (`"executing"`, `"completed"`, or `"failed"`).
-    * On `:executing`, also forwards `tool_info[:display_text]` so callers
-      can refine the UI label as the tool collects more context. Nil
+      (`"executing"`, `"completed"`, `"failed"`, or `"interrupted"`).
+    * On `:executing` or `:interrupted`, also forwards
+      `tool_info[:display_text]` so callers can refine the UI label as
+      the tool collects more context (or surface the paused state). Nil
       `display_text` is a no-op, preserving any prior value.
     * Once every tool call in the delta has reached a terminal status
       (`"completed"` or `"failed"`), returns `%{streaming_delta: nil}` to
-      clear the streaming UI. Until then the delta stays so sibling tool
-      calls still in flight keep their UI state.
+      clear the streaming UI. `:interrupted` is treated as paused, not
+      terminal, so the delta stays in place until the call resumes and
+      eventually completes or fails. Until then the delta also stays so
+      sibling tool calls still in flight keep their UI state.
     * If `tool_info[:call_id]` is nil, returns `%{}`.
   """
   @spec handle_tool_execution_update(map(), lifecycle_status(), tool_info()) :: map()
@@ -115,7 +122,7 @@ defmodule Sagents.StreamingSession do
       do: %{}
 
   def handle_tool_execution_update(state, status, tool_info)
-      when status in [:executing, :completed, :failed] do
+      when status in [:executing, :completed, :failed, :interrupted] do
     case Map.get(state, :streaming_delta) do
       nil ->
         %{}
@@ -137,12 +144,14 @@ defmodule Sagents.StreamingSession do
     end
   end
 
-  defp maybe_set_display_text(delta, :executing, call_id, display_text),
-    do: MessageDelta.set_tool_display_text(delta, call_id, display_text)
+  defp maybe_set_display_text(delta, status, call_id, display_text)
+       when status in [:executing, :interrupted],
+       do: MessageDelta.set_tool_display_text(delta, call_id, display_text)
 
   defp maybe_set_display_text(delta, _other, _call_id, _display_text), do: delta
 
   defp lifecycle_status_string(:executing), do: "executing"
   defp lifecycle_status_string(:completed), do: "completed"
   defp lifecycle_status_string(:failed), do: "failed"
+  defp lifecycle_status_string(:interrupted), do: "interrupted"
 end

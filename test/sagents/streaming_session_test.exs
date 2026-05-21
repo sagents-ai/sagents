@@ -159,5 +159,84 @@ defmodule Sagents.StreamingSessionTest do
                  %{name: "read_file"}
                )
     end
+
+    test "writes execution_status interrupted and forwards display_text without clearing delta" do
+      delta = %MessageDelta{
+        role: :assistant,
+        tool_calls: [
+          %ToolCall{
+            call_id: "abc",
+            name: "ask_user",
+            metadata: %{"execution_status" => "executing"}
+          }
+        ]
+      }
+
+      assert %{streaming_delta: %MessageDelta{tool_calls: [tc]} = updated} =
+               StreamingSession.handle_tool_execution_update(
+                 %{streaming_delta: delta},
+                 :interrupted,
+                 %{call_id: "abc", name: "ask_user", display_text: "Waiting for user"}
+               )
+
+      assert tc.metadata["execution_status"] == "interrupted"
+      assert tc.display_text == "Waiting for user"
+      # interrupted is paused, not terminal — the delta is preserved
+      refute MessageDelta.all_tools_terminal?(updated)
+    end
+
+    test "preserves an in-flight sibling when one call is interrupted" do
+      delta = %MessageDelta{
+        role: :assistant,
+        tool_calls: [
+          %ToolCall{call_id: "a", metadata: %{"execution_status" => "executing"}},
+          %ToolCall{call_id: "b", metadata: %{"execution_status" => "executing"}}
+        ]
+      }
+
+      assert %{streaming_delta: %MessageDelta{tool_calls: [a, b]}} =
+               StreamingSession.handle_tool_execution_update(
+                 %{streaming_delta: delta},
+                 :interrupted,
+                 %{call_id: "a", name: "ask_user"}
+               )
+
+      assert a.metadata["execution_status"] == "interrupted"
+      assert b.metadata["execution_status"] == "executing"
+    end
+
+    test "does not clear delta even when the only tool call is interrupted" do
+      delta = %MessageDelta{
+        role: :assistant,
+        tool_calls: [
+          %ToolCall{call_id: "abc", metadata: %{"execution_status" => "executing"}}
+        ]
+      }
+
+      assert %{streaming_delta: %MessageDelta{tool_calls: [tc]}} =
+               StreamingSession.handle_tool_execution_update(
+                 %{streaming_delta: delta},
+                 :interrupted,
+                 %{call_id: "abc", name: "ask_user"}
+               )
+
+      assert tc.metadata["execution_status"] == "interrupted"
+    end
+
+    test "refines display_text on :interrupted without clobbering an existing value when new is nil" do
+      delta = %MessageDelta{
+        role: :assistant,
+        tool_calls: [%ToolCall{call_id: "abc", display_text: "Waiting"}]
+      }
+
+      assert %{streaming_delta: %MessageDelta{tool_calls: [tc]}} =
+               StreamingSession.handle_tool_execution_update(
+                 %{streaming_delta: delta},
+                 :interrupted,
+                 %{call_id: "abc", display_text: nil}
+               )
+
+      assert tc.display_text == "Waiting"
+    end
   end
 end
