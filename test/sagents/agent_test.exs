@@ -290,6 +290,27 @@ defmodule Sagents.AgentTest do
       assert message =~ "find_in_file"
     end
 
+    test "Agent.new logs middleware init failures so hosts see the cause without inspecting the changeset" do
+      log =
+        capture_log(fn ->
+          {:error, _changeset} =
+            Agent.new(
+              %{
+                model: mock_model(),
+                middleware: [
+                  {Sagents.Middleware.FileSystem,
+                   [agent_id: "test", enabled_tools: ["bogus_tool_name"]]}
+                ]
+              },
+              replace_default_middleware: true
+            )
+        end)
+
+      assert log =~ "Middleware initialization failed"
+      assert log =~ "Sagents.Middleware.FileSystem"
+      assert log =~ "bogus_tool_name"
+    end
+
     test "Agent.new! raises with a useful message when a middleware init/1 fails" do
       assert_raise LangChainError, ~r/bogus_tool_name/, fn ->
         Agent.new!(
