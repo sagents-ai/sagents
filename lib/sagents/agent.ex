@@ -293,6 +293,7 @@ defmodule Sagents.Agent do
         put_change(changeset, :middleware, initialized)
 
       {:error, reason} ->
+        Logger.error("Middleware initialization failed: #{reason}")
         add_error(changeset, :middleware, "initialization failed: #{inspect(reason)}")
     end
   end
