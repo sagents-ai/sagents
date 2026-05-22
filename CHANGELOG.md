@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.8.0-rc.8
+
+No breaking changes from `v0.8.0-rc.7`. See the v0.8.0-rc.5 entry below for upgrading from `v0.8.0-rc.4`, and the `v0.8.0-rc.1` entry for upgrading from `v0.7.0`.
+
+This RC fixes a `FunctionClauseError` in `Sagents.StreamingSession` when a tool call pauses for human input, and surfaces middleware-initialization failures through an explicit error log.
+
+### Changed
+- `Sagents.Agent.new/2` now emits `Logger.error/1` when a middleware's `init/1` returns `{:error, reason}`, alongside the existing changeset error. The changeset error contract is unchanged, so host apps keep their current behavior, but those that don't introspect the changeset (or that wrap `Agent.new/2` behind layers that swallow the result) now get a grep-able signal that middleware init failed and why. [#113](https://github.com/sagents-ai/sagents/pull/113)
+
+### Fixed
+- `Sagents.StreamingSession.handle_tool_execution_update/3` now recognizes `:interrupted` as a first-class lifecycle status (paused, not terminal). Previously, when the LLM emitted a tool that pauses for input (e.g. `ask_user` or a HITL-gated sub-agent tool), `Sagents.AgentServer` broadcast `{:tool_execution_update, :interrupted, …}` and any host forwarding it into `StreamingSession` crashed with `FunctionClauseError`. The interrupted call now writes `"interrupted"` into `execution_status`, forwards `tool_info[:display_text]` (so callers can render labels like "Waiting for user"), and preserves `:streaming_delta` so the interrupted call and its siblings keep their UI state until the call resumes and reaches a terminal status. The `@type lifecycle_status` union and moduledoc were extended accordingly. [#112](https://github.com/sagents-ai/sagents/pull/112)
+
 ## v0.8.0-rc.7
 
 **Breaking change** in PR [#110](https://github.com/sagents-ai/sagents/pull/110) — the `replace_file_lines` tool is removed from `Sagents.Middleware.FileSystem`. See the v0.8.0-rc.5 entry below for upgrading from `v0.8.0-rc.4`, and the v0.8.0-rc.1 entry for upgrading from `v0.7.0`.
