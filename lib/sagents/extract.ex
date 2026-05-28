@@ -56,13 +56,13 @@ defmodule Sagents.Extract do
       callback processes them).
     * `{:error, term()}` — A `LangChainError` if the LLM never successfully
       called the submit tool within `max_runs`, if a same-named tool already
-      exists on the agent, or anything else that `Agent.execute/3` would surface.
+      exists on the agent, or anything else that `Sagents.Agent.execute/3` would surface.
 
   ## Provider-side `tool_choice`
 
   Anthropic and OpenAI both let you require the model to call a specific tool
   via `tool_choice`. Setting this on your `ChatAnthropic` / `ChatOpenAI` model
-  before passing it to `Agent.new/2` materially improves single-call
+  before passing it to `Sagents.Agent.new/2` materially improves single-call
   reliability. **The name in `tool_choice` must match the submit tool's name**
   — which is whatever you pass as `:tool_name` (or `"submit_result"` if you
   don't). Mismatched names still work — `until_tool` catches whichever tool
