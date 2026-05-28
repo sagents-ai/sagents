@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.8.0-rc.9
+
+**Breaking change** in PR [#116](https://github.com/sagents-ai/sagents/pull/116) — `Sagents.Todo` IDs are now integers instead of strings. See the upgrading section below, and the v0.8.0-rc.5 entry for upgrading from `v0.8.0-rc.4`, and the `v0.8.0-rc.1` entry for upgrading from `v0.7.0`.
+
+Headline: a new terminal `:halt` interrupt type via `Sagents.Middleware.Haltable` lets tools hard-stop an agent workflow instead of pausing for a response, and `Sagents.Todo` IDs become integers to fix lexicographic sort ordering on long Todo lists.
+
+### Upgrading from v0.8.0-rc.8 to v0.8.0-rc.9
+
+This is a breaking change for any host app that has already generated the persistence scaffolding via `mix sagents.gen.persistence`. The template change only affects new generations; existing generated modules will reject every `todo_snapshot` insert with `"todo_snapshot has invalid todo entries"` until patched.
+
+In your generated `DisplayMessage` schema module (e.g. `MyApp.Conversations.DisplayMessage`), update the `valid_todo_entry?/1` clause:
+
+```elixir
+# Before
+defp valid_todo_entry?(%{"id" => id, "content" => content, "status" => status})
+     when is_binary(id) and is_binary(content) and is_binary(status) do
+  status in @todo_statuses
+end
+
+# After
+defp valid_todo_entry?(%{"id" => id, "content" => content, "status" => status})
+     when is_integer(id) and is_binary(content) and is_binary(status) do
+  status in @todo_statuses
+end
+```
+
+**CHANGE:** Change the guard clause from `is_binary(id)` to `is_integer(id)`.
+
+Host-app callers of `Sagents.Todo.new/1`, `State.get_todo/2`, or `State.delete_todo/2` that pass string ids will also need to switch to integers. Code that builds todos from incoming maps should migrate to `Todo.list_from_maps/1`, which handles missing/non-numeric ids via positional defaults (1..N) and coerces stringified integers (`"5"`) for JSON tool-call payloads. Persisted snapshots with legacy base64 string ids rehydrate cleanly via the updated `StateSerializer` — those ids are replaced with positional defaults on load rather than failing the changeset.
+
+### Added
+- `:halt` as a first-class terminal interrupt type, owned by the new `Sagents.Middleware.Haltable`. Tools can hard-stop a workflow (e.g. a gating validation tool) without giving the LLM a chance to plow ahead. The halt is dead on emit (no resume payload, no LLM re-invocation), its `:message` persists as a synthetic assistant transcript entry, and the user's next free-text message demotes it via `State.cancel_pending_interrupts/1`. A new `AgentServer.dismiss_interrupt/1` lets UIs acknowledge the halt without sending a message. A `[:sagents, :agent, :halt]` telemetry event fires on emit. "Halt wins" is enforced inside `:multiple_interrupts` wrappers at restore, render, and demotion time. Cold-start re-surface re-emits the interrupt without double-persisting the transcript. [#115](https://github.com/sagents-ai/sagents/pull/115)
+- `Sagents.Todo.list_from_maps/1` as the canonical ingest point for any list of incoming todo data (tool calls, persisted state, rehydrate). Assigns positional id defaults for missing/non-numeric ids, coerces numeric-string ids, and preserves valid integer ids. [#116](https://github.com/sagents-ai/sagents/pull/116)
+
+### Changed
+- `Sagents.Todo.id` is now an `:integer` field instead of `:string`. Long todo lists (10+ items) used to sort incorrectly because `"10"` sorted before `"2"`. `Todo.new/1` now requires a positive integer id and validates `greater_than: 0`. `State.get_todo/2` and `State.delete_todo/2` switch their guards from `is_binary` to `is_integer`. The `write_todos` tool schema declares `id` as `integer`, and inline-mode `todo_snapshot` content emits integer ids. The `mix sagents.gen.persistence` template's `valid_todo_entry?/1` guard is updated in lockstep. [#116](https://github.com/sagents-ai/sagents/pull/116)
+- `StateSerializer.deserialize/1` routes the `todos` array through `Todo.list_from_maps/1` so legacy snapshots with random base64 string ids rehydrate with positional ids instead of crashing the changeset. In-list order is preserved; original legacy identity is lost. [#116](https://github.com/sagents-ai/sagents/pull/116)
+- `Sagents.Middleware` documents the full interrupt-data catalog (`:ask_user_question`, `:halt`, `:subagent_hitl`, HITL action-request map, `:multiple_interrupts`) and the halt-wins policy. The generated `agent_subscriber_session.ex.eex` template adds `pending_halt: nil` to subscriber session assigns so new projects get the field for free. [#115](https://github.com/sagents-ai/sagents/pull/115)
+
 ## v0.8.0-rc.8
 
 No breaking changes from `v0.8.0-rc.7`. See the v0.8.0-rc.5 entry below for upgrading from `v0.8.0-rc.4`, and the `v0.8.0-rc.1` entry for upgrading from `v0.7.0`.
