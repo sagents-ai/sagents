@@ -20,7 +20,7 @@ defmodule Sagents.AgentServerPersistenceTest do
       msg1 = Message.new_user!("Hello")
       msg2 = Message.new_assistant!(%{content: "Hi there"})
 
-      {:ok, todo} = Todo.new(%{content: "Task 1", status: :in_progress})
+      {:ok, todo} = Todo.new(%{id: 1, content: "Task 1", status: :in_progress})
 
       state =
         State.new!(%{
@@ -286,9 +286,9 @@ defmodule Sagents.AgentServerPersistenceTest do
       msg1 = Message.new_user!("User message")
       msg2 = Message.new_assistant!(%{content: "Assistant response"})
 
-      {:ok, todo1} = Todo.new(%{content: "Task 1", status: :in_progress})
+      {:ok, todo1} = Todo.new(%{id: 1, content: "Task 1", status: :in_progress})
 
-      {:ok, todo2} = Todo.new(%{content: "Task 2", status: :completed})
+      {:ok, todo2} = Todo.new(%{id: 2, content: "Task 2", status: :completed})
 
       original_state =
         State.new!(%{
@@ -417,7 +417,7 @@ defmodule Sagents.AgentServerPersistenceTest do
       msg1 = Message.new_user!("Hello from original")
       msg2 = Message.new_assistant!(%{content: "Response from original"})
 
-      {:ok, todo} = Todo.new(%{content: "Original task", status: :in_progress})
+      {:ok, todo} = Todo.new(%{id: 1, content: "Original task", status: :in_progress})
 
       state =
         State.new!(%{

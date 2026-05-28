@@ -174,21 +174,21 @@ defmodule Sagents.StateTest do
       alias Sagents.Todo
 
       state = State.new!()
-      todo = Todo.new!(%{id: "1", content: "Task", status: :pending})
+      todo = Todo.new!(%{id: 1, content: "Task", status: :pending})
 
       updated = State.put_todo(state, todo)
 
       assert length(updated.todos) == 1
-      assert hd(updated.todos).id == "1"
+      assert hd(updated.todos).id == 1
     end
 
     test "replaces existing todo with same ID" do
       alias Sagents.Todo
 
-      todo1 = Todo.new!(%{id: "1", content: "Original", status: :pending})
+      todo1 = Todo.new!(%{id: 1, content: "Original", status: :pending})
       state = State.new!(%{todos: [todo1]})
 
-      todo2 = Todo.new!(%{id: "1", content: "Updated", status: :completed})
+      todo2 = Todo.new!(%{id: 1, content: "Updated", status: :completed})
       updated = State.put_todo(state, todo2)
 
       assert length(updated.todos) == 1
@@ -200,9 +200,9 @@ defmodule Sagents.StateTest do
       alias Sagents.Todo
 
       state = State.new!()
-      todo_c = Todo.new!(%{id: "c", content: "C"})
-      todo_a = Todo.new!(%{id: "a", content: "A"})
-      todo_b = Todo.new!(%{id: "b", content: "B"})
+      todo_c = Todo.new!(%{id: 3, content: "C"})
+      todo_a = Todo.new!(%{id: 1, content: "A"})
+      todo_b = Todo.new!(%{id: 2, content: "B"})
 
       updated =
         state
@@ -212,26 +212,26 @@ defmodule Sagents.StateTest do
 
       ids = Enum.map(updated.todos, & &1.id)
       # Insertion order is preserved, not sorted by ID
-      assert ids == ["c", "a", "b"]
+      assert ids == [3, 1, 2]
     end
 
     test "updating a todo maintains its position in the list" do
       alias Sagents.Todo
 
       # Create initial list of todos
-      todo1 = Todo.new!(%{id: "1", content: "First", status: :pending})
-      todo2 = Todo.new!(%{id: "2", content: "Second", status: :pending})
-      todo3 = Todo.new!(%{id: "3", content: "Third", status: :pending})
+      todo1 = Todo.new!(%{id: 1, content: "First", status: :pending})
+      todo2 = Todo.new!(%{id: 2, content: "Second", status: :pending})
+      todo3 = Todo.new!(%{id: 3, content: "Third", status: :pending})
 
       state = State.new!(%{todos: [todo1, todo2, todo3]})
 
       # Update the middle todo
-      updated_todo2 = Todo.new!(%{id: "2", content: "Second Updated", status: :completed})
+      updated_todo2 = Todo.new!(%{id: 2, content: "Second Updated", status: :completed})
       updated_state = State.put_todo(state, updated_todo2)
 
       # Check order is maintained
       ids = Enum.map(updated_state.todos, & &1.id)
-      assert ids == ["1", "2", "3"], "Order should be preserved when updating"
+      assert ids == [1, 2, 3], "Order should be preserved when updating"
 
       # Check the content was updated
       second = Enum.at(updated_state.todos, 1)
@@ -239,11 +239,11 @@ defmodule Sagents.StateTest do
       assert second.status == :completed
 
       # Update the first todo
-      updated_todo1 = Todo.new!(%{id: "1", content: "First Updated", status: :in_progress})
+      updated_todo1 = Todo.new!(%{id: 1, content: "First Updated", status: :in_progress})
       updated_state2 = State.put_todo(updated_state, updated_todo1)
 
       ids2 = Enum.map(updated_state2.todos, & &1.id)
-      assert ids2 == ["1", "2", "3"], "Order should still be preserved"
+      assert ids2 == [1, 2, 3], "Order should still be preserved"
 
       first = Enum.at(updated_state2.todos, 0)
       assert first.content == "First Updated"
@@ -255,17 +255,17 @@ defmodule Sagents.StateTest do
     test "retrieves todo by ID" do
       alias Sagents.Todo
 
-      todo = Todo.new!(%{id: "test", content: "Task"})
+      todo = Todo.new!(%{id: 42, content: "Task"})
       state = State.new!(%{todos: [todo]})
 
-      retrieved = State.get_todo(state, "test")
-      assert retrieved.id == "test"
+      retrieved = State.get_todo(state, 42)
+      assert retrieved.id == 42
       assert retrieved.content == "Task"
     end
 
     test "returns nil for non-existent ID" do
       state = State.new!()
-      assert State.get_todo(state, "missing") == nil
+      assert State.get_todo(state, 999) == nil
     end
   end
 
@@ -273,23 +273,23 @@ defmodule Sagents.StateTest do
     test "removes todo by ID" do
       alias Sagents.Todo
 
-      todo1 = Todo.new!(%{id: "1", content: "Keep"})
-      todo2 = Todo.new!(%{id: "2", content: "Remove"})
+      todo1 = Todo.new!(%{id: 1, content: "Keep"})
+      todo2 = Todo.new!(%{id: 2, content: "Remove"})
       state = State.new!(%{todos: [todo1, todo2]})
 
-      updated = State.delete_todo(state, "2")
+      updated = State.delete_todo(state, 2)
 
       assert length(updated.todos) == 1
-      assert hd(updated.todos).id == "1"
+      assert hd(updated.todos).id == 1
     end
 
     test "handles deleting non-existent todo" do
       alias Sagents.Todo
 
-      todo = Todo.new!(%{id: "1", content: "Task"})
+      todo = Todo.new!(%{id: 1, content: "Task"})
       state = State.new!(%{todos: [todo]})
 
-      updated = State.delete_todo(state, "missing")
+      updated = State.delete_todo(state, 999)
 
       assert length(updated.todos) == 1
     end
@@ -299,9 +299,9 @@ defmodule Sagents.StateTest do
     test "filters todos by status" do
       alias Sagents.Todo
 
-      todo1 = Todo.new!(%{id: "1", content: "Task 1", status: :pending})
-      todo2 = Todo.new!(%{id: "2", content: "Task 2", status: :completed})
-      todo3 = Todo.new!(%{id: "3", content: "Task 3", status: :pending})
+      todo1 = Todo.new!(%{id: 1, content: "Task 1", status: :pending})
+      todo2 = Todo.new!(%{id: 2, content: "Task 2", status: :completed})
+      todo3 = Todo.new!(%{id: 3, content: "Task 3", status: :pending})
 
       state = State.new!(%{todos: [todo1, todo2, todo3]})
 
@@ -317,7 +317,7 @@ defmodule Sagents.StateTest do
     test "returns empty list when no matches" do
       alias Sagents.Todo
 
-      todo = Todo.new!(%{id: "1", content: "Task", status: :pending})
+      todo = Todo.new!(%{id: 1, content: "Task", status: :pending})
       state = State.new!(%{todos: [todo]})
 
       completed = State.get_todos_by_status(state, :completed)
@@ -329,27 +329,27 @@ defmodule Sagents.StateTest do
     test "replaces all todos" do
       alias Sagents.Todo
 
-      old_todo = Todo.new!(%{id: "old", content: "Old"})
+      old_todo = Todo.new!(%{id: 99, content: "Old"})
       state = State.new!(%{todos: [old_todo]})
 
       new_todos = [
-        Todo.new!(%{id: "new1", content: "New 1"}),
-        Todo.new!(%{id: "new2", content: "New 2"})
+        Todo.new!(%{id: 1, content: "New 1"}),
+        Todo.new!(%{id: 2, content: "New 2"})
       ]
 
       updated = State.set_todos(state, new_todos)
 
       assert length(updated.todos) == 2
       ids = Enum.map(updated.todos, & &1.id)
-      assert "new1" in ids
-      assert "new2" in ids
-      refute "old" in ids
+      assert 1 in ids
+      assert 2 in ids
+      refute 99 in ids
     end
 
     test "can set empty list" do
       alias Sagents.Todo
 
-      todo = Todo.new!(%{id: "1", content: "Task"})
+      todo = Todo.new!(%{id: 1, content: "Task"})
       state = State.new!(%{todos: [todo]})
 
       updated = State.set_todos(state, [])
