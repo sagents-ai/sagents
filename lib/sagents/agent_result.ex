@@ -3,7 +3,7 @@ defmodule Sagents.AgentResult do
   Helpers for reading structured results out of an `Sagents.Agent.execute/3`
   return value.
 
-  `Agent.execute/3` can return any of:
+  `Sagents.Agent.execute/3` can return any of:
 
     * `{:ok, %State{}}` — normal completion. Last message may be assistant prose
       or an assistant tool call followed by tool results.
@@ -51,7 +51,7 @@ defmodule Sagents.AgentResult do
   alias LangChain.Message.ToolResult
   alias Sagents.State
 
-  @typedoc "Anything `Agent.execute/3` can return, or a bare State."
+  @typedoc "Anything `Sagents.Agent.execute/3` can return, or a bare State."
   @type execute_return ::
           State.t()
           | {:ok, State.t()}

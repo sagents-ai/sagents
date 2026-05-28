@@ -69,8 +69,8 @@ defmodule Sagents.Middleware.Haltable do
     (or `:source` if the emitter is not a tool)
 
   The framework also fills in `:tool_call_id` when the halt comes from
-  inside a tool execution (set by LangChain's
-  `Function.normalize_execution_result/2`).
+  inside a tool execution (set by LangChain when it normalizes the tool
+  function's return value).
 
   ## Adoption
 
