@@ -136,10 +136,8 @@ defmodule Sagents.Persistence.StateSerializer do
     todos =
       case data["todos"] do
         todos when is_list(todos) ->
-          Enum.map(todos, fn todo_map ->
-            {:ok, todo} = Todo.from_map(todo_map)
-            todo
-          end)
+          {:ok, parsed} = Todo.list_from_maps(todos)
+          parsed
 
         _other ->
           []

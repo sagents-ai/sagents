@@ -395,7 +395,7 @@ defmodule Sagents.State do
   @doc """
   Get a TODO by ID.
   """
-  def get_todo(%State{} = state, todo_id) when is_binary(todo_id) do
+  def get_todo(%State{} = state, todo_id) when is_integer(todo_id) do
     Enum.find(state.todos, fn
       %{id: ^todo_id} -> true
       _other -> false
@@ -405,7 +405,7 @@ defmodule Sagents.State do
   @doc """
   Remove a TODO by ID.
   """
-  def delete_todo(%State{} = state, todo_id) when is_binary(todo_id) do
+  def delete_todo(%State{} = state, todo_id) when is_integer(todo_id) do
     updated_todos =
       Enum.reject(state.todos, fn
         %{id: ^todo_id} -> true

@@ -38,12 +38,12 @@ defmodule Sagents.IntegrationTest do
                        "merge" => false,
                        "todos" => [
                          %{
-                           "id" => "task_1",
+                           "id" => 1,
                            "content" => "Write integration test",
                            "status" => "completed"
                          },
                          %{
-                           "id" => "task_2",
+                           "id" => 2,
                            "content" => "Verify state updates",
                            "status" => "in_progress"
                          }
@@ -82,8 +82,8 @@ defmodule Sagents.IntegrationTest do
       assert length(final_state.todos) == 2
 
       # Find the todos
-      task_1 = Enum.find(final_state.todos, &(&1.id == "task_1"))
-      task_2 = Enum.find(final_state.todos, &(&1.id == "task_2"))
+      task_1 = Enum.find(final_state.todos, &(&1.id == 1))
+      task_2 = Enum.find(final_state.todos, &(&1.id == 2))
 
       assert task_1.content == "Write integration test"
       assert task_1.status == :completed
@@ -369,12 +369,12 @@ defmodule Sagents.IntegrationTest do
                      arguments: %{
                        "merge" => false,
                        "todos" => [
-                         %{"id" => "1", "content" => "Task 1", "status" => "in_progress"},
-                         %{"id" => "2", "content" => "Task 2", "status" => "pending"},
-                         %{"id" => "3", "content" => "Task 3", "status" => "pending"},
-                         %{"id" => "4", "content" => "Task 4", "status" => "pending"},
-                         %{"id" => "5", "content" => "Task 5", "status" => "pending"},
-                         %{"id" => "6", "content" => "Task 6", "status" => "pending"}
+                         %{"id" => 1, "content" => "Task 1", "status" => "in_progress"},
+                         %{"id" => 2, "content" => "Task 2", "status" => "pending"},
+                         %{"id" => 3, "content" => "Task 3", "status" => "pending"},
+                         %{"id" => 4, "content" => "Task 4", "status" => "pending"},
+                         %{"id" => 5, "content" => "Task 5", "status" => "pending"},
+                         %{"id" => 6, "content" => "Task 6", "status" => "pending"}
                        ]
                      }
                    })
@@ -394,8 +394,8 @@ defmodule Sagents.IntegrationTest do
                      arguments: %{
                        "merge" => true,
                        "todos" => [
-                         %{"id" => "1", "content" => "Task 1", "status" => "completed"},
-                         %{"id" => "2", "content" => "Task 2", "status" => "in_progress"}
+                         %{"id" => 1, "content" => "Task 1", "status" => "completed"},
+                         %{"id" => 2, "content" => "Task 2", "status" => "in_progress"}
                        ]
                      }
                    })
@@ -420,17 +420,17 @@ defmodule Sagents.IntegrationTest do
       # because the custom_context.state is not updated between tool calls
       assert length(final_state.todos) == 6,
              "Expected 6 todos (bug: got #{length(final_state.todos)}). " <>
-               "IDs: #{Enum.map_join(final_state.todos, ", ", & &1.id)}"
+               "IDs: #{Enum.map_join(final_state.todos, ", ", &Integer.to_string(&1.id))}"
 
       # Verify todos 1 and 2 were updated
-      todo1 = Enum.find(final_state.todos, &(&1.id == "1"))
+      todo1 = Enum.find(final_state.todos, &(&1.id == 1))
       assert todo1.status == :completed
 
-      todo2 = Enum.find(final_state.todos, &(&1.id == "2"))
+      todo2 = Enum.find(final_state.todos, &(&1.id == 2))
       assert todo2.status == :in_progress
 
       # Verify todos 3-6 still exist
-      for id <- ["3", "4", "5", "6"] do
+      for id <- [3, 4, 5, 6] do
         todo = Enum.find(final_state.todos, &(&1.id == id))
         assert todo != nil, "Todo #{id} should still exist"
         assert todo.status == :pending

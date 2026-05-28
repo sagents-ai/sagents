@@ -227,8 +227,9 @@ defmodule Sagents.Middleware.TodoList do
               type: "object",
               properties: %{
                 id: %{
-                  type: "string",
-                  description: "Unique identifier for the TODO"
+                  type: "integer",
+                  description:
+                    "Positive integer that is unique within this todo list. If omitted, IDs are assigned from list order (first item = 1)."
                 },
                 content: %{
                   type: "string",
@@ -351,21 +352,7 @@ defmodule Sagents.Middleware.TodoList do
   end
 
   defp parse_todos(todos_data) when is_list(todos_data) do
-    results =
-      Enum.map(todos_data, fn todo_map ->
-        Todo.from_map(todo_map)
-      end)
-
-    # Check if any failed
-    case Enum.find(results, fn result -> match?({:error, _changeset}, result) end) do
-      nil ->
-        todos = Enum.map(results, fn {:ok, todo} -> todo end)
-        {:ok, todos}
-
-      {:error, changeset} ->
-        errors = Ecto.Changeset.traverse_errors(changeset, fn {msg, _opts} -> msg end)
-        {:error, inspect(errors)}
-    end
+    Todo.list_from_maps(todos_data)
   end
 
   defp parse_todos(_other), do: {:error, "todos must be an array"}

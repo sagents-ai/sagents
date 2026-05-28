@@ -36,6 +36,13 @@ defmodule Sagents.Middleware.TodoListTest do
       assert properties != nil
       assert required != nil
     end
+
+    test "write_todos tool declares id as integer" do
+      [tool] = TodoList.tools(nil)
+      properties = tool.parameters_schema[:properties]
+      items = properties[:todos][:items]
+      assert items[:properties][:id][:type] == "integer"
+    end
   end
 
   describe "display_text configuration" do
@@ -67,16 +74,16 @@ defmodule Sagents.Middleware.TodoListTest do
 
   describe "write_todos tool - replace mode" do
     test "replaces all todos when merge is false" do
-      state =
-        State.new!(%{todos: [%{"id" => "old", "content" => "Old task", "status" => "pending"}]})
+      old = Todo.new!(%{id: 99, content: "Old task", status: :pending})
+      state = State.new!(%{todos: [old]})
 
       [tool] = TodoList.tools(nil)
 
       params = %{
         merge: false,
         todos: [
-          %{"id" => "new1", "content" => "New task 1", "status" => "pending"},
-          %{"id" => "new2", "content" => "New task 2", "status" => "in_progress"}
+          %{"id" => 1, "content" => "New task 1", "status" => "pending"},
+          %{"id" => 2, "content" => "New task 2", "status" => "in_progress"}
         ]
       }
 
@@ -91,9 +98,9 @@ defmodule Sagents.Middleware.TodoListTest do
       assert Enum.all?(updated_state.todos, &match?(%Todo{}, &1))
 
       ids = Enum.map(updated_state.todos, & &1.id)
-      assert "new1" in ids
-      assert "new2" in ids
-      refute "old" in ids
+      assert 1 in ids
+      assert 2 in ids
+      refute 99 in ids
     end
 
     test "creates todos with proper status types" do
@@ -103,9 +110,9 @@ defmodule Sagents.Middleware.TodoListTest do
       params = %{
         merge: false,
         todos: [
-          %{"id" => "1", "content" => "Task 1", "status" => "pending"},
-          %{"id" => "2", "content" => "Task 2", "status" => "in_progress"},
-          %{"id" => "3", "content" => "Task 3", "status" => "completed"}
+          %{"id" => 1, "content" => "Task 1", "status" => "pending"},
+          %{"id" => 2, "content" => "Task 2", "status" => "in_progress"},
+          %{"id" => 3, "content" => "Task 3", "status" => "completed"}
         ]
       }
 
@@ -115,12 +122,66 @@ defmodule Sagents.Middleware.TodoListTest do
       assert Enum.at(updated_state.todos, 1).status == :in_progress
       assert Enum.at(updated_state.todos, 2).status == :completed
     end
+
+    test "preserves declared order for double-digit IDs (regression for /draft)" do
+      # The original bug: ten todos with IDs 1..10 rendered as
+      # [1, 10, 2, 3, ...] because string IDs sorted lexicographically.
+      state = State.new!()
+      [tool] = TodoList.tools(nil)
+
+      params = %{
+        merge: false,
+        todos:
+          Enum.map(1..10, fn n ->
+            %{"id" => n, "content" => "Task #{n}", "status" => "pending"}
+          end)
+      }
+
+      {:ok, _msg, updated_state} = tool.function.(params, %{state: state})
+
+      assert Enum.map(updated_state.todos, & &1.id) == Enum.to_list(1..10)
+    end
+
+    test "accepts stringified integer ids from LLM tool calls (back-compat)" do
+      state = State.new!()
+      [tool] = TodoList.tools(nil)
+
+      params = %{
+        merge: false,
+        todos: [
+          %{"id" => "1", "content" => "Task 1", "status" => "pending"},
+          %{"id" => "7", "content" => "Task 7", "status" => "pending"}
+        ]
+      }
+
+      {:ok, _msg, updated_state} = tool.function.(params, %{state: state})
+
+      assert Enum.map(updated_state.todos, & &1.id) == [1, 7]
+    end
+
+    test "assigns positional ids when the agent omits them" do
+      state = State.new!()
+      [tool] = TodoList.tools(nil)
+
+      params = %{
+        merge: false,
+        todos: [
+          %{"content" => "First", "status" => "pending"},
+          %{"content" => "Second", "status" => "pending"},
+          %{"content" => "Third", "status" => "pending"}
+        ]
+      }
+
+      {:ok, _msg, updated_state} = tool.function.(params, %{state: state})
+
+      assert Enum.map(updated_state.todos, & &1.id) == [1, 2, 3]
+    end
   end
 
   describe "write_todos tool - merge mode" do
     test "merges with existing todos by ID" do
-      existing_todo1 = Todo.new!(%{id: "1", content: "Keep me", status: :pending})
-      existing_todo2 = Todo.new!(%{id: "2", content: "Update me", status: :pending})
+      existing_todo1 = Todo.new!(%{id: 1, content: "Keep me", status: :pending})
+      existing_todo2 = Todo.new!(%{id: 2, content: "Update me", status: :pending})
 
       state = State.new!(%{todos: [existing_todo1, existing_todo2]})
       [tool] = TodoList.tools(nil)
@@ -128,8 +189,8 @@ defmodule Sagents.Middleware.TodoListTest do
       params = %{
         merge: true,
         todos: [
-          %{"id" => "2", "content" => "Updated task", "status" => "completed"},
-          %{"id" => "3", "content" => "New task", "status" => "pending"}
+          %{"id" => 2, "content" => "Updated task", "status" => "completed"},
+          %{"id" => 3, "content" => "New task", "status" => "pending"}
         ]
       }
 
@@ -138,78 +199,73 @@ defmodule Sagents.Middleware.TodoListTest do
       assert message =~ "merged"
       assert length(updated_state.todos) == 3
 
-      # Check that todo 1 was kept
-      todo1 = Enum.find(updated_state.todos, &(&1.id == "1"))
+      todo1 = Enum.find(updated_state.todos, &(&1.id == 1))
       assert todo1.content == "Keep me"
       assert todo1.status == :pending
 
-      # Check that todo 2 was updated
-      todo2 = Enum.find(updated_state.todos, &(&1.id == "2"))
+      todo2 = Enum.find(updated_state.todos, &(&1.id == 2))
       assert todo2.content == "Updated task"
       assert todo2.status == :completed
 
-      # Check that todo 3 was added
-      todo3 = Enum.find(updated_state.todos, &(&1.id == "3"))
+      todo3 = Enum.find(updated_state.todos, &(&1.id == 3))
       assert todo3.content == "New task"
     end
 
     test "preserves all existing todos when merging with only a subset" do
-      # This test reproduces the exact scenario from the bug report:
+      # This test reproduces the exact scenario from the original bug report:
       # 1. Create 6 todos with merge=false
       # 2. Update only 2 of them with merge=true
       # 3. All 6 todos should still exist (with 2 updated)
 
       [tool] = TodoList.tools(nil)
 
-      # Step 1: Create initial 6 todos (simulating first write_todos call)
       initial_state = State.new!()
 
       first_params = %{
         merge: false,
         todos: [
           %{
-            "id" => "1",
+            "id" => 1,
             "content" => "Create directory structure for the quantum physics curriculum",
             "status" => "in_progress"
           },
           %{
-            "id" => "2",
+            "id" => 2,
             "content" => "Create prerequisite mathematics document covering required topics",
             "status" => "pending"
           },
           %{
-            "id" => "3",
+            "id" => 3,
             "content" => "Create week-by-week study plan (16-week comprehensive curriculum)",
             "status" => "pending"
           },
           %{
-            "id" => "4",
+            "id" => 4,
             "content" => "Create 10 key concept explanation documents (separate files)",
             "status" => "pending"
           },
           %{
-            "id" => "5",
+            "id" => 5,
             "content" => "Create practice problem sets with varying difficulty levels",
             "status" => "pending"
           },
-          %{"id" => "6", "content" => "Create progress tracking sheet", "status" => "pending"}
+          %{"id" => 6, "content" => "Create progress tracking sheet", "status" => "pending"}
         ]
       }
 
       {:ok, _msg1, state_after_first_call} = tool.function.(first_params, %{state: initial_state})
       assert length(state_after_first_call.todos) == 6
 
-      # Step 2: Update only todos 1 and 2 with merge=true (simulating second write_todos call)
       second_params = %{
         merge: true,
         todos: [
           %{
-            "id" => "1",
+            "id" => 1,
             "content" => "Create directory structure for the quantum physics curriculum",
             "status" => "completed"
           },
           %{
-            "id" => "2",
+            "id" => 2,
             "content" => "Create prerequisite mathematics document covering required topics",
             "status" => "in_progress"
           }
@@ -219,47 +275,43 @@ defmodule Sagents.Middleware.TodoListTest do
       {:ok, msg2, state_after_second_call} =
         tool.function.(second_params, %{state: state_after_first_call})
 
-      # Step 3: Verify all 6 todos still exist
       assert msg2 =~ "merged"
 
       assert length(state_after_second_call.todos) == 6,
              "Expected 6 todos after merge, but got #{length(state_after_second_call.todos)}. " <>
-               "IDs present: #{Enum.map_join(state_after_second_call.todos, ", ", & &1.id)}"
+               "IDs present: #{Enum.map_join(state_after_second_call.todos, ", ", &Integer.to_string(&1.id))}"
 
-      # Verify todo 1 was updated to completed
-      todo1 = Enum.find(state_after_second_call.todos, &(&1.id == "1"))
-      assert todo1 != nil, "Todo with ID '1' should exist"
+      todo1 = Enum.find(state_after_second_call.todos, &(&1.id == 1))
+      assert todo1 != nil, "Todo with ID 1 should exist"
       assert todo1.status == :completed
 
-      # Verify todo 2 was updated to in_progress
-      todo2 = Enum.find(state_after_second_call.todos, &(&1.id == "2"))
-      assert todo2 != nil, "Todo with ID '2' should exist"
+      todo2 = Enum.find(state_after_second_call.todos, &(&1.id == 2))
+      assert todo2 != nil, "Todo with ID 2 should exist"
       assert todo2.status == :in_progress
 
-      # Verify todos 3-6 still exist and remain pending
-      for id <- ["3", "4", "5", "6"] do
+      for id <- [3, 4, 5, 6] do
         todo = Enum.find(state_after_second_call.todos, &(&1.id == id))
-        assert todo != nil, "Todo with ID '#{id}' should still exist"
+        assert todo != nil, "Todo with ID #{id} should still exist"
         assert todo.status == :pending
       end
     end
 
     test "preserves existing todos when merging with non-overlapping IDs" do
-      existing = Todo.new!(%{id: "keep", content: "Keep", status: :completed})
+      existing = Todo.new!(%{id: 100, content: "Keep", status: :completed})
       state = State.new!(%{todos: [existing]})
       [tool] = TodoList.tools(nil)
 
       params = %{
         merge: true,
-        todos: [%{"id" => "new", "content" => "New", "status" => "pending"}]
+        todos: [%{"id" => 200, "content" => "New", "status" => "pending"}]
       }
 
       {:ok, _msg, updated_state} = tool.function.(params, %{state: state})
 
       assert length(updated_state.todos) == 2
       ids = Enum.map(updated_state.todos, & &1.id)
-      assert "keep" in ids
-      assert "new" in ids
+      assert 100 in ids
+      assert 200 in ids
     end
   end
 
@@ -270,7 +322,7 @@ defmodule Sagents.Middleware.TodoListTest do
 
       params = %{
         merge: false,
-        todos: [%{"id" => "1", "content" => "", "status" => "pending"}]
+        todos: [%{"id" => 1, "content" => "", "status" => "pending"}]
       }
 
       assert {:error, message} = tool.function.(params, %{state: state})
@@ -296,7 +348,7 @@ defmodule Sagents.Middleware.TodoListTest do
 
       params = %{
         merge: false,
-        todos: [%{"id" => "1", "content" => "Task", "status" => "invalid_status"}]
+        todos: [%{"id" => 1, "content" => "Task", "status" => "invalid_status"}]
       }
 
       # Invalid status defaults to pending
@@ -313,9 +365,9 @@ defmodule Sagents.Middleware.TodoListTest do
       params = %{
         merge: false,
         todos: [
-          %{"id" => "1", "content" => "Task 1", "status" => "pending"},
-          %{"id" => "2", "content" => "Task 2", "status" => "pending"},
-          %{"id" => "3", "content" => "Task 3", "status" => "in_progress"}
+          %{"id" => 1, "content" => "Task 1", "status" => "pending"},
+          %{"id" => 2, "content" => "Task 2", "status" => "pending"},
+          %{"id" => 3, "content" => "Task 3", "status" => "in_progress"}
         ]
       }
 
@@ -332,7 +384,7 @@ defmodule Sagents.Middleware.TodoListTest do
 
       params = %{
         merge: true,
-        todos: [%{"id" => "1", "content" => "Task", "status" => "pending"}]
+        todos: [%{"id" => 1, "content" => "Task", "status" => "pending"}]
       }
 
       {:ok, merge_msg, _state} = tool.function.(params, %{state: state})
@@ -351,12 +403,12 @@ defmodule Sagents.Middleware.TodoListTest do
 
       params = %{
         merge: false,
-        todos: [%{"id" => "test-id", "content" => "Task", "status" => "pending"}]
+        todos: [%{"id" => 42, "content" => "Task", "status" => "pending"}]
       }
 
       {:ok, _msg, updated_state} = tool.function.(params, %{state: state})
 
-      todo = State.get_todo(updated_state, "test-id")
+      todo = State.get_todo(updated_state, 42)
       assert todo.content == "Task"
     end
 
@@ -367,9 +419,9 @@ defmodule Sagents.Middleware.TodoListTest do
       params = %{
         merge: false,
         todos: [
-          %{"id" => "1", "content" => "Task 1", "status" => "pending"},
-          %{"id" => "2", "content" => "Task 2", "status" => "completed"},
-          %{"id" => "3", "content" => "Task 3", "status" => "pending"}
+          %{"id" => 1, "content" => "Task 1", "status" => "pending"},
+          %{"id" => 2, "content" => "Task 2", "status" => "completed"},
+          %{"id" => 3, "content" => "Task 3", "status" => "pending"}
         ]
       }
 
@@ -384,11 +436,6 @@ defmodule Sagents.Middleware.TodoListTest do
   end
 
   describe "inline mode" do
-    # Each test registers self() under the AgentServer's via-tuple name in the
-    # real Sagents.Registry so the middleware's whereis guard sees a "live"
-    # AgentServer and the GenServer.cast lands on this test process. We can
-    # then assert_received the cast payload to verify the synthetic-message
-    # save call.
     setup do
       agent_id = "todo-list-inline-test-#{System.unique_integer([:positive])}"
       {:ok, _owner} = Registry.register(Sagents.Registry, {:agent_server, agent_id}, nil)
@@ -403,7 +450,7 @@ defmodule Sagents.Middleware.TodoListTest do
 
       params = %{
         merge: false,
-        todos: [%{"id" => "1", "content" => "Task", "status" => "pending"}]
+        todos: [%{"id" => 1, "content" => "Task", "status" => "pending"}]
       }
 
       {:ok, _msg, _state} = tool.function.(params, %{state: state})
@@ -420,9 +467,9 @@ defmodule Sagents.Middleware.TodoListTest do
       params = %{
         merge: false,
         todos: [
-          %{"id" => "1", "content" => "Task A", "status" => "pending"},
-          %{"id" => "2", "content" => "Task B", "status" => "in_progress"},
-          %{"id" => "3", "content" => "Task C", "status" => "completed"}
+          %{"id" => 1, "content" => "Task A", "status" => "pending"},
+          %{"id" => 2, "content" => "Task B", "status" => "in_progress"},
+          %{"id" => 3, "content" => "Task C", "status" => "completed"}
         ]
       }
 
@@ -432,8 +479,8 @@ defmodule Sagents.Middleware.TodoListTest do
       assert attrs.message_type == "system"
       assert attrs.content_type == "todo_snapshot"
 
-      assert [%{"id" => "1"}, %{"id" => "2"}, %{"id" => "3"}] = attrs.content["todos"]
-      assert Enum.find(attrs.content["todos"], &(&1["id"] == "2"))["status"] == "in_progress"
+      assert [%{"id" => 1}, %{"id" => 2}, %{"id" => 3}] = attrs.content["todos"]
+      assert Enum.find(attrs.content["todos"], &(&1["id"] == 2))["status"] == "in_progress"
 
       assert attrs.content["summary"]["total"] == 3
       assert attrs.content["summary"]["pending"] == 1
@@ -443,10 +490,6 @@ defmodule Sagents.Middleware.TodoListTest do
 
     test "inline: true snapshots the pre-clear state when auto-clear fires",
          %{agent_id: agent_id} do
-      # When all todos are completed, the agent's state is auto-cleared, but
-      # the inline snapshot should still show the fully-checked list — that
-      # final completed roster is the celebratory "everything done" view we
-      # want preserved in the transcript.
       {:ok, config} = TodoList.init(inline: true)
       [tool] = TodoList.tools(config)
 
@@ -455,17 +498,15 @@ defmodule Sagents.Middleware.TodoListTest do
       params = %{
         merge: false,
         todos: [
-          %{"id" => "1", "content" => "Task A", "status" => "completed"},
-          %{"id" => "2", "content" => "Task B", "status" => "completed"}
+          %{"id" => 1, "content" => "Task A", "status" => "completed"},
+          %{"id" => 2, "content" => "Task B", "status" => "completed"}
         ]
       }
 
       {:ok, _msg, returned_state} = tool.function.(params, %{state: state})
 
-      # Returned state delta still reflects the auto-clear (sidebar collapses).
       assert returned_state.todos == []
 
-      # But the inline snapshot preserves the completed list.
       assert_received {:"$gen_cast", {:save_synthetic_message, attrs}}
       assert attrs.content_type == "todo_snapshot"
       assert length(attrs.content["todos"]) == 2
@@ -475,8 +516,6 @@ defmodule Sagents.Middleware.TodoListTest do
     end
 
     test "inline: true is a silent no-op when no AgentServer is registered" do
-      # No Registry registration here — agent_id is not associated with any
-      # process. The whereis guard in save_todo_snapshot/2 should short-circuit.
       {:ok, config} = TodoList.init(inline: true)
       [tool] = TodoList.tools(config)
 
@@ -484,7 +523,7 @@ defmodule Sagents.Middleware.TodoListTest do
 
       params = %{
         merge: false,
-        todos: [%{"id" => "1", "content" => "Task", "status" => "pending"}]
+        todos: [%{"id" => 1, "content" => "Task", "status" => "pending"}]
       }
 
       assert {:ok, _msg, updated_state} = tool.function.(params, %{state: state})
@@ -498,40 +537,33 @@ defmodule Sagents.Middleware.TodoListTest do
       state = State.new!()
       [tool] = TodoList.tools(nil)
 
-      # Create todos with all completed
       params = %{
         merge: false,
         todos: [
-          %{"id" => "1", "content" => "Task 1", "status" => "completed"},
-          %{"id" => "2", "content" => "Task 2", "status" => "completed"}
+          %{"id" => 1, "content" => "Task 1", "status" => "completed"},
+          %{"id" => 2, "content" => "Task 2", "status" => "completed"}
         ]
       }
 
       {:ok, msg, updated_state} = tool.function.(params, %{state: state})
 
-      # List should be cleared since all todos are completed
       assert updated_state.todos == []
-      # Message should indicate list was cleared
       assert msg == "TODO list cleared - all tasks completed"
     end
 
     test "clears todo list when all todos marked as completed in merge mode" do
-      # Start with one pending todo
-      existing = Todo.new!(%{id: "1", content: "Task 1", status: :pending})
+      existing = Todo.new!(%{id: 1, content: "Task 1", status: :pending})
       state = State.new!(%{todos: [existing]})
       [tool] = TodoList.tools(nil)
 
-      # Update the todo to completed
       params = %{
         merge: true,
-        todos: [%{"id" => "1", "content" => "Task 1", "status" => "completed"}]
+        todos: [%{"id" => 1, "content" => "Task 1", "status" => "completed"}]
       }
 
       {:ok, msg, updated_state} = tool.function.(params, %{state: state})
 
-      # List should be cleared since all todos are completed
       assert updated_state.todos == []
-      # Message should indicate list was cleared
       assert msg == "TODO list cleared - all tasks completed"
     end
 
@@ -539,18 +571,16 @@ defmodule Sagents.Middleware.TodoListTest do
       state = State.new!()
       [tool] = TodoList.tools(nil)
 
-      # Create todos with mixed status
       params = %{
         merge: false,
         todos: [
-          %{"id" => "1", "content" => "Task 1", "status" => "completed"},
-          %{"id" => "2", "content" => "Task 2", "status" => "pending"}
+          %{"id" => 1, "content" => "Task 1", "status" => "completed"},
+          %{"id" => 2, "content" => "Task 2", "status" => "pending"}
         ]
       }
 
       {:ok, _msg, updated_state} = tool.function.(params, %{state: state})
 
-      # List should NOT be cleared since not all are completed
       assert length(updated_state.todos) == 2
     end
 
@@ -561,35 +591,30 @@ defmodule Sagents.Middleware.TodoListTest do
       params = %{
         merge: false,
         todos: [
-          %{"id" => "1", "content" => "Task 1", "status" => "completed"},
-          %{"id" => "2", "content" => "Task 2", "status" => "in_progress"}
+          %{"id" => 1, "content" => "Task 1", "status" => "completed"},
+          %{"id" => 2, "content" => "Task 2", "status" => "in_progress"}
         ]
       }
 
       {:ok, _msg, updated_state} = tool.function.(params, %{state: state})
 
-      # List should NOT be cleared
       assert length(updated_state.todos) == 2
     end
 
     test "clears list immediately after completing final todo via merge" do
-      # Start with two todos, one completed and one pending
-      todo1 = Todo.new!(%{id: "1", content: "Task 1", status: :completed})
-      todo2 = Todo.new!(%{id: "2", content: "Task 2", status: :pending})
+      todo1 = Todo.new!(%{id: 1, content: "Task 1", status: :completed})
+      todo2 = Todo.new!(%{id: 2, content: "Task 2", status: :pending})
       state = State.new!(%{todos: [todo1, todo2]})
       [tool] = TodoList.tools(nil)
 
-      # Complete the final pending todo
       params = %{
         merge: true,
-        todos: [%{"id" => "2", "content" => "Task 2", "status" => "completed"}]
+        todos: [%{"id" => 2, "content" => "Task 2", "status" => "completed"}]
       }
 
       {:ok, msg, updated_state} = tool.function.(params, %{state: state})
 
-      # List should be cleared immediately
       assert updated_state.todos == []
-      # Message should indicate list was cleared
       assert msg == "TODO list cleared - all tasks completed"
     end
   end

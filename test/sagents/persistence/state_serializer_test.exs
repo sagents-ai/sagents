@@ -21,7 +21,7 @@ defmodule Sagents.Persistence.StateSerializerTest do
       msg1 = Message.new_user!("Hello")
       msg2 = Message.new_assistant!(%{content: "Hi there"})
 
-      {:ok, todo1} = Todo.new(%{content: "Task 1", status: :in_progress})
+      {:ok, todo1} = Todo.new(%{id: 1, content: "Task 1", status: :in_progress})
 
       state =
         State.new!(%{
@@ -170,6 +170,9 @@ defmodule Sagents.Persistence.StateSerializerTest do
               "status" => "in_progress"
             }
           ],
+          # Note: legacy `"todo-1"` string id will be renumbered to integer 1
+          # by Todo.list_from_maps/1's back-compat path. The assertion on
+          # `todo.id` below covers this.
           "metadata" => %{"session_id" => "session-1"}
         },
         "agent_config" => %{
@@ -192,6 +195,7 @@ defmodule Sagents.Persistence.StateSerializerTest do
       assert [%LangChain.Message.ContentPart{content: "Hello"}] = first_msg.content
 
       assert [todo] = state.todos
+      assert todo.id == 1
       assert todo.content == "Task 1"
       assert todo.status == :in_progress
 
@@ -531,8 +535,8 @@ defmodule Sagents.Persistence.StateSerializerTest do
       msg1 = Message.new_user!("Hello")
       msg2 = Message.new_assistant!(%{content: "Hi there"})
 
-      {:ok, todo1} = Todo.new(%{content: "Task 1", status: :in_progress})
-      {:ok, todo2} = Todo.new(%{content: "Task 2", status: :pending})
+      {:ok, todo1} = Todo.new(%{id: 1, content: "Task 1", status: :in_progress})
+      {:ok, todo2} = Todo.new(%{id: 2, content: "Task 2", status: :pending})
 
       state =
         State.new!(%{
@@ -647,7 +651,7 @@ defmodule Sagents.Persistence.StateSerializerTest do
         })
 
       msg = Message.new_user!("Hello")
-      {:ok, todo} = Todo.new(%{content: "Task", status: :pending})
+      {:ok, todo} = Todo.new(%{id: 1, content: "Task", status: :pending})
 
       state =
         State.new!(%{
