@@ -2480,6 +2480,13 @@ defmodule Sagents.AgentServer do
     # :multiple_interrupts wrappers that contain a halt.
     maybe_emit_halt_telemetry(updated_state, interrupt_data)
 
+    # Persist the halt's message as a synthetic assistant transcript
+    # entry so the user's recommended-actions text survives dismissal
+    # and page reload. Broadcasts {:display_message_saved, _} before the
+    # :status_changed broadcast below so the transcript renders ahead
+    # of the halt banner.
+    maybe_persist_halt_messages(updated_state, interrupt_data)
+
     # Persist agent state on interrupt
     updated_state = maybe_persist_state(updated_state, :on_interrupt)
 
@@ -2982,6 +2989,46 @@ defmodule Sagents.AgentServer do
     )
 
     :ok
+  end
+
+  # Persist the halt's :message text as a synthetic assistant display
+  # message so it survives dismissal, page reload, and any later turn.
+  # The interrupt UI (:pending_halt) is transient; this transcript entry
+  # is the user's permanent record of the halt's recommended actions.
+  #
+  # Fires only at the original halt-emit moment in
+  # handle_execution_result/2. Cold-start re-surface (Haltable.handle_resume/5
+  # with resume_data == nil) does NOT re-persist — the original emit's
+  # display message is already in the persisted log.
+  defp maybe_persist_halt_messages(%ServerState{} = server_state, %{type: :halt} = data) do
+    persist_halt_message(server_state, data)
+  end
+
+  defp maybe_persist_halt_messages(
+         %ServerState{} = server_state,
+         %{type: :multiple_interrupts, interrupts: subs}
+       )
+       when is_list(subs) do
+    Enum.each(subs, fn
+      %{type: :halt} = halt -> persist_halt_message(server_state, halt)
+      _other -> :ok
+    end)
+  end
+
+  defp maybe_persist_halt_messages(_server_state, _interrupt_data), do: :ok
+
+  defp persist_halt_message(%ServerState{} = server_state, %{type: :halt} = halt) do
+    case Map.get(halt, :message) do
+      msg when is_binary(msg) and byte_size(msg) > 0 ->
+        maybe_save_synthetic_and_broadcast(server_state, %{
+          message_type: "assistant",
+          content_type: "text",
+          content: %{"text" => msg}
+        })
+
+      _empty_or_nil ->
+        :ok
+    end
   end
 
   # Fire display updates on resume for interrupt types that DON'T go through

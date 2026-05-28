@@ -95,6 +95,30 @@ defmodule Sagents.Middleware.Haltable do
   contain any `:halt` sub-interrupt. The UI layer (see
   `Sagents.AgentUtils.interrupt_session_changes/1`) enforces it at
   render time.
+
+  ## Transcript persistence
+
+  When a halt fires and the AgentServer is configured with a
+  `DisplayMessagePersistence` module and a `conversation_id`, the
+  halt's `:message` field is automatically persisted as a synthetic
+  assistant display message in the conversation transcript. This means
+  the halt's recommended-actions text survives:
+
+  - the user dismissing the halt display,
+  - the user sending a follow-up message (which clears `:pending_halt`
+    via `Sagents.State.cancel_pending_interrupts/1`),
+  - page reload — the message is in the persisted display-message log
+    just like any other assistant turn.
+
+  Persistence fires *once*, at the original halt-emit moment. Cold-start
+  re-surface (this middleware's `handle_resume/5` re-emitting the
+  interrupt when an AgentServer reboots from persisted state) does NOT
+  re-persist — the transcript message is already there from the
+  original emit.
+
+  Halts with no `:message` (or an empty string) are skipped. So is the
+  case where the AgentServer has no persistence configured — no error,
+  just a silent no-op.
   """
 
   @behaviour Sagents.Middleware
