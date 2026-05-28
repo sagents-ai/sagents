@@ -787,6 +787,30 @@ defmodule Sagents.AgentServer do
   end
 
   @doc """
+  Dismiss a terminal `:halt` interrupt and transition the server back to `:idle`.
+
+  Used to acknowledge a halt (e.g., user clicked "Dismiss" on the halt panel)
+  without sending a new message. Clears `interrupt_data`, calls
+  `State.cancel_pending_interrupts/1`, transitions status to `:idle`, and
+  broadcasts the status change.
+
+  Only valid when status is `:interrupted` and the pending interrupt is a
+  halt (or a `:multiple_interrupts` batch containing a halt). Other interrupt
+  types — HITL approvals, `ask_user_question` — require an explicit response
+  via `resume/2` (which the relevant middleware interprets), so this function
+  returns `{:error, "interrupt requires explicit response (use resume)"}`
+  for those.
+
+  ## Examples
+
+      :ok = AgentServer.dismiss_interrupt("my-agent-1")
+  """
+  @spec dismiss_interrupt(String.t()) :: :ok | {:error, term()}
+  def dismiss_interrupt(agent_id) do
+    safe_call(agent_id, :dismiss_interrupt)
+  end
+
+  @doc """
   Resume agent execution after an interrupt.
 
   ## Parameters
@@ -1590,6 +1614,40 @@ defmodule Sagents.AgentServer do
   end
 
   @impl true
+  def handle_call(
+        :dismiss_interrupt,
+        _from,
+        %ServerState{status: :interrupted, interrupt_data: interrupt_data} = server_state
+      ) do
+    if halt_interrupt?(interrupt_data) do
+      new_state = State.cancel_pending_interrupts(server_state.state)
+
+      updated_server_state = %{
+        server_state
+        | state: new_state,
+          status: :idle,
+          interrupt_data: nil,
+          execution_seq: server_state.execution_seq + 1,
+          error: nil
+      }
+
+      broadcast_event(updated_server_state, {:status_changed, :idle, nil})
+      update_presence_status(updated_server_state, :idle)
+
+      {:reply, :ok, updated_server_state}
+    else
+      {:reply, {:error, "interrupt requires explicit response (use resume)"}, server_state}
+    end
+  end
+
+  @impl true
+  def handle_call(:dismiss_interrupt, _from, server_state) do
+    {:reply,
+     {:error, "Cannot dismiss, server is not interrupted (status: #{server_state.status})"},
+     server_state}
+  end
+
+  @impl true
   def handle_call(:get_state, _from, server_state) do
     {:reply, server_state.state, server_state}
   end
@@ -2126,6 +2184,18 @@ defmodule Sagents.AgentServer do
 
   ## Private Functions
 
+  # A halt interrupt is dismissable via dismiss_interrupt/1. Other interrupt
+  # types (HITL, ask_user_question) require explicit responses via resume/2.
+  # A :multiple_interrupts batch containing a halt is dismissable because the
+  # halt-wins policy makes the whole batch terminal.
+  defp halt_interrupt?(%{type: :halt}), do: true
+
+  defp halt_interrupt?(%{type: :multiple_interrupts, interrupts: subs}) when is_list(subs) do
+    Enum.any?(subs, &(&1.type == :halt))
+  end
+
+  defp halt_interrupt?(_other), do: false
+
   defp handle_task_down(:normal, server_state) do
     # Task process exited normally, already handled by the {ref, result} clause.
     {:noreply, server_state}
@@ -2403,6 +2473,12 @@ defmodule Sagents.AgentServer do
 
     # Update sub-agent tool call display message to "interrupted"
     maybe_update_interrupt_tool_display(updated_state, interrupt_data, :interrupted)
+
+    # Halts represent gate decisions — higher signal than ordinary pauses,
+    # so they get their own telemetry event in addition to the generic
+    # :status_changed broadcast. Fires for direct halts and for
+    # :multiple_interrupts wrappers that contain a halt.
+    maybe_emit_halt_telemetry(updated_state, interrupt_data)
 
     # Persist agent state on interrupt
     updated_state = maybe_persist_state(updated_state, :on_interrupt)
@@ -2841,6 +2917,24 @@ defmodule Sagents.AgentServer do
     maybe_resolve_tool_result(server_state, tool_call_id, "Question answered")
   end
 
+  # --- Halt ---
+  # A halt is terminal: there is no :completed/:failed transition because
+  # the tool call is never re-executed. The user's next message demotes
+  # the interrupted tool result via State.cancel_pending_interrupts/1.
+  defp maybe_update_interrupt_tool_display(
+         server_state,
+         %{type: :halt, tool_call_id: tool_call_id},
+         :interrupted
+       )
+       when is_binary(tool_call_id) do
+    broadcast_tool_event(server_state, :interrupted, %{
+      call_id: tool_call_id,
+      display_text: "Workflow halted"
+    })
+  end
+
+  defp maybe_update_interrupt_tool_display(_server_state, %{type: :halt}, _status), do: :ok
+
   # --- Multiple interrupts: update each inner interrupt ---
   defp maybe_update_interrupt_tool_display(
          server_state,
@@ -2854,6 +2948,41 @@ defmodule Sagents.AgentServer do
 
   # Not a recognized interrupt type -- no tool display update needed
   defp maybe_update_interrupt_tool_display(_server_state, _interrupt_data, _status), do: :ok
+
+  # Emit `[:sagents, :agent, :halt]` telemetry for halt-typed interrupts.
+  # Halts are gate decisions, so observability tooling typically wants to
+  # treat them differently from ordinary `:interrupted` transitions.
+  defp maybe_emit_halt_telemetry(%ServerState{} = server_state, %{type: :halt} = data) do
+    emit_halt_telemetry(server_state, data)
+  end
+
+  defp maybe_emit_halt_telemetry(
+         %ServerState{} = server_state,
+         %{type: :multiple_interrupts, interrupts: subs}
+       )
+       when is_list(subs) do
+    Enum.each(subs, fn
+      %{type: :halt} = halt -> emit_halt_telemetry(server_state, halt)
+      _other -> :ok
+    end)
+  end
+
+  defp maybe_emit_halt_telemetry(_server_state, _interrupt_data), do: :ok
+
+  defp emit_halt_telemetry(%ServerState{} = server_state, %{type: :halt} = data) do
+    :telemetry.execute(
+      [:sagents, :agent, :halt],
+      %{count: 1},
+      %{
+        agent_id: server_state.agent.agent_id,
+        source_tool: Map.get(data, :source_tool) || Map.get(data, :source),
+        tool_call_id: Map.get(data, :tool_call_id),
+        message: Map.get(data, :message)
+      }
+    )
+
+    :ok
+  end
 
   # Fire display updates on resume for interrupt types that DON'T go through
   # LLMChain tool re-execution (and thus don't fire on_tool_execution_completed).
