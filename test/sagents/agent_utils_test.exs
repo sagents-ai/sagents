@@ -525,6 +525,55 @@ defmodule Sagents.AgentUtilsTest do
       assert %{pending_tools: ^action_requests, pending_question: nil} =
                AgentUtils.interrupt_session_changes(interrupt)
     end
+
+    test "presents a single :halt as a pending halt" do
+      halt = %{
+        type: :halt,
+        message: "Outline too coarse",
+        source_tool: "scout_outline",
+        tool_call_id: "call_42"
+      }
+
+      assert %{
+               pending_halt: %{
+                 message: "Outline too coarse",
+                 source_tool: "scout_outline",
+                 tool_call_id: "call_42"
+               },
+               pending_question: nil,
+               pending_tools: []
+             } = AgentUtils.interrupt_session_changes(halt)
+    end
+
+    test "halt wins inside :multiple_interrupts even with sibling questions" do
+      q = %{type: :ask_user_question, question: "Continue?"}
+
+      halt = %{
+        type: :halt,
+        message: "Gate fired",
+        source_tool: "scout",
+        tool_call_id: "call_99"
+      }
+
+      result =
+        AgentUtils.interrupt_session_changes(%{
+          type: :multiple_interrupts,
+          interrupts: [q, halt]
+        })
+
+      assert result.pending_halt.message == "Gate fired"
+      assert result.pending_halt.source_tool == "scout"
+      assert result.pending_halt.tool_call_id == "call_99"
+      assert result.pending_question == nil
+      assert result.pending_tools == []
+    end
+
+    test "halt prefers :source_tool but falls back to :source" do
+      halt = %{type: :halt, message: "msg", source: "external_gate"}
+
+      assert %{pending_halt: %{source_tool: "external_gate"}} =
+               AgentUtils.interrupt_session_changes(halt)
+    end
   end
 
   describe "advance_hitl_decisions/3" do

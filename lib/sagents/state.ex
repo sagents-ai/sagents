@@ -615,6 +615,26 @@ defmodule Sagents.State do
     }
   end
 
+  # Halt-specific demotion: preserve the original halt message in the
+  # demoted tool result so any future LLM turn sees *why* the gate fired
+  # rather than a generic cancellation. Without this, the LLM would have
+  # no halt-reason in history and might immediately re-attempt the gated
+  # operation.
+  defp demote(tr, {:halted, message}) when is_binary(message) and byte_size(message) > 0 do
+    %{
+      tr
+      | content:
+          "Tool halted: " <>
+            message <>
+            " The user has sent a new instruction - proceed with their new request.",
+        is_interrupt: false,
+        is_error: true,
+        interrupt_data: nil
+    }
+  end
+
+  defp demote(tr, {:halted, _empty_or_nil}), do: demote(tr, :user_cancelled)
+
   @doc """
   Demote every `is_interrupt: true` tool result in the message log to an
   error result, signaling to the LLM that the user abandoned the pending
@@ -636,15 +656,7 @@ defmodule Sagents.State do
       Enum.map(state.messages, fn message ->
         case message do
           %LangChain.Message{role: :tool, tool_results: results} when is_list(results) ->
-            cancelled_results =
-              Enum.map(results, fn
-                %LangChain.Message.ToolResult{is_interrupt: true} = tr ->
-                  demote(tr, :user_cancelled)
-
-                other ->
-                  other
-              end)
-
+            cancelled_results = Enum.map(results, &demote_for_cancel/1)
             %{message | tool_results: cancelled_results}
 
           other ->
@@ -654,4 +666,18 @@ defmodule Sagents.State do
 
     %{state | messages: cancelled_messages, interrupt_data: nil}
   end
+
+  # Pick the demotion variant per tool result. Halt-typed interrupts
+  # preserve their reason so any future LLM turn sees why the gate fired;
+  # everything else gets the generic user-cancelled text. Each ToolResult
+  # carries its own (un-wrapped) `interrupt_data`; the `:multiple_interrupts`
+  # wrapper lives only at the State level, not per-result.
+  defp demote_for_cancel(%LangChain.Message.ToolResult{is_interrupt: true} = tr) do
+    case tr.interrupt_data do
+      %{type: :halt, message: msg} -> demote(tr, {:halted, msg})
+      _other -> demote(tr, :user_cancelled)
+    end
+  end
+
+  defp demote_for_cancel(other), do: other
 end

@@ -149,11 +149,13 @@ defmodule Sagents.AgentUtils do
   Map an interrupt-data payload to the assigns/state changes a host
   (LiveView, GenServer, etc.) should merge to display the interrupt.
 
-  Routes the three sagents-internal interrupt variants to their UI shapes:
+  Routes the four sagents-internal interrupt variants to their UI shapes:
 
+  - `:halt` — surface as a terminal halt with `:pending_halt`
   - `:ask_user_question` — pull the single question to the front
-  - `:multiple_interrupts` — present as questions if all are questions,
-    otherwise as a HITL tool batch
+  - `:multiple_interrupts` — "halt wins": if any sub-interrupt is `:halt`,
+    surface as a halt; otherwise present as questions if all are
+    questions, or as a HITL tool batch
   - `:subagent_hitl` — unwrap the inner `action_requests`
   - any other map — treat as a generic HITL tool batch
 
@@ -161,6 +163,9 @@ defmodule Sagents.AgentUtils do
   unconditionally on top of base assigns.
 
   ## Returned keys
+
+  When a halt is present:
+  `:pending_halt`, `:pending_question`, `:pending_tools`
 
   When questions are present:
   `:pending_question`, `:remaining_questions`, `:question_responses`, `:pending_tools`
@@ -177,15 +182,25 @@ defmodule Sagents.AgentUtils do
   @spec interrupt_session_changes(map() | nil) :: map()
   def interrupt_session_changes(nil), do: %{}
 
+  def interrupt_session_changes(%{type: :halt} = halt), do: present_halt(halt)
+
   def interrupt_session_changes(%{type: :ask_user_question} = question) do
     present_questions([question])
   end
 
   def interrupt_session_changes(%{type: :multiple_interrupts, interrupts: interrupts}) do
-    if Enum.all?(interrupts, &(&1.type == :ask_user_question)) do
-      present_questions(interrupts)
-    else
-      present_hitl_tools(interrupts)
+    cond do
+      Enum.any?(interrupts, &(&1.type == :halt)) ->
+        # Halt wins: surface the first halt sibling and ignore the rest.
+        # The other interrupts are moot because the workflow is over.
+        halt = Enum.find(interrupts, &(&1.type == :halt))
+        present_halt(halt)
+
+      Enum.all?(interrupts, &(&1.type == :ask_user_question)) ->
+        present_questions(interrupts)
+
+      true ->
+        present_hitl_tools(interrupts)
     end
   end
 
@@ -244,6 +259,18 @@ defmodule Sagents.AgentUtils do
   end
 
   # Private helpers
+
+  defp present_halt(halt) do
+    %{
+      pending_halt: %{
+        message: Map.get(halt, :message),
+        source_tool: Map.get(halt, :source_tool) || Map.get(halt, :source),
+        tool_call_id: Map.get(halt, :tool_call_id)
+      },
+      pending_question: nil,
+      pending_tools: []
+    }
+  end
 
   defp present_questions([first | rest]) do
     %{

@@ -66,6 +66,7 @@ defmodule <%= module %> do
       loading: false,
       pending_tools: [],
       pending_question: nil,
+      pending_halt: nil,
       remaining_questions: [],
       question_responses: [],
       interrupt_data: nil,

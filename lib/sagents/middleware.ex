@@ -124,6 +124,39 @@ defmodule Sagents.Middleware do
   Anything you place in `interrupt_data` should be *data*, not *behaviour*:
   atoms, strings, numbers, lists, maps, tuples are fine. Functions, PIDs,
   references, ports — never. None of those round-trip through serialization.
+
+  ## Interrupt-data catalog
+
+  The framework ships with a small set of well-known interrupt types,
+  identified by the `:type` atom on `interrupt_data`. Each is owned by a
+  specific middleware (the one that pattern-matches on `:type` in
+  `restorable_interrupt?/1`):
+
+  | Type | Owner | Intent | Resume payload | Required keys |
+  | --- | --- | --- | --- | --- |
+  | `:ask_user_question` | `Sagents.Middleware.AskUserQuestion` | Pause for a typed response, then slot the answer into the halted tool call | `%{type: :answer, ...}` or `%{type: :cancel}` | `:question`, `:response_type`, `:options`, `:allow_other`, `:allow_cancel`, `:context`, `:tool_call_id` |
+  | `:halt` | `Sagents.Middleware.Haltable` | **Terminate the workflow.** Surface a message; do not invoke the LLM again. The user's next message is a fresh turn — not a continuation of the halted tool call. | None (the user's next free-text message demotes the halt via `Sagents.State.cancel_pending_interrupts/1`) | `:type`, `:message` (String), `:source_tool` (String, or `:source` for non-tool emitters); `:tool_call_id` is added by the framework |
+  | `:subagent_hitl` | `Sagents.Middleware.SubAgent` | Propagate a HITL approval up from an inner sub-agent | `[%{type: :approve | :reject | ...}]` matching the original action requests | `:inner` (the wrapped HITL interrupt), `:tool_call_id` |
+  | HITL action-request map (no `:type`) | `Sagents.Middleware.HumanInTheLoop` | Request approval for one or more sensitive tool calls | `[%{type: :approve | :reject | ...}]` per action request | `:action_requests`, `:review_configs` |
+  | `:multiple_interrupts` | (none — wrapper) | Two or more parallel tool calls each emitted an interrupt in the same turn | A list of resume payloads (one per sub-interrupt), or the framework's "halt wins" demotion if any sub is `:halt` | `:interrupts` (list of sub-interrupt maps) |
+
+  ### `:halt` specifics
+
+  A `:halt` is structurally different from the other types: it does not
+  pause for a response. The tool that emits it is declaring the workflow
+  *over*. The framework does not invoke the LLM again, and the integrator
+  surfaces the halt's `:message` to the user. When the user sends a new
+  free-text message, `Sagents.AgentServer` demotes the interrupted tool
+  result (preserving the halt's message in the demoted content) and
+  transitions back to `:idle` so the new message proceeds as a fresh
+  turn. See `Sagents.Middleware.Haltable` for the full semantics.
+
+  ### "Halt wins" inside `:multiple_interrupts`
+
+  If a `:multiple_interrupts` wrapper contains any `:halt` sub-interrupt,
+  the surrounding UI and the cold-start restoration both treat the whole
+  batch as a halt. Sibling `:ask_user_question` / HITL sub-interrupts are
+  moot because the workflow is over.
   """
   alias Sagents.State
   alias Sagents.MiddlewareEntry
