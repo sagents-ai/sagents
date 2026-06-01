@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.8.0-rc.10
+
+No breaking changes from `v0.8.0-rc.9`. See the `v0.8.0-rc.5` entry below for upgrading from `v0.8.0-rc.4`, and the `v0.8.0-rc.1` entry for upgrading from `v0.7.0`.
+
+Headline: fixes a stale-interrupt bug where a dismissed or superseded interrupt's derived host state (e.g. a `:pending_halt` from the `v0.8.0-rc.9` halt feature) could survive invisibly behind a `status == :interrupted` render guard and re-appear on the next transition back into `:interrupted`.
+
+### Recommended for host apps using `Sagents.Middleware.Haltable`
+
+This release is not a hard breaking change — existing generated modules keep compiling and running. But the fix lives in the generated templates, so host apps that previously ran `mix sagents.gen.persistence` or generated the subscriber session **will not pick it up automatically**. This matters most if you use (or intend to use) the `Sagents.Middleware.Haltable` middleware introduced in `v0.8.0-rc.9`, since the stale `:pending_halt` state is exactly what leaks across transitions.
+
+To get the fix, regenerate your sagents scaffolding and merge in the changes from [#119](https://github.com/sagents-ai/sagents/pull/119): merge `Sagents.AgentUtils.cleared_interrupt_changes/0` into every non-interrupted status handler in your `agent_subscriber_session.ex`, and route `load_todos/2` through `Sagents.Todo.list_from_maps/1` in your persistence context.
+
+### Added
+- `Sagents.AgentUtils.cleared_interrupt_changes/0` — the single source of truth for the complete set of interrupt-derived `pending_*` keys a host carries (`pending_tools`, `pending_question`, `pending_halt`, `remaining_questions`, `question_responses`, `hitl_decisions`, `interrupt_data`). Merge it into any status transition that lands on a non-interrupted status (`:running`, `:idle`, `:cancelled`, `:error`, `:not_running`) to enforce the invariant that any status other than `:interrupted` means there is no pending interrupt UI. [#119](https://github.com/sagents-ai/sagents/pull/119)
+
+### Fixed
+- A dismissed or superseded interrupt's derived host state could persist behind a `status == :interrupted` render guard and re-surface on the next transition back into `:interrupted`. `Sagents.AgentUtils.interrupt_session_changes/1` now explicitly clears `pending_halt` when deriving both `:ask_user_question` and HITL-tool session changes, and the generated subscriber-session status handlers (`handle_status_running/0`, `handle_status_idle/0`, `handle_status_cancelled/0`, `handle_status_error/1`, `handle_agent_shutdown/2`) merge `cleared_interrupt_changes/0` so stale `pending_*` keys never leak across transitions. [#119](https://github.com/sagents-ai/sagents/pull/119)
+- The generated persistence context's `load_todos/2` now routes restored todo maps through `Sagents.Todo.list_from_maps/1` instead of mapping each through `Todo.from_map/1`, so legacy and partial snapshots rehydrate with positional id defaults rather than being silently dropped. [#119](https://github.com/sagents-ai/sagents/pull/119)
+- Corrected `@doc`/`@typedoc` cross-references in `Sagents.AgentResult`, `Sagents.Extract`, and `Sagents.Middleware.Haltable` (e.g. `Agent.execute/3` → `Sagents.Agent.execute/3`) so they resolve and no longer emit ExDoc warnings. [#118](https://github.com/sagents-ai/sagents/pull/118)
+
 ## v0.8.0-rc.9
 
 **Breaking change** in PR [#116](https://github.com/sagents-ai/sagents/pull/116) — `Sagents.Todo` IDs are now integers instead of strings. See the upgrading section below, and the v0.8.0-rc.5 entry for upgrading from `v0.8.0-rc.4`, and the `v0.8.0-rc.1` entry for upgrading from `v0.7.0`.
