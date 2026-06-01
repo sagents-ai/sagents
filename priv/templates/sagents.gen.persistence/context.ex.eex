@@ -196,10 +196,10 @@ defmodule <%= @context_module %> do
       {:ok, %{"state" => %{"todos" => todos}}} when is_list(todos) ->
         case Todo.list_from_maps(todos) do
           {:ok, parsed} -> parsed
-          {:error, _} -> []
+          {:error, _reason} -> []
         end
 
-      {:ok, _} ->
+      {:ok, _other} ->
         []
 
       {:error, :not_found} ->

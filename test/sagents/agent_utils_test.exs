@@ -470,7 +470,8 @@ defmodule Sagents.AgentUtilsTest do
                pending_question: ^question,
                remaining_questions: [],
                question_responses: [],
-               pending_tools: []
+               pending_tools: [],
+               pending_halt: nil
              } = AgentUtils.interrupt_session_changes(question)
     end
 
@@ -488,6 +489,7 @@ defmodule Sagents.AgentUtilsTest do
       assert result.remaining_questions == [q2]
       assert result.question_responses == []
       assert result.pending_tools == []
+      refute result.pending_halt
     end
 
     test "presents :multiple_interrupts containing any non-question as HITL tools" do
@@ -522,8 +524,62 @@ defmodule Sagents.AgentUtilsTest do
       action_requests = [%{tool_call_id: "abc"}]
       interrupt = %{action_requests: action_requests}
 
-      assert %{pending_tools: ^action_requests, pending_question: nil} =
+      assert %{pending_tools: ^action_requests, pending_question: nil, pending_halt: nil} =
                AgentUtils.interrupt_session_changes(interrupt)
+    end
+
+    test "question derivation clears any prior pending_halt (regression)" do
+      # A bare :ask_user_question must emit pending_halt: nil so a stale halt
+      # from a prior :interrupted state cannot survive an
+      # :interrupted -> :interrupted transition.
+      question = %{type: :ask_user_question, question: "Continue?"}
+      assert %{pending_halt: nil} = AgentUtils.interrupt_session_changes(question)
+    end
+
+    test "HITL-tool derivation clears any prior pending_halt (regression)" do
+      interrupt = %{action_requests: [%{tool_call_id: "abc"}]}
+      assert %{pending_halt: nil} = AgentUtils.interrupt_session_changes(interrupt)
+    end
+  end
+
+  describe "cleared_interrupt_changes/0" do
+    test "empties every interrupt-derived key" do
+      assert AgentUtils.cleared_interrupt_changes() == %{
+               pending_tools: [],
+               pending_question: nil,
+               pending_halt: nil,
+               remaining_questions: [],
+               question_responses: [],
+               hitl_decisions: [],
+               interrupt_data: nil
+             }
+    end
+
+    test "merged over a state carrying a stale pending_halt clears it" do
+      # Mirrors what the non-interrupted status handlers do: a state left with
+      # a dismissed halt's derived keys must come out fully cleared.
+      stale = %{
+        agent_status: :idle,
+        pending_halt: %{message: "dismissed", source_tool: "x", tool_call_id: "1"},
+        pending_question: %{type: :ask_user_question},
+        pending_tools: [%{tool_call_id: "y"}],
+        remaining_questions: [%{}],
+        question_responses: [%{}],
+        hitl_decisions: [%{type: :approve}],
+        interrupt_data: %{type: :halt}
+      }
+
+      cleared = Map.merge(stale, AgentUtils.cleared_interrupt_changes())
+
+      assert cleared.pending_halt == nil
+      assert cleared.pending_question == nil
+      assert cleared.pending_tools == []
+      assert cleared.remaining_questions == []
+      assert cleared.question_responses == []
+      assert cleared.hitl_decisions == []
+      assert cleared.interrupt_data == nil
+      # non-interrupt keys are untouched
+      assert cleared.agent_status == :idle
     end
 
     test "presents a single :halt as a pending halt" do

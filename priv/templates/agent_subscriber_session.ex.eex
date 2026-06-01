@@ -79,16 +79,31 @@ defmodule <%= module %> do
   # Status handlers
   # ===========================================================================
 
+  # Every non-interrupted status merges `AgentUtils.cleared_interrupt_changes/0`
+  # to enforce the invariant: any status other than `:interrupted` means there
+  # is no pending interrupt UI. This stops a dismissed/superseded interrupt's
+  # derived keys (e.g. `:pending_halt`) from re-appearing on the next
+  # transition back into `:interrupted`.
+
   @doc "Status changed to :running."
-  def handle_status_running, do: %{agent_status: :running}
+  def handle_status_running,
+    do: Map.merge(AgentUtils.cleared_interrupt_changes(), %{agent_status: :running})
 
   @doc "Status changed to :idle (execution completed)."
   def handle_status_idle,
-    do: %{loading: false, agent_status: :idle, streaming_delta: nil}
+    do:
+      Map.merge(
+        AgentUtils.cleared_interrupt_changes(),
+        %{loading: false, agent_status: :idle, streaming_delta: nil}
+      )
 
   @doc "Status changed to :cancelled (user cancelled execution)."
   def handle_status_cancelled,
-    do: %{loading: false, agent_status: :cancelled, streaming_delta: nil}
+    do:
+      Map.merge(
+        AgentUtils.cleared_interrupt_changes(),
+        %{loading: false, agent_status: :cancelled, streaming_delta: nil}
+      )
 
   @doc """
   Status changed to :error.
@@ -98,7 +113,11 @@ defmodule <%= module %> do
   `format_error_message/1` for a consistent message.
   """
   def handle_status_error(_reason),
-    do: %{loading: false, agent_status: :error, streaming_delta: nil}
+    do:
+      Map.merge(
+        AgentUtils.cleared_interrupt_changes(),
+        %{loading: false, agent_status: :error, streaming_delta: nil}
+      )
 
   @doc """
   Status changed to :interrupted (waiting for human input).
@@ -177,12 +196,13 @@ defmodule <%= module %> do
   subs map doesn't carry a stale entry.
   """
   def handle_agent_shutdown(state, _shutdown_data) do
-    base = %{
-      agent_id: nil,
-      agent_status: :not_running,
-      loading: false,
-      streaming_delta: nil
-    }
+    base =
+      Map.merge(AgentUtils.cleared_interrupt_changes(), %{
+        agent_id: nil,
+        agent_status: :not_running,
+        loading: false,
+        streaming_delta: nil
+      })
 
     case Map.get(state, :agent_id) do
       nil ->
@@ -326,7 +346,7 @@ defmodule <%= module %> do
       {:ok, _ref} ->
         :ok
 
-      {:error, {:already_tracked, _, _, _}} ->
+      {:error, {:already_tracked, _topic, _key, _meta}} ->
         :ok
 
       {:error, reason} ->
