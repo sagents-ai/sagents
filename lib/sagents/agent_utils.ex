@@ -207,6 +207,41 @@ defmodule Sagents.AgentUtils do
   def interrupt_session_changes(interrupt_data), do: present_hitl_tools(interrupt_data)
 
   @doc """
+  Changes that fully clear all interrupt-derived host state.
+
+  Single source of truth for the complete set of `pending_*` /
+  interrupt-related keys a host carries. Merge this into any status
+  transition that lands on a **non-interrupted** status (`:running`,
+  `:idle`, `:cancelled`, `:error`, `:not_running`) to enforce the
+  invariant: *any status other than `:interrupted` means there is no
+  pending interrupt UI.*
+
+  This prevents a dismissed/superseded interrupt's derived keys (e.g. a
+  `:pending_halt`) from surviving invisibly behind a
+  `status == :interrupted` render guard and re-appearing on the next
+  transition back into `:interrupted`.
+
+  ## Example
+
+      def handle_status_idle,
+        do: Map.merge(AgentUtils.cleared_interrupt_changes(),
+              %{loading: false, agent_status: :idle, streaming_delta: nil})
+
+  """
+  @spec cleared_interrupt_changes() :: map()
+  def cleared_interrupt_changes do
+    %{
+      pending_tools: [],
+      pending_question: nil,
+      pending_halt: nil,
+      remaining_questions: [],
+      question_responses: [],
+      hitl_decisions: [],
+      interrupt_data: nil
+    }
+  end
+
+  @doc """
   Compute the state transition for a single HITL approve/reject decision
   in a host's pending-tool list.
 
@@ -277,14 +312,16 @@ defmodule Sagents.AgentUtils do
       pending_question: first,
       remaining_questions: rest,
       question_responses: [],
-      pending_tools: []
+      pending_tools: [],
+      pending_halt: nil
     }
   end
 
   defp present_hitl_tools(interrupt_data) do
     %{
       pending_tools: extract_action_requests(interrupt_data),
-      pending_question: nil
+      pending_question: nil,
+      pending_halt: nil
     }
   end
 

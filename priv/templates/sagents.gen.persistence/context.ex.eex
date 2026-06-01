@@ -194,16 +194,12 @@ defmodule <%= @context_module %> do
   def load_todos(%Scope{} = scope, conversation_id) do
     case load_agent_state(scope, conversation_id) do
       {:ok, %{"state" => %{"todos" => todos}}} when is_list(todos) ->
-        todos
-        |> Enum.map(fn todo_map ->
-          case Todo.from_map(todo_map) do
-            {:ok, todo} -> todo
-            {:error, _} -> nil
-          end
-        end)
-        |> Enum.reject(&is_nil/1)
+        case Todo.list_from_maps(todos) do
+          {:ok, parsed} -> parsed
+          {:error, _reason} -> []
+        end
 
-      {:ok, _} ->
+      {:ok, _other} ->
         []
 
       {:error, :not_found} ->
