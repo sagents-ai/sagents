@@ -500,7 +500,7 @@ defmodule Sagents.Agent do
     # Ensure agent_id is set in state (library handles this automatically)
     state = %{state | agent_id: agent.agent_id}
 
-    callbacks = Keyword.get(opts, :callbacks)
+    callbacks = resolve_callbacks(agent, opts)
 
     with {:ok, validated_opts} <- validate_until_tool(agent, opts),
          {:ok, prepared_state} <- apply_before_model_hooks(state, agent.middleware) do
@@ -654,6 +654,33 @@ defmodule Sagents.Agent do
           {:halt, {:error, reason}}
       end
     end)
+  end
+
+  # Resolve the callback handler maps to run for this execution.
+  #
+  # Middleware callbacks (e.g. `on_message_processed`, `on_llm_token_usage`)
+  # only fire if their handler maps are added to the LLMChain. There are two
+  # entry paths into an agent, and the `:callbacks` option distinguishes them:
+  #
+  #   * Server-managed runs. The server layers (`AgentServer` /
+  #     `SubAgentServer`) own collection. They assemble the full list —
+  #     middleware callbacks together with PubSub broadcasting and any
+  #     *inherited* sub-agent middleware that is invisible from here — and pass
+  #     it via `:callbacks`. That list is authoritative and is used verbatim;
+  #     re-collecting middleware here would fire those handlers a second time.
+  #
+  #   * Direct runs (`Agent.execute/3`, `Sagents.Extract.run/3`). No
+  #     `:callbacks` are supplied, so we self-collect from this agent's own
+  #     middleware. This is what makes callback-based middleware (metering,
+  #     logging, etc) fire uniformly regardless of entry point.
+  #
+  # So: supplied `:callbacks` take precedence verbatim; their absence means
+  # collect from this agent's middleware.
+  defp resolve_callbacks(%Agent{} = agent, opts) do
+    case Keyword.get(opts, :callbacks) do
+      nil -> Middleware.collect_callbacks(agent.middleware)
+      callbacks -> callbacks
+    end
   end
 
   # Fire a Sagents-specific callback key (e.g., :on_after_middleware) from the

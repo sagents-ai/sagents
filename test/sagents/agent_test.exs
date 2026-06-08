@@ -98,6 +98,27 @@ defmodule Sagents.AgentTest do
     end
   end
 
+  # Registers a LangChain callback (`on_message_processed`) via `callbacks/1`.
+  # Such callbacks only fire if their handler map is added to the LLMChain — the
+  # behavior `Agent.execute/3` is responsible for when no callbacks are passed.
+  defmodule CallbackRecordingMiddleware do
+    @behaviour Middleware
+
+    @impl true
+    def init(opts), do: {:ok, %{pid: Keyword.fetch!(opts, :pid)}}
+
+    @impl true
+    def system_prompt(_config), do: ""
+
+    @impl true
+    def tools(_config), do: []
+
+    @impl true
+    def callbacks(config) do
+      %{on_message_processed: fn _chain, _message -> send(config.pid, :mw_callback_fired) end}
+    end
+  end
+
   describe "new/1" do
     test "creates agent with required model" do
       assert {:ok, agent} = Agent.new(%{model: mock_model()})
@@ -639,6 +660,66 @@ defmodule Sagents.AgentTest do
 
       initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
       assert {:ok, _result_state} = Agent.execute(agent, initial_state, callbacks: [])
+    end
+  end
+
+  describe "execute/2 middleware callback collection" do
+    setup do
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Mock response")]}
+      end)
+
+      :ok
+    end
+
+    test "self-collects the agent's middleware callbacks when none are supplied" do
+      # Direct callers (Agent.execute/3, Sagents.Extract.run/3) pass no
+      # :callbacks. The agent's own middleware callbacks must still fire, so
+      # callback-based middleware (e.g. token metering) works outside a server.
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            middleware: [{CallbackRecordingMiddleware, [pid: self()]}]
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:ok, _result_state} = Agent.execute(agent, initial_state)
+      assert_received :mw_callback_fired
+    end
+
+    test "explicit :callbacks take precedence; middleware callbacks are not auto-added" do
+      # The server layers already collect middleware callbacks (with any
+      # inherited middleware) and pass them via :callbacks. When callbacks are
+      # supplied, execute uses them verbatim and does NOT re-collect — that is
+      # what keeps the server path from firing its middleware callbacks twice.
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            middleware: [{CallbackRecordingMiddleware, [pid: self()]}]
+          },
+          replace_default_middleware: true
+        )
+
+      test_pid = self()
+
+      explicit = %{
+        on_message_processed: fn _chain, _message -> send(test_pid, :explicit_fired) end
+      }
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:ok, _result_state} =
+               Agent.execute(agent, initial_state, callbacks: [explicit])
+
+      assert_received :explicit_fired
+      # The agent's own middleware callback must NOT auto-fire on top of the
+      # explicitly-supplied list (no double-counting on the server path).
+      refute_received :mw_callback_fired
     end
   end
 
