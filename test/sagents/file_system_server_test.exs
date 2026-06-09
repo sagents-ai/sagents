@@ -791,10 +791,18 @@ defmodule Sagents.FileSystemServerTest do
           end
         end)
 
-      # Synchronize: wait until the server has processed the subscribe call
-      assert Sagents.Publisher.State.count(
-               FileSystemServer.get_state({:agent, agent_id}).publisher
-             ) == 1
+      # Synchronize: wait until the spawned subscriber's subscribe call has been
+      # processed by the server. A single `get_state` call is NOT enough here —
+      # it only orders *this* (test) process against the server, not the
+      # separately-scheduled `sub` process. `spawn/1` gives no happens-before
+      # guarantee that `sub` has run its subscribe call yet, so the bare assert
+      # races the subscribe and intermittently sees a count of 0 on slower CI
+      # runners. Poll until the subscription actually registers.
+      assert wait_until(fn ->
+               Sagents.Publisher.State.count(
+                 FileSystemServer.get_state({:agent, agent_id}).publisher
+               ) == 1
+             end)
 
       # Monitor `sub` from the test so we know when the kill has taken effect.
       # This alone isn't enough — the test's DOWN and the server's DOWN are
