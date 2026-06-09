@@ -695,7 +695,6 @@ defmodule Sagents.Agent do
   # be fired by LLMChain.run, so we iterate the list and fire matching handlers
   # ourselves. LangChain-native keys are handled separately via maybe_add_callbacks
   # which adds each map to the chain for LLMChain to fire during execution.
-  defp fire_callback(nil, _key, _args), do: :ok
   defp fire_callback([], _key, _args), do: :ok
 
   defp fire_callback(callbacks, key, args) when is_list(callbacks) do

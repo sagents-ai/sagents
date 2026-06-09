@@ -774,10 +774,6 @@ defmodule Sagents.SubAgent do
     end)
   end
 
-  defp maybe_add_callbacks(chain, callbacks) when is_map(callbacks) do
-    LLMChain.add_callback(chain, callbacks)
-  end
-
   ## Nested Modules (Config and Compiled)
 
   defmodule Config do
