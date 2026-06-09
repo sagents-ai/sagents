@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.8.0-rc.11
+
+No breaking changes from `v0.8.0-rc.10`. See the `v0.8.0-rc.9` entry below for upgrading from `v0.8.0-rc.8`, the `v0.8.0-rc.5` entry for upgrading from `v0.8.0-rc.4`, and the `v0.8.0-rc.1` entry for upgrading from `v0.7.0`.
+
+Headline: middleware callbacks now fire on every agent entry point, not just the server paths.
+
+### Added
+- `Sagents.AgentUtils.resolve_callbacks/2` as the single source of truth for the callback merge policy (always self-collect middleware callbacks for the given middleware list, then merge any caller-supplied callbacks on top). `Sagents.Extract.run/3` gains a `:callbacks` option that flows through the same path. [#121](https://github.com/sagents-ai/sagents/pull/121)
+
+### Changed
+- Middleware callbacks are now self-collected on every entry point. `Agent.execute/3`, `SubAgent.execute`, and `Sagents.Extract` collect their own (or inherited) middleware callbacks and merge caller-supplied `:callbacks` on top rather than substituting them, so middleware hooks no longer go dark on direct (non-server) execution paths. `AgentServer`/`SubAgentServer` now pass only their PubSub callbacks, eliminating the previous double-collection. [#121](https://github.com/sagents-ai/sagents/pull/121)
+- Upgraded to Elixir 1.20 and cleaned up the resulting compiler warnings and dead code. [#122](https://github.com/sagents-ai/sagents/pull/122)
+
 ## v0.8.0-rc.10
 
 No breaking changes from `v0.8.0-rc.9`. See the `v0.8.0-rc.5` entry below for upgrading from `v0.8.0-rc.4`, and the `v0.8.0-rc.1` entry for upgrading from `v0.7.0`.
