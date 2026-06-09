@@ -3,7 +3,6 @@ defmodule Sagents.AgentTest do
   use Mimic
 
   import ExUnit.CaptureLog
-  require Logger
 
   alias Sagents.{Agent, Middleware, State}
   alias LangChain.ChatModels.ChatAnthropic

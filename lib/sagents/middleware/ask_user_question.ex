@@ -476,15 +476,21 @@ defmodule Sagents.Middleware.AskUserQuestion do
   end
 
   defp validate_single_select(response, question_data) do
-    selected = Map.get(response, :selected, [])
-    valid_values = Enum.map(question_data.options, & &1.value)
+    case Map.get(response, :selected, []) do
+      [value] ->
+        valid_values = Enum.map(question_data.options, & &1.value)
+        validate_single_value(value, response, question_data, valid_values)
+
+      _multiples ->
+        {:error, "single_select requires exactly one selection"}
+    end
+  end
+
+  defp validate_single_value(value, response, question_data, valid_values) do
     # "other" is only the special allow_other value when it's NOT a regular option
-    special_other? = hd(selected) == "other" and "other" not in valid_values
+    special_other? = value == "other" and "other" not in valid_values
 
     cond do
-      not is_list(selected) or length(selected) != 1 ->
-        {:error, "single_select requires exactly one selection"}
-
       special_other? and not question_data.allow_other ->
         {:error, "'other' is not allowed for this question"}
 
@@ -492,12 +498,12 @@ defmodule Sagents.Middleware.AskUserQuestion do
         other_text = Map.get(response, :other_text, "")
         {:ok, "User selected: other\nAdditional input: \"#{other_text}\""}
 
-      hd(selected) not in valid_values ->
+      value not in valid_values ->
         {:error,
-         "Selected value '#{hd(selected)}' is not a valid option. Valid: #{inspect(valid_values)}"}
+         "Selected value '#{value}' is not a valid option. Valid: #{inspect(valid_values)}"}
 
       true ->
-        text = "User selected: #{hd(selected)}"
+        text = "User selected: #{value}"
 
         case Map.get(response, :other_text) do
           nil -> {:ok, text}

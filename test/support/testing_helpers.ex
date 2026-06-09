@@ -236,13 +236,6 @@ defmodule Sagents.TestingHelpers do
         _result = AgentServer.subscribe(agent_id, :debug)
         {:ok, %{agent_id: agent_id, pid: pid}}
 
-      {:error, {:already_started, _supervisor_pid}} ->
-        # Already started - return existing pid
-        pid = AgentServer.get_pid(agent_id)
-        _result = AgentServer.subscribe(agent_id)
-        _result = AgentServer.subscribe(agent_id, :debug)
-        {:ok, %{agent_id: agent_id, pid: pid}}
-
       {:error, reason} ->
         {:error, reason}
     end
