@@ -2180,8 +2180,6 @@ defmodule Sagents.AgentServer do
     end
   end
 
-  defp wait_for_task_completion(nil, _max_wait_ms), do: :ok
-
   ## Private Functions
 
   # A halt interrupt is dismissable via dismiss_interrupt/1. Other interrupt

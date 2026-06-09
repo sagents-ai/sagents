@@ -31,8 +31,6 @@ defmodule Sagents.Horde.ClusterConfig do
         members: {Sagents.Horde.ClusterConfig, :regional_members, [region]}
   """
 
-  require Logger
-
   @doc """
   Resolve cluster members for a given module name.
 

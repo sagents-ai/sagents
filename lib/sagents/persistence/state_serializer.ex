@@ -45,7 +45,6 @@ defmodule Sagents.Persistence.StateSerializer do
   with the current tool schema. Affects calls named `"task"` or
   `"get_task_instructions"`.
   """
-  require Logger
 
   alias Sagents.{State, Agent, Todo}
   alias LangChain.Message

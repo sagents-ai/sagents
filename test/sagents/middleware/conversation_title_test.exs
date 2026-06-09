@@ -16,7 +16,7 @@ defmodule Sagents.Middleware.ConversationTitleTest do
   describe "init/1" do
     test "initializes with required chat_model" do
       assert {:ok, config} = ConversationTitle.init(chat_model: mock_model())
-      assert config.chat_model != nil
+      assert %ChatAnthropic{} = config.chat_model
       assert config.fallbacks == []
       assert config.examples != nil
     end
@@ -144,7 +144,7 @@ defmodule Sagents.Middleware.ConversationTitleTest do
           id: "test_id"
         )
 
-      assert config.chat_model != nil
+      assert %ChatAnthropic{} = config.chat_model
       assert config.fallbacks == [fallback]
       assert config.prompt_template == prompt
       assert config.examples == examples

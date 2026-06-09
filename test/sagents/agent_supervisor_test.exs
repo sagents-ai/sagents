@@ -367,16 +367,10 @@ defmodule Sagents.AgentSupervisorTest do
           name: AgentSupervisor.get_name(agent_id)
         )
 
-      # Should handle already_started gracefully
-      case result do
-        {:ok, sup_pid2} ->
-          # Some supervisors return the existing pid
-          assert sup_pid1 == sup_pid2 or Process.alive?(sup_pid2)
-
-        {:error, {:already_started, sup_pid2}} ->
-          # Also acceptable - supervisor already running
-          assert sup_pid1 == sup_pid2
-      end
+      # start_link_sync/1 collapses an already-started supervisor into
+      # {:ok, sup_pid}, returning the existing pid.
+      assert {:ok, sup_pid2} = result
+      assert sup_pid1 == sup_pid2 or Process.alive?(sup_pid2)
 
       # AgentServer should still be accessible
       assert AgentServer.get_pid(agent_id) != nil

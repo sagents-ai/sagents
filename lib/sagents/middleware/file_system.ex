@@ -100,7 +100,6 @@ defmodule Sagents.Middleware.FileSystem do
 
   @behaviour Sagents.Middleware
 
-  require Logger
   alias LangChain.Function
   alias Sagents.FileSystem.FileEntry
   alias Sagents.FileSystemServer
