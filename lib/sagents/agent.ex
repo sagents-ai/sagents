@@ -42,6 +42,7 @@ defmodule Sagents.Agent do
   require Logger
 
   alias __MODULE__
+  alias Sagents.AgentUtils
   alias Sagents.Middleware
   alias Sagents.State
   alias LangChain.LangChainError
@@ -502,7 +503,7 @@ defmodule Sagents.Agent do
     # Ensure agent_id is set in state (library handles this automatically)
     state = %{state | agent_id: agent.agent_id}
 
-    callbacks = resolve_callbacks(agent, opts)
+    callbacks = AgentUtils.resolve_callbacks(agent.middleware, opts)
 
     with {:ok, validated_opts} <- validate_until_tool(agent, opts),
          {:ok, prepared_state} <- apply_before_model_hooks(state, agent.middleware) do
@@ -656,38 +657,6 @@ defmodule Sagents.Agent do
           {:halt, {:error, reason}}
       end
     end)
-  end
-
-  # Resolve the callback handler maps to run for this execution.
-  #
-  # Middleware callbacks (e.g. `on_message_processed`, `on_llm_token_usage`)
-  # only fire if their handler maps are added to the LLMChain. Collecting them
-  # is intrinsic to running an agent: every execution self-collects from this
-  # agent's own middleware, so callback-based middleware (metering, logging,
-  # etc) fires uniformly regardless of entry point — `Agent.execute/3`,
-  # `Sagents.Extract.run/3`, or a server-managed run.
-  #
-  # Caller-supplied `:callbacks` are *merged on top*, not substituted. This
-  # matters for two callers:
-  #
-  #   * Direct callers can pass an ad-hoc handler (e.g. a token logger) without
-  #     silently disabling their agent's middleware callbacks.
-  #
-  #   * The server layers (`AgentServer` / `SubAgentServer`) pass only their
-  #     PubSub broadcasting callbacks. They no longer collect middleware
-  #     themselves — that would double-fire now that execution self-collects.
-  #
-  # Supplied callbacks come first to preserve the historical ordering of the
-  # server path (PubSub broadcasting, then middleware handlers). Empty maps are
-  # dropped so a `%{}` default never adds a no-op callback to the chain.
-  defp resolve_callbacks(%Agent{} = agent, opts) do
-    supplied =
-      opts
-      |> Keyword.get(:callbacks, [])
-      |> List.wrap()
-      |> Enum.reject(&(&1 == %{}))
-
-    supplied ++ Middleware.collect_callbacks(agent.middleware)
   end
 
   # Fire a Sagents-specific callback key (e.g., :on_after_middleware) from the
