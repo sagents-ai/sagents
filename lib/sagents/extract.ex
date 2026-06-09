@@ -48,6 +48,11 @@ defmodule Sagents.Extract do
     * `:max_runs` (default `5`) — Maximum LLM calls. Enough for a single call
       plus a few retries if the tool body or `parse_args` validation rejects
       malformed args. Increase for complex schemas.
+    * `:callbacks` — A list of callback handler maps forwarded to
+      `Sagents.Agent.execute/3` (e.g. a token-usage logger). These are merged
+      with the agent's middleware callbacks, not substituted, so supplying them
+      never disables middleware-provided callbacks. See `Sagents.Agent.execute/3`
+      for the accepted keys.
 
   ## What `run/3` returns
 
@@ -137,7 +142,8 @@ defmodule Sagents.Extract do
           tool: Function.t(),
           tool_name: String.t(),
           description: String.t(),
-          max_runs: pos_integer()
+          max_runs: pos_integer(),
+          callbacks: [map()]
         ]
 
   @doc """
@@ -153,9 +159,22 @@ defmodule Sagents.Extract do
       augmented_agent = %{agent | tools: agent.tools ++ [submit_tool]}
       max_runs = Keyword.get(opts, :max_runs, @default_max_runs)
 
+      execute_opts =
+        [until_tool: submit_tool.name, max_runs: max_runs]
+        |> maybe_put_callbacks(opts)
+
       augmented_agent
-      |> Agent.execute(state, until_tool: submit_tool.name, max_runs: max_runs)
+      |> Agent.execute(state, execute_opts)
       |> AgentResult.tool_arguments()
+    end
+  end
+
+  # Forward caller-supplied callbacks only when present, so Agent.execute keeps
+  # its no-`:callbacks` default behaviour otherwise.
+  defp maybe_put_callbacks(execute_opts, opts) do
+    case Keyword.get(opts, :callbacks) do
+      nil -> execute_opts
+      callbacks -> Keyword.put(execute_opts, :callbacks, callbacks)
     end
   end
 

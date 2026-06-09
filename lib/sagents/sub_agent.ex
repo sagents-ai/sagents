@@ -383,7 +383,7 @@ defmodule Sagents.SubAgent do
   def execute(subagent, opts \\ [])
 
   def execute(%SubAgent{status: :idle, chain: chain} = subagent, opts) do
-    callbacks = Keyword.get(opts, :callbacks, %{})
+    callbacks = AgentUtils.resolve_callbacks(subagent_middleware(chain), opts)
     Logger.debug("SubAgent #{subagent.id} executing")
 
     # Update status to running
@@ -492,7 +492,7 @@ defmodule Sagents.SubAgent do
         decisions,
         opts
       ) do
-    callbacks = Keyword.get(opts, :callbacks, %{})
+    callbacks = AgentUtils.resolve_callbacks(subagent_middleware(chain), opts)
     Logger.debug("SubAgent #{subagent.id} resuming with #{length(decisions)} decisions")
 
     # Update status to running
@@ -735,17 +735,24 @@ defmodule Sagents.SubAgent do
     opts
   end
 
+  # Extract the inherited parent middleware from the sub-agent's chain. This is
+  # the source `AgentUtils.resolve_callbacks/2` collects this sub-agent's
+  # middleware callbacks from (the same source `SubAgentServer` used to read).
+  defp subagent_middleware(chain) do
+    case chain do
+      %{custom_context: %{parent_middleware: mw}} when is_list(mw) -> mw
+      _other -> []
+    end
+  end
+
   # Helper to conditionally add callbacks to chain
+
   defp maybe_add_callbacks(chain, callbacks) when callbacks in [nil, %{}, []], do: chain
 
   defp maybe_add_callbacks(chain, callbacks) when is_list(callbacks) do
     Enum.reduce(callbacks, chain, fn cb_map, acc ->
       LLMChain.add_callback(acc, cb_map)
     end)
-  end
-
-  defp maybe_add_callbacks(chain, callbacks) when is_map(callbacks) do
-    LLMChain.add_callback(chain, callbacks)
   end
 
   ## Nested Modules (Config and Compiled)

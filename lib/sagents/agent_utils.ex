@@ -13,6 +13,8 @@ defmodule Sagents.AgentUtils do
 
   alias LangChain.Chains.LLMChain
   alias LangChain.Message
+  alias Sagents.Middleware
+  alias Sagents.MiddlewareEntry
 
   @doc """
   Check if a chain has pending tool calls that require human approval.
@@ -143,6 +145,44 @@ defmodule Sagents.AgentUtils do
       _other ->
         []
     end
+  end
+
+  @doc """
+  Resolve the callback handler maps to run for an execution.
+
+  Collecting middleware callbacks is intrinsic to running an agent: this always
+  collects `middleware`'s callbacks (via `Sagents.Middleware.collect_callbacks/1`)
+  and merges any caller-supplied `:callbacks` from `opts` *on top* rather than
+  substituting them. Supplying `:callbacks` therefore never disables an agent's
+  middleware callbacks.
+
+  Supplied callbacks come first to preserve the historical ordering of the server
+  path (PubSub broadcasting, then middleware handlers). Empty `%{}` maps are
+  dropped so a `%{}` default never adds a no-op callback to the chain.
+
+  Both execution engines share this contract: `Sagents.Agent` passes its own
+  `agent.middleware`, while `Sagents.SubAgent` passes the inherited
+  `parent_middleware` carried in its chain's `custom_context`. The server layers
+  pass only their PubSub callbacks via `:callbacks`; collection happens here, so
+  middleware is never collected twice.
+
+  ## Parameters
+  - `middleware`: List of `Sagents.MiddlewareEntry` structs to collect from
+  - `opts`: Keyword list; reads the optional `:callbacks` key (a map or list of
+    maps)
+
+  ## Example
+      callbacks = AgentUtils.resolve_callbacks(agent.middleware, opts)
+  """
+  @spec resolve_callbacks([MiddlewareEntry.t()], keyword()) :: [map()]
+  def resolve_callbacks(middleware, opts) when is_list(middleware) and is_list(opts) do
+    supplied =
+      opts
+      |> Keyword.get(:callbacks, [])
+      |> List.wrap()
+      |> Enum.reject(&(&1 == %{}))
+
+    supplied ++ Middleware.collect_callbacks(middleware)
   end
 
   @doc """

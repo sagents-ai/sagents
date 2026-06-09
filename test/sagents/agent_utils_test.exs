@@ -683,4 +683,67 @@ defmodule Sagents.AgentUtilsTest do
       assert changes.pending_tools == [%{id: 1}, %{id: 2}, %{id: 4}]
     end
   end
+
+  describe "resolve_callbacks/2" do
+    # Middleware whose `callbacks/1` returns a uniquely-identifiable handler map.
+    defmodule MarkerMiddleware do
+      @behaviour Sagents.Middleware
+
+      @impl true
+      def init(opts), do: {:ok, Enum.into(opts, %{})}
+
+      @impl true
+      def system_prompt(_config), do: ""
+
+      @impl true
+      def tools(_config), do: []
+
+      @impl true
+      def callbacks(config), do: %{on_message_processed: config.marker}
+    end
+
+    defp marker_entry(marker) do
+      %Sagents.MiddlewareEntry{
+        id: marker,
+        module: MarkerMiddleware,
+        config: %{marker: marker}
+      }
+    end
+
+    test "collects middleware callbacks when no :callbacks are supplied" do
+      middleware = [marker_entry(:mw_a), marker_entry(:mw_b)]
+
+      assert AgentUtils.resolve_callbacks(middleware, []) ==
+               [%{on_message_processed: :mw_a}, %{on_message_processed: :mw_b}]
+    end
+
+    test "merges supplied :callbacks ahead of middleware callbacks" do
+      middleware = [marker_entry(:mw)]
+      supplied = %{on_message_processed: :supplied}
+
+      assert AgentUtils.resolve_callbacks(middleware, callbacks: [supplied]) ==
+               [%{on_message_processed: :supplied}, %{on_message_processed: :mw}]
+    end
+
+    test "accepts a single supplied callback map (not wrapped in a list)" do
+      supplied = %{on_message_processed: :supplied}
+
+      assert AgentUtils.resolve_callbacks([], callbacks: supplied) ==
+               [%{on_message_processed: :supplied}]
+    end
+
+    test "drops empty supplied callback maps" do
+      middleware = [marker_entry(:mw)]
+
+      assert AgentUtils.resolve_callbacks(middleware, callbacks: [%{}]) ==
+               [%{on_message_processed: :mw}]
+    end
+
+    test "returns only supplied callbacks when middleware is empty" do
+      supplied = %{on_message_processed: :supplied}
+
+      assert AgentUtils.resolve_callbacks([], callbacks: [supplied]) ==
+               [%{on_message_processed: :supplied}]
+    end
+  end
 end

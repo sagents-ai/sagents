@@ -42,6 +42,7 @@ defmodule Sagents.Agent do
   require Logger
 
   alias __MODULE__
+  alias Sagents.AgentUtils
   alias Sagents.Middleware
   alias Sagents.State
   alias LangChain.LangChainError
@@ -455,9 +456,11 @@ defmodule Sagents.Agent do
     key is fired by the agent directly after `before_model` hooks complete,
     before the LLM call — it receives the prepared state as its single argument.
 
-    When running via `AgentServer`, callbacks are built automatically:
-    PubSub callbacks (for broadcasting events) are combined with middleware
-    callbacks (from `Middleware.collect_callbacks/1`) into this list.
+    This agent's own middleware callbacks (from `Middleware.collect_callbacks/1`)
+    are always collected and run — supplying `:callbacks` adds to them rather
+    than replacing them, so an ad-hoc handler never silently disables middleware
+    callbacks. When running via `AgentServer`, the only callbacks passed here are
+    the PubSub broadcasting callbacks; middleware collection happens internally.
 
   ## Returns
 
@@ -500,7 +503,7 @@ defmodule Sagents.Agent do
     # Ensure agent_id is set in state (library handles this automatically)
     state = %{state | agent_id: agent.agent_id}
 
-    callbacks = Keyword.get(opts, :callbacks)
+    callbacks = AgentUtils.resolve_callbacks(agent.middleware, opts)
 
     with {:ok, validated_opts} <- validate_until_tool(agent, opts),
          {:ok, prepared_state} <- apply_before_model_hooks(state, agent.middleware) do
@@ -661,7 +664,6 @@ defmodule Sagents.Agent do
   # be fired by LLMChain.run, so we iterate the list and fire matching handlers
   # ourselves. LangChain-native keys are handled separately via maybe_add_callbacks
   # which adds each map to the chain for LLMChain to fire during execution.
-  defp fire_callback(nil, _key, _args), do: :ok
   defp fire_callback([], _key, _args), do: :ok
 
   defp fire_callback(callbacks, key, args) when is_list(callbacks) do

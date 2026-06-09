@@ -2360,12 +2360,10 @@ defmodule Sagents.AgentServer do
   end
 
   defp execute_agent(%ServerState{} = server_state, pubsub_callbacks) do
-    # Collect middleware callbacks in Task process (safe for process-dictionary closures).
-    # Combine into a single list: [pubsub_map, mw_map_1, mw_map_2, ...].
-    # Agent.execute will add each map to the LLMChain (for LangChain keys)
-    # and iterate the list for Sagents-specific keys (on_after_middleware).
-    middleware_callbacks = Middleware.collect_callbacks(server_state.agent.middleware)
-    callbacks = [pubsub_callbacks | middleware_callbacks]
+    # Pass only the PubSub broadcasting callbacks. Agent.execute self-collects
+    # this agent's middleware callbacks and merges them on top, so collecting
+    # them here too would fire each middleware handler twice.
+    callbacks = [pubsub_callbacks]
 
     # Execute agent with callbacks
     case Agent.execute(server_state.agent, server_state.state, callbacks: callbacks) do
@@ -2401,10 +2399,10 @@ defmodule Sagents.AgentServer do
     # they are NOT included here to avoid double-updating.
     maybe_resolve_interrupt_display_on_resume(server_state, resolved_interrupt_data)
 
-    # Same callback assembly as execute_agent/2
+    # Same callback assembly as execute_agent/2: pass only PubSub callbacks;
+    # Agent.resume self-collects middleware callbacks.
     pubsub_callbacks = build_pubsub_callbacks(server_state)
-    middleware_callbacks = Middleware.collect_callbacks(server_state.agent.middleware)
-    callbacks = [pubsub_callbacks | middleware_callbacks]
+    callbacks = [pubsub_callbacks]
 
     case Agent.resume(server_state.agent, server_state.state, resume_data, callbacks: callbacks) do
       {:ok, new_state} ->
