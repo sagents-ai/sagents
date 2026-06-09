@@ -370,11 +370,11 @@ defmodule Sagents.SubAgentServer do
     # Broadcast status change to running
     broadcast_subagent_event(server_state, {:subagent_status_changed, :running})
 
-    # Build PubSub callbacks and collect middleware callbacks
+    # Pass only the PubSub broadcasting callbacks. SubAgent.execute self-collects
+    # the inherited middleware callbacks and merges them on top, so collecting
+    # them here too would fire each middleware handler twice.
     pubsub_callbacks = build_pubsub_callbacks(server_state)
-    middleware = get_subagent_middleware(server_state)
-    middleware_callbacks = Sagents.Middleware.collect_callbacks(middleware)
-    callbacks = [pubsub_callbacks | middleware_callbacks]
+    callbacks = [pubsub_callbacks]
 
     # Delegate to SubAgent.execute with callbacks
     case SubAgent.execute(subagent, callbacks: callbacks) do
@@ -415,11 +415,11 @@ defmodule Sagents.SubAgentServer do
     # Broadcast status change to running (resuming)
     broadcast_subagent_event(server_state, {:subagent_status_changed, :running})
 
-    # Build PubSub callbacks and collect middleware callbacks
+    # Pass only the PubSub broadcasting callbacks. SubAgent.resume self-collects
+    # the inherited middleware callbacks and merges them on top, so collecting
+    # them here too would fire each middleware handler twice.
     pubsub_callbacks = build_pubsub_callbacks(server_state)
-    middleware = get_subagent_middleware(server_state)
-    middleware_callbacks = Sagents.Middleware.collect_callbacks(middleware)
-    callbacks = [pubsub_callbacks | middleware_callbacks]
+    callbacks = [pubsub_callbacks]
 
     # Delegate to SubAgent.resume with callbacks
     case SubAgent.resume(subagent, decisions, callbacks: callbacks) do
@@ -504,14 +504,6 @@ defmodule Sagents.SubAgentServer do
   end
 
   ## Private Helper Functions
-
-  # Extract middleware from subagent's chain custom_context
-  defp get_subagent_middleware(%ServerState{subagent: subagent}) do
-    case subagent.chain do
-      %{custom_context: %{parent_middleware: mw}} when is_list(mw) -> mw
-      _other -> []
-    end
-  end
 
   # Handle a completed SubAgent, extracting the result and optionally passing through extra data.
   # Used by both execute and resume handlers to avoid duplication.

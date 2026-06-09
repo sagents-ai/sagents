@@ -691,11 +691,11 @@ defmodule Sagents.AgentTest do
       assert_received :mw_callback_fired
     end
 
-    test "explicit :callbacks take precedence; middleware callbacks are not auto-added" do
-      # The server layers already collect middleware callbacks (with any
-      # inherited middleware) and pass them via :callbacks. When callbacks are
-      # supplied, execute uses them verbatim and does NOT re-collect — that is
-      # what keeps the server path from firing its middleware callbacks twice.
+    test "merges supplied :callbacks with the agent's middleware callbacks" do
+      # Supplying :callbacks adds to the middleware callbacks rather than
+      # replacing them. A direct caller can pass an ad-hoc handler (e.g. a token
+      # logger) without silently disabling middleware callbacks, and the server
+      # layers pass only their PubSub callbacks while middleware still fires.
       {:ok, agent} =
         Agent.new(
           %{
@@ -716,10 +716,9 @@ defmodule Sagents.AgentTest do
       assert {:ok, _result_state} =
                Agent.execute(agent, initial_state, callbacks: [explicit])
 
+      # Both the supplied callback AND the middleware callback fire.
       assert_received :explicit_fired
-      # The agent's own middleware callback must NOT auto-fire on top of the
-      # explicitly-supplied list (no double-counting on the server path).
-      refute_received :mw_callback_fired
+      assert_received :mw_callback_fired
     end
   end
 

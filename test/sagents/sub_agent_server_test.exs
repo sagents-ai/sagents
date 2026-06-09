@@ -6,6 +6,27 @@ defmodule Sagents.SubAgentServerTest do
   alias LangChain.Chains.LLMChain
   alias LangChain.Message
 
+  # Middleware that registers an `on_message_processed` LangChain callback.
+  # Used to prove SubAgent.execute self-collects the inherited middleware
+  # callbacks now that SubAgentServer passes only its PubSub callbacks.
+  defmodule CallbackRecordingMiddleware do
+    @behaviour Sagents.Middleware
+
+    @impl true
+    def init(opts), do: {:ok, %{pid: Keyword.fetch!(opts, :pid)}}
+
+    @impl true
+    def system_prompt(_config), do: ""
+
+    @impl true
+    def tools(_config), do: []
+
+    @impl true
+    def callbacks(config) do
+      %{on_message_processed: fn _chain, _message -> send(config.pid, :mw_callback_fired) end}
+    end
+  end
+
   setup :set_mimic_global
   setup :verify_on_exit!
 
@@ -112,6 +133,42 @@ defmodule Sagents.SubAgentServerTest do
 
       # Verify final status
       assert SubAgentServer.get_status(subagent.id) == :completed
+    end
+  end
+
+  describe "execute/1 - middleware callbacks" do
+    test "attaches the subagent's inherited middleware callbacks to the chain" do
+      test_pid = self()
+      agent = create_test_agent(middleware: [{CallbackRecordingMiddleware, [pid: test_pid]}])
+      subagent = create_subagent(agent: agent)
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
+
+      assistant_message = Message.new_assistant!(%{content: "Done"})
+
+      # SubAgentServer now passes only its PubSub callbacks; SubAgent.execute
+      # self-collects the inherited middleware callbacks and adds them to the
+      # chain. Invoke every on_message_processed handler on the chain to prove
+      # the middleware callback was collected and attached (and fires once).
+      LLMChain
+      |> expect(:run, fn chain, _opts ->
+        for cb <- chain.callbacks, is_function(cb[:on_message_processed]) do
+          cb[:on_message_processed].(chain, assistant_message)
+        end
+
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_message])
+          |> Map.put(:last_message, assistant_message)
+          |> Map.put(:needs_response, false)
+
+        {:ok, updated_chain}
+      end)
+
+      assert {:ok, _result} = SubAgentServer.execute(subagent.id)
+      assert_received :mw_callback_fired
+      # Collected from the chain exactly once — not double-added by the server.
+      refute_received :mw_callback_fired
     end
   end
 

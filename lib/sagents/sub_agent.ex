@@ -106,6 +106,7 @@ defmodule Sagents.SubAgent do
 
   alias __MODULE__
   alias Sagents.AgentUtils
+  alias Sagents.Middleware
   alias Sagents.State
   alias LangChain.Chains.LLMChain
   alias LangChain.Message
@@ -383,7 +384,7 @@ defmodule Sagents.SubAgent do
   def execute(subagent, opts \\ [])
 
   def execute(%SubAgent{status: :idle, chain: chain} = subagent, opts) do
-    callbacks = Keyword.get(opts, :callbacks, %{})
+    callbacks = resolve_callbacks(chain, opts)
     Logger.debug("SubAgent #{subagent.id} executing")
 
     # Update status to running
@@ -492,7 +493,7 @@ defmodule Sagents.SubAgent do
         decisions,
         opts
       ) do
-    callbacks = Keyword.get(opts, :callbacks, %{})
+    callbacks = resolve_callbacks(chain, opts)
     Logger.debug("SubAgent #{subagent.id} resuming with #{length(decisions)} decisions")
 
     # Update status to running
@@ -736,6 +737,35 @@ defmodule Sagents.SubAgent do
   end
 
   # Helper to conditionally add callbacks to chain
+  # Resolve the callback handler maps to run for this sub-agent execution.
+  #
+  # Mirrors `Sagents.Agent.resolve_callbacks/2`: middleware callbacks are always
+  # collected and run, so callback-based middleware fires regardless of entry
+  # point. A sub-agent collects from the *inherited* parent middleware stored in
+  # the chain's `custom_context` (the same source `SubAgentServer` used to read).
+  #
+  # Caller-supplied `:callbacks` are merged on top rather than substituted, so
+  # `SubAgentServer` can pass only its PubSub callbacks (it no longer collects
+  # middleware itself — that would double-fire), and direct callers can add an
+  # ad-hoc handler without losing middleware callbacks. Supplied callbacks come
+  # first to preserve the historical ordering (PubSub, then middleware).
+  defp resolve_callbacks(chain, opts) do
+    supplied =
+      opts
+      |> Keyword.get(:callbacks, [])
+      |> List.wrap()
+      |> Enum.reject(&(&1 == %{}))
+
+    supplied ++ Middleware.collect_callbacks(subagent_middleware(chain))
+  end
+
+  defp subagent_middleware(chain) do
+    case chain do
+      %{custom_context: %{parent_middleware: mw}} when is_list(mw) -> mw
+      _other -> []
+    end
+  end
+
   defp maybe_add_callbacks(chain, callbacks) when callbacks in [nil, %{}, []], do: chain
 
   defp maybe_add_callbacks(chain, callbacks) when is_list(callbacks) do

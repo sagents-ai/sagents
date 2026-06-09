@@ -10,6 +10,27 @@ defmodule Sagents.ExtractTest do
   alias Sagents.Extract
   alias Sagents.State
 
+  # Middleware that registers an `on_message_processed` LangChain callback.
+  # Used to prove Extract self-collects middleware callbacks and merges any
+  # caller-supplied `:callbacks` rather than replacing them.
+  defmodule CallbackRecordingMiddleware do
+    @behaviour Sagents.Middleware
+
+    @impl true
+    def init(opts), do: {:ok, %{pid: Keyword.fetch!(opts, :pid)}}
+
+    @impl true
+    def system_prompt(_config), do: ""
+
+    @impl true
+    def tools(_config), do: []
+
+    @impl true
+    def callbacks(config) do
+      %{on_message_processed: fn _chain, _message -> send(config.pid, :mw_callback_fired) end}
+    end
+  end
+
   @schema %{
     type: "object",
     properties: %{
@@ -142,6 +163,44 @@ defmodule Sagents.ExtractTest do
       {:ok, _result} = Extract.run(agent, build_state(), schema: @schema)
 
       assert Enum.map(agent.tools, & &1.name) == original_tool_names
+    end
+  end
+
+  describe "run/3 — callbacks" do
+    defp build_agent_with_recorder do
+      Agent.new!(
+        %{
+          model: mock_model(),
+          tools: [],
+          middleware: [{CallbackRecordingMiddleware, [pid: self()]}]
+        },
+        replace_default_middleware: true
+      )
+    end
+
+    test "fires the agent's middleware callbacks even when none are supplied" do
+      agent = build_agent_with_recorder()
+      stub_submit_call("submit_result", %{"title" => "T", "summary" => "S"})
+
+      assert {:ok, %{"title" => "T"}} = Extract.run(agent, build_state(), schema: @schema)
+      assert_received :mw_callback_fired
+    end
+
+    test "merges supplied :callbacks with the agent's middleware callbacks" do
+      agent = build_agent_with_recorder()
+      stub_submit_call("submit_result", %{"title" => "T", "summary" => "S"})
+
+      test_pid = self()
+
+      supplied = %{
+        on_message_processed: fn _chain, _message -> send(test_pid, :supplied_fired) end
+      }
+
+      assert {:ok, %{"title" => "T"}} =
+               Extract.run(agent, build_state(), schema: @schema, callbacks: [supplied])
+
+      assert_received :supplied_fired
+      assert_received :mw_callback_fired
     end
   end
 end

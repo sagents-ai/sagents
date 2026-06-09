@@ -455,9 +455,11 @@ defmodule Sagents.Agent do
     key is fired by the agent directly after `before_model` hooks complete,
     before the LLM call — it receives the prepared state as its single argument.
 
-    When running via `AgentServer`, callbacks are built automatically:
-    PubSub callbacks (for broadcasting events) are combined with middleware
-    callbacks (from `Middleware.collect_callbacks/1`) into this list.
+    This agent's own middleware callbacks (from `Middleware.collect_callbacks/1`)
+    are always collected and run — supplying `:callbacks` adds to them rather
+    than replacing them, so an ad-hoc handler never silently disables middleware
+    callbacks. When running via `AgentServer`, the only callbacks passed here are
+    the PubSub broadcasting callbacks; middleware collection happens internally.
 
   ## Returns
 
@@ -659,28 +661,33 @@ defmodule Sagents.Agent do
   # Resolve the callback handler maps to run for this execution.
   #
   # Middleware callbacks (e.g. `on_message_processed`, `on_llm_token_usage`)
-  # only fire if their handler maps are added to the LLMChain. There are two
-  # entry paths into an agent, and the `:callbacks` option distinguishes them:
+  # only fire if their handler maps are added to the LLMChain. Collecting them
+  # is intrinsic to running an agent: every execution self-collects from this
+  # agent's own middleware, so callback-based middleware (metering, logging,
+  # etc) fires uniformly regardless of entry point — `Agent.execute/3`,
+  # `Sagents.Extract.run/3`, or a server-managed run.
   #
-  #   * Server-managed runs. The server layers (`AgentServer` /
-  #     `SubAgentServer`) own collection. They assemble the full list —
-  #     middleware callbacks together with PubSub broadcasting and any
-  #     *inherited* sub-agent middleware that is invisible from here — and pass
-  #     it via `:callbacks`. That list is authoritative and is used verbatim;
-  #     re-collecting middleware here would fire those handlers a second time.
+  # Caller-supplied `:callbacks` are *merged on top*, not substituted. This
+  # matters for two callers:
   #
-  #   * Direct runs (`Agent.execute/3`, `Sagents.Extract.run/3`). No
-  #     `:callbacks` are supplied, so we self-collect from this agent's own
-  #     middleware. This is what makes callback-based middleware (metering,
-  #     logging, etc) fire uniformly regardless of entry point.
+  #   * Direct callers can pass an ad-hoc handler (e.g. a token logger) without
+  #     silently disabling their agent's middleware callbacks.
   #
-  # So: supplied `:callbacks` take precedence verbatim; their absence means
-  # collect from this agent's middleware.
+  #   * The server layers (`AgentServer` / `SubAgentServer`) pass only their
+  #     PubSub broadcasting callbacks. They no longer collect middleware
+  #     themselves — that would double-fire now that execution self-collects.
+  #
+  # Supplied callbacks come first to preserve the historical ordering of the
+  # server path (PubSub broadcasting, then middleware handlers). Empty maps are
+  # dropped so a `%{}` default never adds a no-op callback to the chain.
   defp resolve_callbacks(%Agent{} = agent, opts) do
-    case Keyword.get(opts, :callbacks) do
-      nil -> Middleware.collect_callbacks(agent.middleware)
-      callbacks -> callbacks
-    end
+    supplied =
+      opts
+      |> Keyword.get(:callbacks, [])
+      |> List.wrap()
+      |> Enum.reject(&(&1 == %{}))
+
+    supplied ++ Middleware.collect_callbacks(agent.middleware)
   end
 
   # Fire a Sagents-specific callback key (e.g., :on_after_middleware) from the
