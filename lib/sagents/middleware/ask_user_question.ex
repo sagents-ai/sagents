@@ -14,6 +14,15 @@ defmodule Sagents.Middleware.AskUserQuestion do
       # Restricted to specific types
       {Sagents.Middleware.AskUserQuestion, response_types: [:single_select, :multi_select]}
 
+  ### Forcing allow_other / allow_cancel
+
+  By default the LLM chooses `allow_other` and `allow_cancel` per question. Set
+  either to a fixed boolean in the init config to force it for every question
+  and remove it from the LLM's control. Omit a key to leave it LLM-decided.
+
+      # User must always answer (never cancel); always offer an "Other" input
+      {Sagents.Middleware.AskUserQuestion, allow_cancel: false, allow_other: true}
+
   ## Response Types
 
   - `:single_select` - User picks one option from a list (radio buttons)
@@ -68,19 +77,40 @@ defmodule Sagents.Middleware.AskUserQuestion do
   @impl true
   def init(opts) do
     response_types = Keyword.get(opts, :response_types, @all_response_types)
-
     invalid = response_types -- @all_response_types
 
-    if invalid != [] do
-      {:error, "Invalid response types: #{inspect(invalid)}"}
+    with [] <- invalid,
+         {:ok, forced_allow_other} <- validate_forced_flag(opts, :allow_other),
+         {:ok, forced_allow_cancel} <- validate_forced_flag(opts, :allow_cancel) do
+      {:ok,
+       %{
+         response_types: response_types,
+         forced_allow_other: forced_allow_other,
+         forced_allow_cancel: forced_allow_cancel
+       }}
     else
-      {:ok, %{response_types: response_types}}
+      invalid when is_list(invalid) ->
+        {:error, "Invalid response types: #{inspect(invalid)}"}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  # A forced flag (`allow_other` / `allow_cancel`) fixes the value for every
+  # question and removes it from the LLM's control. Absent -> nil (LLM decides).
+  # Boolean -> forced. Anything else -> error.
+  defp validate_forced_flag(opts, key) do
+    case Keyword.fetch(opts, key) do
+      :error -> {:ok, nil}
+      {:ok, val} when is_boolean(val) -> {:ok, val}
+      {:ok, other} -> {:error, "#{key} must be a boolean when set, got: #{inspect(other)}"}
     end
   end
 
   @impl true
   def system_prompt(config) do
-    build_system_prompt(config.response_types)
+    build_system_prompt(config)
   end
 
   @impl true
@@ -241,62 +271,77 @@ defmodule Sagents.Middleware.AskUserQuestion do
         "Ask the user a structured question when you need their input to make a decision. " <>
           "Use this for significant choices where multiple valid approaches exist.",
       display_text: "Asking a question",
-      parameters_schema: build_parameters_schema(config.response_types),
+      parameters_schema: build_parameters_schema(config),
       function: fn args, _context ->
         execute_ask_user(args, config)
       end
     })
   end
 
-  defp build_parameters_schema(response_types) do
-    %{
-      type: "object",
-      properties: %{
-        question: %{type: "string", description: "The question to ask the user"},
-        response_type: %{
-          type: "string",
-          enum: Enum.map(response_types, &Atom.to_string/1),
-          description:
-            "The type of response expected: " <>
-              Enum.map_join(response_types, ", ", fn
-                :single_select -> "single_select (pick one)"
-                :multi_select -> "multi_select (pick one or more)"
-                :freeform -> "freeform (open text)"
-              end)
-        },
-        options: %{
-          type: "array",
-          description:
-            "Options for single_select or multi_select. Must have 2-10 items. Not used for freeform.",
-          items: %{
-            type: "object",
-            properties: %{
-              label: %{type: "string", description: "Display label for the option"},
-              value: %{type: "string", description: "Machine-readable value"},
-              description: %{
-                type: "string",
-                description: "Optional description with tradeoffs or details"
-              }
-            },
-            required: ["label", "value"]
-          }
-        },
-        context: %{
-          type: "string",
-          description: "Additional context to help the user understand the decision"
-        },
-        allow_other: %{
-          type: "boolean",
-          description: "Whether to allow a freeform 'other' option alongside selections"
-        },
-        allow_cancel: %{
-          type: "boolean",
-          description: "Whether the user can cancel/dismiss this question"
+  defp build_parameters_schema(config) do
+    response_types = config.response_types
+
+    base_properties = %{
+      question: %{type: "string", description: "The question to ask the user"},
+      response_type: %{
+        type: "string",
+        enum: Enum.map(response_types, &Atom.to_string/1),
+        description:
+          "The type of response expected: " <>
+            Enum.map_join(response_types, ", ", fn
+              :single_select -> "single_select (pick one)"
+              :multi_select -> "multi_select (pick one or more)"
+              :freeform -> "freeform (open text)"
+            end)
+      },
+      options: %{
+        type: "array",
+        description:
+          "Options for single_select or multi_select. Must have 2-10 items. Not used for freeform.",
+        items: %{
+          type: "object",
+          properties: %{
+            label: %{type: "string", description: "Display label for the option"},
+            value: %{type: "string", description: "Machine-readable value"},
+            description: %{
+              type: "string",
+              description: "Optional description with tradeoffs or details"
+            }
+          },
+          required: ["label", "value"]
         }
       },
+      context: %{
+        type: "string",
+        description: "Additional context to help the user understand the decision"
+      }
+    }
+
+    # A forced flag is dropped from the schema so the LLM can't (and isn't asked
+    # to) set it. An unforced flag (nil) is exposed as today.
+    properties =
+      base_properties
+      |> maybe_put_flag_property(:allow_other, config.forced_allow_other, %{
+        type: "boolean",
+        description: "Whether to allow a freeform 'other' option alongside selections"
+      })
+      |> maybe_put_flag_property(:allow_cancel, config.forced_allow_cancel, %{
+        type: "boolean",
+        description: "Whether the user can cancel/dismiss this question"
+      })
+
+    %{
+      type: "object",
+      properties: properties,
       required: ["question", "response_type"]
     }
   end
+
+  defp maybe_put_flag_property(properties, _key, forced, _schema) when is_boolean(forced),
+    do: properties
+
+  defp maybe_put_flag_property(properties, key, nil, schema),
+    do: Map.put(properties, key, schema)
 
   # -- Tool execution (validation + interrupt) --
 
@@ -309,8 +354,8 @@ defmodule Sagents.Middleware.AskUserQuestion do
         question: question,
         response_type: response_type,
         options: options,
-        allow_other: get_boolean_arg(args, "allow_other", false),
-        allow_cancel: get_boolean_arg(args, "allow_cancel", true),
+        allow_other: resolve_flag(config.forced_allow_other, args, "allow_other", false),
+        allow_cancel: resolve_flag(config.forced_allow_cancel, args, "allow_cancel", true),
         context: Map.get(args, "context")
       }
 
@@ -435,6 +480,11 @@ defmodule Sagents.Middleware.AskUserQuestion do
       _other -> default
     end
   end
+
+  # A forced config value wins and the LLM-provided arg is ignored. When not
+  # forced (nil), fall back to the LLM arg with its existing default.
+  defp resolve_flag(forced, _args, _key, _default) when is_boolean(forced), do: forced
+  defp resolve_flag(nil, args, key, default), do: get_boolean_arg(args, key, default)
 
   # -- Response processing --
 
@@ -663,7 +713,9 @@ defmodule Sagents.Middleware.AskUserQuestion do
 
   # -- System prompt --
 
-  defp build_system_prompt(response_types) do
+  defp build_system_prompt(config) do
+    response_types = config.response_types
+
     type_instructions =
       Enum.map_join(response_types, "\n", fn
         :single_select ->
@@ -708,7 +760,22 @@ defmodule Sagents.Middleware.AskUserQuestion do
     - Keep questions concise and focused on the decision at hand
     - Provide 2-5 distinct options with brief descriptions of tradeoffs
     - Include relevant context to help the user make an informed decision
-    - Set allow_cancel to true unless the question blocks critical progress
+    #{flag_guidance(config)}
     """
+  end
+
+  # Only guide the LLM about a flag it actually controls. A forced flag is
+  # absent from the tool schema, so mentioning it here would be misleading.
+  defp flag_guidance(config) do
+    [
+      if(is_nil(config.forced_allow_cancel),
+        do: "- Set allow_cancel to true unless the question blocks critical progress"
+      ),
+      if(is_nil(config.forced_allow_other),
+        do: "- Set allow_other to true only when a custom 'Other' answer would genuinely help"
+      )
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
   end
 end

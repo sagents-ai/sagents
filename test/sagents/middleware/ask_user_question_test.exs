@@ -16,6 +16,20 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
     end)
   end
 
+  defp single_select_args(extra) do
+    Map.merge(
+      %{
+        "question" => "Which database?",
+        "response_type" => "single_select",
+        "options" => [
+          %{"label" => "PostgreSQL", "value" => "postgresql"},
+          %{"label" => "MongoDB", "value" => "mongodb"}
+        ]
+      },
+      extra
+    )
+  end
+
   describe "init/1" do
     test "defaults to all response types" do
       {:ok, config} = AskUserQuestion.init([])
@@ -30,6 +44,34 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
     test "returns error for invalid response types" do
       assert {:error, msg} = AskUserQuestion.init(response_types: [:invalid_type])
       assert msg =~ "Invalid response types"
+    end
+
+    test "forced flags default to nil" do
+      {:ok, config} = AskUserQuestion.init([])
+      assert config.forced_allow_cancel == nil
+      assert config.forced_allow_other == nil
+    end
+
+    test "forces allow_cancel when a boolean is given" do
+      {:ok, config} = AskUserQuestion.init(allow_cancel: false)
+      assert config.forced_allow_cancel == false
+      assert config.forced_allow_other == nil
+    end
+
+    test "forces allow_other when a boolean is given" do
+      {:ok, config} = AskUserQuestion.init(allow_other: true)
+      assert config.forced_allow_other == true
+      assert config.forced_allow_cancel == nil
+    end
+
+    test "returns error when allow_cancel is not a boolean" do
+      assert {:error, msg} = AskUserQuestion.init(allow_cancel: "yes")
+      assert msg =~ "allow_cancel must be a boolean"
+    end
+
+    test "returns error when allow_other is not a boolean" do
+      assert {:error, msg} = AskUserQuestion.init(allow_other: 1)
+      assert msg =~ "allow_other must be a boolean"
     end
   end
 
@@ -51,6 +93,16 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
       assert prompt =~ "multi_select"
       assert prompt =~ "freeform"
     end
+
+    test "includes allow_cancel guidance when not forced" do
+      {:ok, config} = AskUserQuestion.init([])
+      assert AskUserQuestion.system_prompt(config) =~ "Set allow_cancel"
+    end
+
+    test "omits allow_cancel guidance when forced" do
+      {:ok, config} = AskUserQuestion.init(allow_cancel: false)
+      refute AskUserQuestion.system_prompt(config) =~ "Set allow_cancel"
+    end
   end
 
   describe "tools/1" do
@@ -68,6 +120,33 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
 
       enum = tool.parameters_schema.properties.response_type.enum
       assert enum == ["single_select", "freeform"]
+    end
+
+    test "exposes both flags in schema when neither is forced" do
+      {:ok, config} = AskUserQuestion.init([])
+      [tool] = AskUserQuestion.tools(config)
+
+      props = tool.parameters_schema.properties
+      assert Map.has_key?(props, :allow_other)
+      assert Map.has_key?(props, :allow_cancel)
+    end
+
+    test "omits allow_cancel from schema when forced" do
+      {:ok, config} = AskUserQuestion.init(allow_cancel: false)
+      [tool] = AskUserQuestion.tools(config)
+
+      props = tool.parameters_schema.properties
+      refute Map.has_key?(props, :allow_cancel)
+      assert Map.has_key?(props, :allow_other)
+    end
+
+    test "omits allow_other from schema when forced" do
+      {:ok, config} = AskUserQuestion.init(allow_other: true)
+      [tool] = AskUserQuestion.tools(config)
+
+      props = tool.parameters_schema.properties
+      refute Map.has_key?(props, :allow_other)
+      assert Map.has_key?(props, :allow_cancel)
     end
   end
 
@@ -154,6 +233,42 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
       assert {:interrupt, _msg, question_data} = tool.function.(args, %{})
       assert question_data.allow_other == true
       assert question_data.allow_cancel == false
+    end
+  end
+
+  # These tests build config inline (the shared setup uses default config) so
+  # each can force a specific flag.
+  describe "tool execution - forced flags" do
+    test "forced allow_cancel overrides the LLM-provided arg" do
+      {:ok, config} = AskUserQuestion.init(allow_cancel: false)
+      [tool] = AskUserQuestion.tools(config)
+
+      # LLM tries to set true; the forced false must win.
+      args = single_select_args(%{"allow_cancel" => true})
+
+      assert {:interrupt, _msg, question_data} = tool.function.(args, %{})
+      assert question_data.allow_cancel == false
+    end
+
+    test "forced allow_other overrides the LLM-provided arg" do
+      {:ok, config} = AskUserQuestion.init(allow_other: true)
+      [tool] = AskUserQuestion.tools(config)
+
+      args = single_select_args(%{"allow_other" => false})
+
+      assert {:interrupt, _msg, question_data} = tool.function.(args, %{})
+      assert question_data.allow_other == true
+    end
+
+    test "uses LLM-provided flags when neither is forced" do
+      {:ok, config} = AskUserQuestion.init([])
+      [tool] = AskUserQuestion.tools(config)
+
+      args = single_select_args(%{"allow_cancel" => false, "allow_other" => true})
+
+      assert {:interrupt, _msg, question_data} = tool.function.(args, %{})
+      assert question_data.allow_cancel == false
+      assert question_data.allow_other == true
     end
   end
 
