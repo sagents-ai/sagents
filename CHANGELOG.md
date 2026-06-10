@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.8.0-rc.12
+
+No breaking changes from `v0.8.0-rc.11`. See the `v0.8.0-rc.9` entry below for upgrading from `v0.8.0-rc.8`, the `v0.8.0-rc.5` entry for upgrading from `v0.8.0-rc.4`, and the `v0.8.0-rc.1` entry for upgrading from `v0.7.0`.
+
+Headline: developers can now pin `allow_other` and `allow_cancel` on the `AskUserQuestion` middleware instead of leaving options to the LLM.
+
+### Added
+- `Sagents.Middleware.AskUserQuestion` accepts optional `allow_other` and `allow_cancel` init options. Setting either to a boolean forces that value for every question (and drops it from the `ask_user` tool schema and system prompt), making it a deterministic config choice rather than a per-call LLM decision. Omitting a key preserves the existing LLM-controlled behavior. [#124](https://github.com/sagents-ai/sagents/pull/124)
+
 ## v0.8.0-rc.11
 
 No breaking changes from `v0.8.0-rc.10`. See the `v0.8.0-rc.9` entry below for upgrading from `v0.8.0-rc.8`, the `v0.8.0-rc.5` entry for upgrading from `v0.8.0-rc.4`, and the `v0.8.0-rc.1` entry for upgrading from `v0.7.0`.
