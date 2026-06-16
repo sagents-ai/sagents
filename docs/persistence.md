@@ -147,6 +147,7 @@ defmodule MyApp.Conversations.DisplayMessage do
 
     field :message_type, :string      # "user", "assistant", "tool", "system"
     field :content, :map              # Flexible JSONB storage
+    field :tool_call_id, :string      # store denormalized link: tool_call <-> tool_result
     field :content_type, :string      # "text", "thinking", "image", "tool_call", etc.
     field :sequence, :integer, default: 0
     field :status, :string, default: "completed"
@@ -158,6 +159,8 @@ end
 ```
 
 DisplayMessages are multi-content-type: one logical assistant turn can produce several rows (thinking + text + tool_call), ordered by `(inserted_at, sequence)`. See the schema's moduledoc for the valid `content_type` values and their expected `content` shapes.
+
+For `tool_call` and `tool_result` rows the call/result id is pulled out of the `content` JSONB into the top-level `tool_call_id` column (populated at insert time). It's the linking key between a tool call and its result, and the tool-call lifecycle queries (`mark_tool_executing/2`, `complete_tool_call/3`, etc.) use a plain indexed equality on it. The id still lives in `content` as well; the column is an additional indexed copy.
 
 ## Context Module
 

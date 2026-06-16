@@ -36,6 +36,7 @@ defmodule <%= @repo %>.Migrations.Create<%= Macro.camelize(@table_prefix) %>Pers
       add :message_type, :string, null: false
       # JSONB storage for flexible content
       add :content, :map, null: false
+      add :tool_call_id, :string
       # Content type for rendering
       add :content_type, :string, null: false, default: "text"
       # Tool execution status: "pending", "executing", "completed", "failed"
@@ -52,13 +53,7 @@ defmodule <%= @repo %>.Migrations.Create<%= Macro.camelize(@table_prefix) %>Pers
     create index(:<%= @table_prefix %>display_messages, [:content_type])
     # For filtering by status (e.g., pending tools)
     create index(:<%= @table_prefix %>display_messages, [:status])
-
-    # Unique partial index to prevent duplicate tool call IDs per conversation
-    create unique_index(
-             :<%= @table_prefix %>display_messages,
-             [:conversation_id, "(content->>'call_id')"],
-             name: :unique_tool_call_per_conversation,
-             where: "content_type = 'tool_call'"
-           )
+    # Index for tool-call lifecycle
+    create index(:<%= @table_prefix %>display_messages, [:tool_call_id])
   end
 end

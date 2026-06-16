@@ -33,7 +33,7 @@ defmodule <%= @context_module %>.DisplayMessage do
   - File: `%{"path" => "/path", "name" => "report.pdf"}`
   - Tool call: `%{"call_id" => "call_123", "name" => "search", "arguments" => %{...}}`
   - Tool result: `%{"tool_call_id" => "call_123", "name" => "search", "content" => "...", "is_error" => false}`
-  - Todo snapshot: `%{"todos" => [%{"id" => "1", "content" => "Plan", "status" => "completed"}, ...], "summary" => %{"total" => 3, "pending" => 1, "in_progress" => 1, "completed" => 1, "cancelled" => 0}}`
+  - Todo snapshot: `%{"todos" => [%{"id" => 1, "content" => "Plan", "status" => "completed"}, ...], "summary" => %{"total" => 3, "pending" => 1, "in_progress" => 1, "completed" => 1, "cancelled" => 0}}`
 
   ## Sequence Field (Message-Local Ordering)
 
@@ -103,6 +103,7 @@ defmodule <%= @context_module %>.DisplayMessage do
     field :message_type, :string
     # Flexible JSONB storage
     field :content, :map
+    field :tool_call_id, :string
     # Type of content for rendering
     field :content_type, :string
     # Message-local ordering (0-based, resets per message)
@@ -118,7 +119,15 @@ defmodule <%= @context_module %>.DisplayMessage do
   @doc false
   def create_changeset(conversation_id, attrs) do
     %DisplayMessage{}
-    |> cast(attrs, [:message_type, :content, :content_type, :sequence, :status, :metadata])
+    |> cast(attrs, [
+      :message_type,
+      :content,
+      :tool_call_id,
+      :content_type,
+      :sequence,
+      :status,
+      :metadata
+    ])
     |> put_change(:conversation_id, conversation_id)
     |> common_validations()
   end
@@ -126,7 +135,15 @@ defmodule <%= @context_module %>.DisplayMessage do
   @doc false
   def changeset(%DisplayMessage{} = message, attrs) do
     message
-    |> cast(attrs, [:message_type, :content, :content_type, :sequence, :status, :metadata])
+    |> cast(attrs, [
+      :message_type,
+      :content,
+      :tool_call_id,
+      :content_type,
+      :sequence,
+      :status,
+      :metadata
+    ])
     |> common_validations()
   end
 
@@ -145,10 +162,6 @@ defmodule <%= @context_module %>.DisplayMessage do
     |> validate_number(:sequence, greater_than_or_equal_to: 0)
     |> validate_content_structure()
     |> foreign_key_constraint(:conversation_id)
-    |> unique_constraint(:conversation_id,
-      name: :unique_tool_call_per_conversation,
-      message: "tool call already exists for this conversation"
-    )
   end
 
   # Validate content structure based on content_type.
