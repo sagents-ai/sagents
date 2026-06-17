@@ -8,15 +8,22 @@ defmodule Sagents.Extract do
   usage attribution, tenancy/APM context propagation, scope, fallback models,
   filesystem scope, and so on.
 
-  The trick is the same one `DataExtractionChain` uses: define a single tool
-  whose `parameters_schema` is the desired result shape, run the agent with
-  `until_tool_success: "<tool_name>"`, and read the result back out. `run/3`
-  returns the tool's `processed_content` — the value the tool body produces — so
-  the tool can shape the raw LLM arguments into whatever data structure you
-  actually want (a struct, a persisted record, an id). When the tool sets no
-  `processed_content`, `run/3` falls back to the LLM-supplied argument map. The
-  default schema tool simply hands `args` back as `processed_content`, so the
-  no-frills path still returns the LLM arguments. See "Shaping the result".
+  The trick is the same one `DataExtractionChain` uses: the agent owns a single
+  "submit" tool whose `parameters_schema` is the desired result shape, the run
+  stops on that tool, and `run/3` reads the result back out. `run/3` returns the
+  tool's `processed_content` — the value the tool body produces — so the tool can
+  shape the raw LLM arguments into whatever data structure you actually want (a
+  struct, a persisted record, an id). When the tool sets no `processed_content`,
+  `run/3` falls back to the LLM-supplied argument map. See "Shaping the result".
+
+  ## Agent-owned tool
+
+  The submit tool lives on the agent — defined alongside its system prompt and
+  middleware as one self-contained package — and you name it via
+  `:until_tool_success` (or `:until_tool`). `Sagents.Agent` owns its tools
+  (`Agent.new!(%{tools: [t]})` merges caller tools with middleware tools) and
+  `Sagents.Agent.execute/3` validates that the named tool is present. `run/3`
+  forwards the stop condition to `execute` and reads the result back out.
 
   ## Basic usage
 
@@ -29,30 +36,36 @@ defmodule Sagents.Extract do
         required: ["title", "summary"]
       }
 
+      submit =
+        LangChain.Function.new!(%{
+          name: "submit_result",
+          description: "Submit the structured result.",
+          parameters_schema: schema,
+          function: fn args, _ctx -> {:ok, Jason.encode!(args), args} end
+        })
+
+      {:ok, agent} = Sagents.Agent.new(%{model: model, tools: [submit]})
+
       state = State.new!(%{messages: [Message.new_user!("Summarize: ...")]})
 
-      {:ok, result} = Sagents.Extract.run(agent, state, schema: schema)
+      {:ok, result} = Sagents.Extract.run(agent, state, until_tool_success: "submit_result")
 
-      # result is the submit tool's processed_content. For the default schema
-      # tool that is the LLM-supplied map: %{"title" => "...", "summary" => "..."}
+      # result is the submit tool's processed_content. The tool above hands
+      # `args` back as the 3rd element, so result is the LLM-supplied map:
+      # %{"title" => "...", "summary" => "..."}
 
   ## Options
 
-    * `:schema` (required, unless `:tool` is given) — A JSON Schema map
-      describing the result shape. Becomes the `parameters_schema` of the
-      submit tool.
-    * `:tool` (required, unless `:schema` is given) — A pre-built
-      `LangChain.Function`. Use this when you want full control over the
-      tool's name, description, `parse_args` callback, etc. When supplied,
-      `:schema`, `:tool_name`, and `:description` are ignored. Return
-      `{:ok, "text for LLM", processed_term}` from the tool body to make
-      `processed_term` the value `run/3` returns; a 2-tuple `{:ok, "text"}`
-      falls back to the LLM arguments. See "Shaping the result".
-    * `:tool_name` (default `"submit_result"`) — Name of the submit tool the
-      LLM will be required to call. Only meaningful when `:schema` is used.
-    * `:description` (default a generic string) — Description sent to the LLM
-      for the submit tool. Worth writing well; the LLM reads it to decide what
-      to put in the arguments.
+  Exactly one of `:until_tool_success` / `:until_tool` is required (naming a tool
+  on the agent). The two are mutually exclusive; passing both is rejected by
+  `Sagents.Agent.execute/3`.
+
+    * `:until_tool_success` — Name of the agent-owned submit tool. The run stops
+      only when this tool returns a *successful* (non-error) result; an error
+      result keeps the loop running so the LLM can correct its arguments,
+      bounded by `:max_runs`. This is the loop most extraction callers want.
+    * `:until_tool` — Name of the agent-owned submit tool. The run stops as soon
+      as this tool is *called*: the tool executes, then the loop stops.
     * `:max_runs` (default `5`) — Maximum LLM calls. Enough for a single call
       plus a few retries if the tool body or `parse_args` validation rejects
       malformed args. Increase for complex schemas.
@@ -69,12 +82,12 @@ defmodule Sagents.Extract do
       This can be any term — a map, a struct, a persisted record, an id. When
       the tool sets no `processed_content` (it returned a 2-tuple
       `{:ok, "text"}`), this falls back to the LLM-supplied argument map, with
-      keys exactly as the provider returned them. The default schema tool hands
-      `args` back as `processed_content`, so the schema path returns the LLM
-      arguments.
-    * `{:error, term()}` — A `LangChainError` if the LLM never successfully
-      called the submit tool within `max_runs`, if a same-named tool already
-      exists on the agent, or anything else that `Sagents.Agent.execute/3` would surface.
+      keys exactly as the provider returned them.
+    * `{:error, term()}` — A `LangChainError` if neither stop option is given
+      (`type: "extract_invalid_opts"`), if the named tool is not on the agent
+      (`type: "extract_tool_not_found"`), if the LLM never successfully called
+      the submit tool within `max_runs`, or anything else that
+      `Sagents.Agent.execute/3` would surface.
 
   ## Shaping the result
 
@@ -82,13 +95,14 @@ defmodule Sagents.Extract do
   *emitted*. That lets the tool body turn the raw LLM arguments into the exact
   data shape you want, in three escalating tiers:
 
-  1. **Raw arguments (default).** With `:schema` and no custom tool, `run/3`
-     returns the LLM-supplied argument map unchanged. Nothing to do.
+  1. **Raw arguments.** A tool body that returns `{:ok, Jason.encode!(args),
+     args}` (or a 2-tuple `{:ok, text}`) makes `run/3` return the LLM-supplied
+     argument map unchanged.
 
-  2. **Process inside the tool body.** Supply a `:tool` whose body transforms,
-     validates, or persists the args and returns the shaped value as the 3rd
-     element. That value is what `run/3` returns; the LLM only ever sees the
-     2nd element (the string), never the 3rd.
+  2. **Process inside the tool body.** Transform, validate, or persist the args
+     and return the shaped value as the 3rd element. That value is what `run/3`
+     returns; the LLM only ever sees the 2nd element (the string), never the
+     3rd.
 
          submit =
            LangChain.Function.new!(%{
@@ -103,8 +117,10 @@ defmodule Sagents.Extract do
              end
            })
 
+         {:ok, agent} = Sagents.Agent.new(%{model: model, tools: [submit]})
+
          {:ok, %MyApp.Person{} = person} =
-           Sagents.Extract.run(agent, state, tool: submit)
+           Sagents.Extract.run(agent, state, until_tool_success: "submit_result")
 
   3. **`:parse_args` for coercion/validation.** A `LangChain.Function`
      `:parse_args` callback (Zoi schemas work well) can coerce the args before
@@ -113,18 +129,15 @@ defmodule Sagents.Extract do
      keeps the loop running so the LLM corrects the call — see "Validation and
      retry".
 
-  Callers who only care about the raw arguments need none of this: a 2-tuple
-  `{:ok, "text"}`, or just using `:schema`, returns the LLM args.
-
   ## Provider-side `tool_choice`
 
   Anthropic and OpenAI both let you require the model to call a specific tool
   via `tool_choice`. Setting this on your `ChatAnthropic` / `ChatOpenAI` model
   before passing it to `Sagents.Agent.new/2` materially improves single-call
   reliability. **The name in `tool_choice` must match the submit tool's name**
-  — which is whatever you pass as `:tool_name` (or `"submit_result"` if you
-  don't). Mismatched names still work — `until_tool` catches whichever tool
-  the LLM calls — but you lose the provider-side guarantee.
+  — the same name you attach to the agent and pass as `:until_tool_success`.
+  Mismatched names still work — `until_tool_success` catches the tool whenever
+  the LLM calls it — but you lose the provider-side guarantee.
 
   Example:
 
@@ -134,16 +147,17 @@ defmodule Sagents.Extract do
           tool_choice: %{"type" => "tool", "name" => "submit_result"}
         })
 
-      {:ok, agent} = Sagents.Agent.new(%{model: model, ...})
+      {:ok, agent} = Sagents.Agent.new(%{model: model, tools: [submit]})
 
-      Sagents.Extract.run(agent, state, schema: schema)
+      Sagents.Extract.run(agent, state, until_tool_success: "submit_result")
 
   ## Validation and retry
 
   Two layers of validation are available, both caller-owned:
 
-    1. **JSON schema** (provider-enforced) — defined by your `:schema`. The
-       provider rejects shape errors before the call reaches us.
+    1. **JSON schema** (provider-enforced) — defined by the submit tool's
+       `parameters_schema`. The provider rejects shape errors before the call
+       reaches us.
     2. **Business rules** (in your tool) — anything JSON Schema can't express.
        Use `LangChain.Function`'s `:parse_args` callback (Zoi schemas work
        well) or validate inside the tool body. Return `{:error, "reason"}`;
@@ -153,8 +167,9 @@ defmodule Sagents.Extract do
 
   Nothing here needs to know about either layer. The retry behavior is driven
   by `Extract` running with `until_tool_success: <submit tool>`: an error result
-  from the submit tool keeps the loop running (feeding the error back to the
-  LLM) instead of terminating the run with malformed args.
+  from the submit tool keeps the loop running, feeding the error back to the LLM
+  so it can correct its arguments. `until_tool` stops on the first call, whatever
+  the tool returns.
 
   ## Middleware compatibility
 
@@ -172,31 +187,19 @@ defmodule Sagents.Extract do
   token-usage capture, tenancy/APM context propagation, request-scoped
   logging, scope-keyed persistence, etc. Composing a safe agent is the
   caller's responsibility.
-
-  ## Non-mutation
-
-  `run/3` does not modify the agent you pass in. It builds a new agent value
-  with the submit tool appended to `:tools` and runs that. The submit tool
-  only exists for the duration of that call; the original agent is unchanged
-  and never sees it.
   """
 
-  alias LangChain.Function
   alias LangChain.LangChainError
   alias Sagents.Agent
   alias Sagents.AgentResult
   alias Sagents.State
 
-  @default_tool_name "submit_result"
-  @default_description "Submit the final structured result. Call this exactly once when you have produced the answer."
   @default_max_runs 5
 
   @typedoc "Options for `run/3`."
   @type opts :: [
-          schema: map(),
-          tool: Function.t(),
-          tool_name: String.t(),
-          description: String.t(),
+          until_tool_success: String.t(),
+          until_tool: String.t(),
           max_runs: pos_integer(),
           callbacks: [map()]
         ]
@@ -205,22 +208,19 @@ defmodule Sagents.Extract do
   Run a structured extraction with the given agent and state.
 
   The `state` carries the full conversation (system messages, user prompts,
-  any prior turns). See the module doc for option details.
+  any prior turns). The submit tool must be on the agent and named via
+  `:until_tool_success` or `:until_tool`. See the module doc for option details.
   """
   @spec run(Agent.t(), State.t(), opts()) :: {:ok, any()} | {:error, term()}
   def run(%Agent{} = agent, %State{} = state, opts) when is_list(opts) do
-    with {:ok, submit_tool} <- build_submit_tool(opts),
-         :ok <- check_tool_name_unique(agent, submit_tool.name) do
-      augmented_agent = %{agent | tools: agent.tools ++ [submit_tool]}
-      max_runs = Keyword.get(opts, :max_runs, @default_max_runs)
-
-      # Use the success variant so a validation error from the submit tool keeps
-      # the loop running (the LLM retries) instead of terminating with bad args.
+    with :ok <- validate_stop_option(opts),
+         :ok <- validate_tool_present(agent, opts) do
       execute_opts =
-        [until_tool_success: submit_tool.name, max_runs: max_runs]
-        |> maybe_put_callbacks(opts)
+        opts
+        |> Keyword.take([:until_tool_success, :until_tool, :max_runs, :callbacks])
+        |> Keyword.put_new(:max_runs, @default_max_runs)
 
-      augmented_agent
+      agent
       |> Agent.execute(state, execute_opts)
       |> extract_result()
     end
@@ -229,9 +229,11 @@ defmodule Sagents.Extract do
   # Prefer the submit tool's `processed_content` (position 3 of its 3-tuple
   # return) so a tool that validates/parses/persists can hand its processed
   # result back through Extract. Fall back to the LLM-supplied arguments only
-  # when the tool set no `processed_content` (e.g. it returned a 2-tuple) — the
-  # default submit tool passes `args` through, so the schema path is unchanged.
-  # Genuine failures (until_tool_not_called, interrupt, pause) pass through.
+  # when the tool set no `processed_content` (e.g. it returned a 2-tuple). Note
+  # the relied-upon quirk: `AgentResult.processed_content/1` reports a `nil`
+  # processed_content as the typed "no_processed_content" error, which is what
+  # triggers the fallback. Genuine failures (until_tool_not_called, interrupt,
+  # pause) pass through.
   defp extract_result(execute_return) do
     case AgentResult.processed_content(execute_return) do
       {:ok, content} ->
@@ -245,60 +247,40 @@ defmodule Sagents.Extract do
     end
   end
 
-  # Forward caller-supplied callbacks only when present, so Agent.execute keeps
-  # its no-`:callbacks` default behaviour otherwise.
-  defp maybe_put_callbacks(execute_opts, opts) do
-    case Keyword.get(opts, :callbacks) do
-      nil -> execute_opts
-      callbacks -> Keyword.put(execute_opts, :callbacks, callbacks)
-    end
-  end
-
-  # ── Tool building ────────────────────────────────────────────────
-
-  defp build_submit_tool(opts) do
-    case {Keyword.get(opts, :tool), Keyword.get(opts, :schema)} do
-      {%Function{} = tool, _schema} ->
-        {:ok, tool}
-
-      {nil, schema} when is_map(schema) ->
-        name = Keyword.get(opts, :tool_name, @default_tool_name)
-        description = Keyword.get(opts, :description, @default_description)
-
-        {:ok,
-         Function.new!(%{
-           name: name,
-           description: description,
-           parameters_schema: schema,
-           function: fn args, _ctx -> {:ok, Jason.encode!(args), args} end
-         })}
-
+  # At least one stop option must name a tool on the agent. When both are given,
+  # Agent.execute's validate_until_tool/2 rejects the combination downstream (the
+  # two are mutually exclusive there).
+  defp validate_stop_option(opts) do
+    case {Keyword.get(opts, :until_tool_success), Keyword.get(opts, :until_tool)} do
       {nil, nil} ->
         {:error,
          LangChainError.exception(
            type: "extract_invalid_opts",
-           message: "Sagents.Extract.run/3 requires either :schema or :tool option"
+           message:
+             "Sagents.Extract.run/3 requires :until_tool_success or :until_tool naming a tool on the agent"
          )}
 
-      {_tool, _schema} ->
-        {:error,
-         LangChainError.exception(
-           type: "extract_invalid_opts",
-           message: ":tool must be a %LangChain.Function{}"
-         )}
+      _one_or_both ->
+        :ok
     end
   end
 
-  defp check_tool_name_unique(%Agent{tools: tools}, name) do
+  # Friendlier, typed pre-check that the named tool exists on the agent.
+  # Agent.execute's validate_until_tool/2 also checks presence but surfaces a
+  # plain string; this gives callers a structured LangChainError to match on.
+  # Reads whichever stop option is set (preferring :until_tool_success).
+  defp validate_tool_present(%Agent{tools: tools}, opts) do
+    name = Keyword.get(opts, :until_tool_success) || Keyword.get(opts, :until_tool)
+
     if Enum.any?(tools, &(&1.name == name)) do
+      :ok
+    else
       {:error,
        LangChainError.exception(
-         type: "extract_tool_conflict",
+         type: "extract_tool_not_found",
          message:
-           "Agent already has a tool named #{inspect(name)}. Pass :tool_name or :tool to avoid the conflict."
+           "Sagents.Extract.run/3: tool #{inspect(name)} is not on the agent. Attach it via Agent.new!(%{tools: [tool]})."
        )}
-    else
-      :ok
     end
   end
 end

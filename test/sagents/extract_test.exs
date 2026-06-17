@@ -40,6 +40,16 @@ defmodule Sagents.ExtractTest do
     required: ["title", "summary"]
   }
 
+  # The canonical submit tool: hands the raw LLM args back as processed_content.
+  defp submit_tool(name \\ "submit_result") do
+    LangChain.Function.new!(%{
+      name: name,
+      description: "Submit the structured result.",
+      parameters_schema: @schema,
+      function: fn args, _ctx -> {:ok, Jason.encode!(args), args} end
+    })
+  end
+
   defp build_agent(tools \\ []) do
     Agent.new!(
       %{
@@ -64,39 +74,24 @@ defmodule Sagents.ExtractTest do
   end
 
   describe "run/3 — happy path" do
-    test "returns LLM-supplied arguments when submit tool is called" do
-      agent = build_agent()
+    test "returns LLM-supplied arguments when the agent-owned submit tool is called" do
+      agent = build_agent([submit_tool()])
       stub_submit_call("submit_result", %{"title" => "T", "summary" => "S"})
 
       assert {:ok, %{"title" => "T", "summary" => "S"}} =
-               Extract.run(agent, build_state(), schema: @schema)
+               Extract.run(agent, build_state(), until_tool_success: "submit_result")
     end
 
-    test "honors custom :tool_name" do
-      agent = build_agent()
-      stub_submit_call("my_submit", %{"title" => "x", "summary" => "y"})
+    test "stops via :until_tool (parity with :until_tool_success)" do
+      agent = build_agent([submit_tool()])
+      stub_submit_call("submit_result", %{"title" => "x", "summary" => "y"})
 
       assert {:ok, %{"title" => "x"}} =
-               Extract.run(agent, build_state(), schema: @schema, tool_name: "my_submit")
-    end
-
-    test "accepts a pre-built tool via :tool" do
-      tool =
-        LangChain.Function.new!(%{
-          name: "custom_tool",
-          description: "Custom submit",
-          parameters_schema: @schema,
-          function: fn args, _ctx -> {:ok, Jason.encode!(args), args} end
-        })
-
-      agent = build_agent()
-      stub_submit_call("custom_tool", %{"title" => "a", "summary" => "b"})
-
-      assert {:ok, %{"title" => "a"}} = Extract.run(agent, build_state(), tool: tool)
+               Extract.run(agent, build_state(), until_tool: "submit_result")
     end
 
     test "carries the caller's full message history" do
-      agent = build_agent()
+      agent = build_agent([submit_tool()])
       stub_submit_call("submit_result", %{"title" => "a", "summary" => "b"})
 
       state =
@@ -107,7 +102,8 @@ defmodule Sagents.ExtractTest do
           ]
         })
 
-      assert {:ok, %{"title" => "a"}} = Extract.run(agent, state, schema: @schema)
+      assert {:ok, %{"title" => "a"}} =
+               Extract.run(agent, state, until_tool_success: "submit_result")
     end
   end
 
@@ -125,10 +121,11 @@ defmodule Sagents.ExtractTest do
           end
         })
 
-      agent = build_agent()
+      agent = build_agent([tool])
       stub_submit_call("submit_result", %{"title" => "T", "summary" => "S"})
 
-      assert {:ok, %{id: 42, title: "T"}} = Extract.run(agent, build_state(), tool: tool)
+      assert {:ok, %{id: 42, title: "T"}} =
+               Extract.run(agent, build_state(), until_tool_success: "submit_result")
     end
 
     test "falls back to LLM args when the tool returns a 2-tuple (no processed_content)" do
@@ -140,45 +137,31 @@ defmodule Sagents.ExtractTest do
           function: fn args, _ctx -> {:ok, Jason.encode!(args)} end
         })
 
-      agent = build_agent()
+      agent = build_agent([tool])
       stub_submit_call("submit_result", %{"title" => "T", "summary" => "S"})
 
       assert {:ok, %{"title" => "T", "summary" => "S"}} =
-               Extract.run(agent, build_state(), tool: tool)
+               Extract.run(agent, build_state(), until_tool_success: "submit_result")
     end
   end
 
   describe "run/3 — error paths" do
-    test "errors when neither :schema nor :tool is supplied" do
-      agent = build_agent()
+    test "errors when neither :until_tool_success nor :until_tool is supplied" do
+      agent = build_agent([submit_tool()])
 
       assert {:error, %LangChainError{type: "extract_invalid_opts"}} =
                Extract.run(agent, build_state(), [])
     end
 
-    test "errors when :tool is not a Function struct" do
+    test "errors when the named tool is not on the agent" do
       agent = build_agent()
 
-      assert {:error, %LangChainError{type: "extract_invalid_opts"}} =
-               Extract.run(agent, build_state(), tool: "not a function")
-    end
-
-    test "errors when the agent already has a tool with the same name" do
-      existing =
-        LangChain.Function.new!(%{
-          name: "submit_result",
-          description: "preexisting",
-          function: fn _args, _ctx -> {:ok, "ok"} end
-        })
-
-      agent = build_agent([existing])
-
-      assert {:error, %LangChainError{type: "extract_tool_conflict"}} =
-               Extract.run(agent, build_state(), schema: @schema)
+      assert {:error, %LangChainError{type: "extract_tool_not_found"}} =
+               Extract.run(agent, build_state(), until_tool_success: "missing")
     end
 
     test "errors when LLM never calls the submit tool within max_runs" do
-      agent = build_agent()
+      agent = build_agent([submit_tool()])
 
       ChatAnthropic
       |> stub(:call, fn _model, _messages, _tools ->
@@ -186,29 +169,16 @@ defmodule Sagents.ExtractTest do
       end)
 
       assert {:error, %LangChainError{type: "until_tool_not_called"}} =
-               Extract.run(agent, build_state(), schema: @schema, max_runs: 2)
-    end
-  end
-
-  describe "run/3 — non-mutation" do
-    test "does not modify the caller's agent.tools" do
-      agent = build_agent()
-      original_tool_names = Enum.map(agent.tools, & &1.name)
-
-      stub_submit_call("submit_result", %{"title" => "a", "summary" => "b"})
-
-      {:ok, _result} = Extract.run(agent, build_state(), schema: @schema)
-
-      assert Enum.map(agent.tools, & &1.name) == original_tool_names
+               Extract.run(agent, build_state(), until_tool_success: "submit_result", max_runs: 2)
     end
   end
 
   describe "run/3 — callbacks" do
-    defp build_agent_with_recorder do
+    defp build_agent_with_recorder(tools) do
       Agent.new!(
         %{
           model: mock_model(),
-          tools: [],
+          tools: tools,
           middleware: [{CallbackRecordingMiddleware, [pid: self()]}]
         },
         replace_default_middleware: true
@@ -216,15 +186,17 @@ defmodule Sagents.ExtractTest do
     end
 
     test "fires the agent's middleware callbacks even when none are supplied" do
-      agent = build_agent_with_recorder()
+      agent = build_agent_with_recorder([submit_tool()])
       stub_submit_call("submit_result", %{"title" => "T", "summary" => "S"})
 
-      assert {:ok, %{"title" => "T"}} = Extract.run(agent, build_state(), schema: @schema)
+      assert {:ok, %{"title" => "T"}} =
+               Extract.run(agent, build_state(), until_tool_success: "submit_result")
+
       assert_received :mw_callback_fired
     end
 
     test "merges supplied :callbacks with the agent's middleware callbacks" do
-      agent = build_agent_with_recorder()
+      agent = build_agent_with_recorder([submit_tool()])
       stub_submit_call("submit_result", %{"title" => "T", "summary" => "S"})
 
       test_pid = self()
@@ -234,7 +206,10 @@ defmodule Sagents.ExtractTest do
       }
 
       assert {:ok, %{"title" => "T"}} =
-               Extract.run(agent, build_state(), schema: @schema, callbacks: [supplied])
+               Extract.run(agent, build_state(),
+                 until_tool_success: "submit_result",
+                 callbacks: [supplied]
+               )
 
       assert_received :supplied_fired
       assert_received :mw_callback_fired
@@ -257,7 +232,7 @@ defmodule Sagents.ExtractTest do
     end
 
     test "retries past a validation error and returns the corrected arguments" do
-      agent = build_agent()
+      agent = build_agent([validating_tool()])
 
       # First call: rejected by the tool body -> error result -> loop continues.
       ChatAnthropic
@@ -284,11 +259,11 @@ defmodule Sagents.ExtractTest do
       end)
 
       assert {:ok, %{"title" => "good", "summary" => "S"}} =
-               Extract.run(agent, build_state(), tool: validating_tool())
+               Extract.run(agent, build_state(), until_tool_success: "submit_result")
     end
 
     test "returns an error rather than malformed args when validation never passes" do
-      agent = build_agent()
+      agent = build_agent([validating_tool()])
 
       # The model always submits bad args, so the tool always errors.
       stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
@@ -303,7 +278,7 @@ defmodule Sagents.ExtractTest do
       end)
 
       assert {:error, %LangChainError{}} =
-               Extract.run(agent, build_state(), tool: validating_tool(), max_runs: 2)
+               Extract.run(agent, build_state(), until_tool_success: "submit_result", max_runs: 2)
     end
   end
 end
