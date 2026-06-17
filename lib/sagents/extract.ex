@@ -98,8 +98,10 @@ defmodule Sagents.Extract do
        or `:max_runs` is hit. Write error messages that are actionable — the
        LLM is the one reading them.
 
-  Nothing here needs to know about either layer. They fall out of how
-  `until_tool` already loops.
+  Nothing here needs to know about either layer. The retry behavior is driven
+  by `Extract` running with `until_tool_success: <submit tool>`: an error result
+  from the submit tool keeps the loop running (feeding the error back to the
+  LLM) instead of terminating the run with malformed args.
 
   ## Middleware compatibility
 
@@ -159,8 +161,10 @@ defmodule Sagents.Extract do
       augmented_agent = %{agent | tools: agent.tools ++ [submit_tool]}
       max_runs = Keyword.get(opts, :max_runs, @default_max_runs)
 
+      # Use the success variant so a validation error from the submit tool keeps
+      # the loop running (the LLM retries) instead of terminating with bad args.
       execute_opts =
-        [until_tool: submit_tool.name, max_runs: max_runs]
+        [until_tool_success: submit_tool.name, max_runs: max_runs]
         |> maybe_put_callbacks(opts)
 
       augmented_agent

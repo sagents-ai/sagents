@@ -381,4 +381,72 @@ defmodule Sagents.Mode.StepsTest do
       assert {:pause, ^chain} = result
     end
   end
+
+  describe "check_until_tool_success/2" do
+    defp tool_result(name, opts \\ []) do
+      ToolResult.new!(%{
+        tool_call_id: Keyword.get(opts, :call_id, "call_1"),
+        name: name,
+        content: Keyword.get(opts, :content, "ok"),
+        is_error: Keyword.get(opts, :is_error, false)
+      })
+    end
+
+    defp chain_with_last_tool_message(results) do
+      message = Message.new_tool_result!(%{tool_results: results})
+      %LLMChain{last_message: message}
+    end
+
+    test "terminates on a successful matching result" do
+      chain = chain_with_last_tool_message([tool_result("submit")])
+      opts = [tool_names: ["submit"]]
+
+      assert {:ok, ^chain, result} = Steps.check_until_tool_success({:continue, chain}, opts)
+      assert result.name == "submit"
+      refute result.is_error
+    end
+
+    test "continues when the matching result is an error" do
+      chain = chain_with_last_tool_message([tool_result("submit", is_error: true)])
+      opts = [tool_names: ["submit"]]
+
+      assert {:continue, ^chain} = Steps.check_until_tool_success({:continue, chain}, opts)
+    end
+
+    test "continues when there is no matching result" do
+      chain = chain_with_last_tool_message([tool_result("other_tool")])
+      opts = [tool_names: ["submit"]]
+
+      assert {:continue, ^chain} = Steps.check_until_tool_success({:continue, chain}, opts)
+    end
+
+    test "continues when last message is not a tool message" do
+      chain = %LLMChain{last_message: Message.new_assistant!(%{content: "hi"})}
+      opts = [tool_names: ["submit"]]
+
+      assert {:continue, ^chain} = Steps.check_until_tool_success({:continue, chain}, opts)
+    end
+
+    test "fires on the success when an error and a success are both present" do
+      results = [
+        tool_result("submit", call_id: "c1", is_error: true),
+        tool_result("submit", call_id: "c2", content: "good")
+      ]
+
+      chain = chain_with_last_tool_message(results)
+      opts = [tool_names: ["submit"]]
+
+      assert {:ok, ^chain, result} = Steps.check_until_tool_success({:continue, chain}, opts)
+      assert result.tool_call_id == "c2"
+      refute result.is_error
+    end
+
+    test "terminal tuples pass through unchanged" do
+      chain = %LLMChain{}
+
+      assert {:ok, ^chain} = Steps.check_until_tool_success({:ok, chain}, [])
+      assert {:ok, ^chain, :x} = Steps.check_until_tool_success({:ok, chain, :x}, [])
+      assert {:error, ^chain, :y} = Steps.check_until_tool_success({:error, chain, :y}, [])
+    end
+  end
 end

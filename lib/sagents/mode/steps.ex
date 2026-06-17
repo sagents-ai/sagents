@@ -71,6 +71,35 @@ defmodule Sagents.Mode.Steps do
 
   def propagate_state(terminal, _opts), do: terminal
 
+  @doc """
+  Until-tool termination that fires only on a *successful* matching result.
+
+  Like LangChain's `check_until_tool/2`, but ignores tool results with
+  `is_error: true`. When the target tool is called but returns an error, the
+  pipeline continues (`{:continue, chain}`) so the loop re-runs and the LLM
+  sees the error result and can correct the call. This is the default behavior
+  for `until_tool`; pass `until_tool_success: false` to use name-only matching.
+
+  Reads `:tool_names` from opts (a list of tool-name strings, populated by
+  `Sagents.Modes.AgentExecution`).
+  """
+  def check_until_tool_success({:continue, chain}, opts) do
+    names = Keyword.get(opts, :tool_names, [])
+
+    case chain.last_message do
+      %{role: :tool, tool_results: results} when is_list(results) ->
+        case Enum.find(results, &(&1.name in names and not &1.is_error)) do
+          nil -> {:continue, chain}
+          result -> {:ok, chain, result}
+        end
+
+      _other ->
+        {:continue, chain}
+    end
+  end
+
+  def check_until_tool_success(terminal, _opts), do: terminal
+
   # ── Loop Boundary (with until_tool enforcement) ────────────────
 
   @doc """

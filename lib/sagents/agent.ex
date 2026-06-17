@@ -47,6 +47,7 @@ defmodule Sagents.Agent do
   alias Sagents.State
   alias LangChain.LangChainError
   alias LangChain.Message
+  alias LangChain.Message.ToolResult
   alias LangChain.Chains.LLMChain
   alias Sagents.Middleware.HumanInTheLoop
 
@@ -85,6 +86,20 @@ defmodule Sagents.Agent do
   end
 
   @type t :: %Agent{}
+
+  @typedoc """
+  Result of `execute/3` (and `resume/4`).
+
+  The `{:ok, state, tool_result}` shape is returned for `:until_tool` /
+  `:until_tool_success` completions; the third element is the matching
+  `LangChain.Message.ToolResult`.
+  """
+  @type execute_result ::
+          {:ok, State.t()}
+          | {:ok, State.t(), ToolResult.t()}
+          | {:interrupt, State.t(), any()}
+          | {:pause, State.t()}
+          | {:error, any()}
 
   @create_fields [
     :agent_id,
@@ -462,9 +477,58 @@ defmodule Sagents.Agent do
     callbacks. When running via `AgentServer`, the only callbacks passed here are
     the PubSub broadcasting callbacks; middleware collection happens internally.
 
+  - `:until_tool` - Tool name (string) or list of tool names. When set, the run
+    completes (returning `{:ok, state, tool_result}`) as soon as the target tool
+    is *called*, regardless of whether it succeeded or returned an error. Errors
+    with `until_tool_not_called` if the LLM stops without calling it.
+
+  - `:until_tool_success` - Tool name (string) or list of tool names. Like
+    `:until_tool`, but the run completes only when the target tool returns a
+    *successful* (non-error) result. An error result keeps the loop running so
+    the LLM can correct its arguments, up to `:max_runs` attempts. Use this
+    *instead of* `:until_tool` when the tool validates its input and you want the
+    model to retry. Passing both `:until_tool` and `:until_tool_success` is an
+    error (they are mutually exclusive).
+
+    On success the run returns `{:ok, state, %LangChain.Message.ToolResult{}}`.
+    The tool can hand a processed result back on that `ToolResult` by returning
+    `{:ok, "text for LLM", processed_term}` — the 3rd element becomes the
+    result's `processed_content` and is **not** sent to the model. Read it with
+    `Sagents.AgentResult.processed_content/1`. This is the building block
+    `Sagents.Extract` is built on.
+
+        # A submit tool that validates + persists, returning the inserted record:
+        submit =
+          LangChain.Function.new!(%{
+            name: "submit",
+            parameters_schema: schema,
+            function: fn args, _ctx ->
+              case MyApp.create_person(args) do
+                {:ok, person} -> {:ok, "Saved \#{person.id}.", person}
+                # an error result loops so the LLM can correct the call:
+                {:error, reason} -> {:error, "Could not save: \#{reason}"}
+              end
+            end
+          })
+
+        {:ok, _state, %LangChain.Message.ToolResult{}} = result =
+          Agent.execute(agent, state, until_tool_success: "submit", max_runs: 5)
+
+        {:ok, %MyApp.Person{} = person} =
+          Sagents.AgentResult.processed_content(result)
+
+    Plain `:until_tool` would instead terminate on the *first* call even when the
+    tool returns `{:error, ...}`, so the validate-and-retry loop above needs
+    `:until_tool_success`. Note `processed_content` is a virtual field. Read it
+    from the `execute/3` return value; it is not persisted across a state
+    serialize/reload.
+
   ## Returns
 
   - `{:ok, state}` - Normal completion
+  - `{:ok, state, tool_result}` - `:until_tool` / `:until_tool_success` completion;
+    the third element is the matching `%LangChain.Message.ToolResult{}` (see those
+    options and `Sagents.AgentResult`)
   - `{:interrupt, state, interrupt_data}` - Execution paused for human approval
   - `{:error, reason}` - Execution failed
 
@@ -499,6 +563,7 @@ defmodule Sagents.Agent do
 
       Agent.execute(agent, state, callbacks: callbacks)
   """
+  @spec execute(t(), State.t(), keyword()) :: execute_result()
   def execute(%Agent{} = agent, %State{} = state, opts \\ []) do
     # Ensure agent_id is set in state (library handles this automatically)
     state = %{state | agent_id: agent.agent_id}
@@ -570,6 +635,7 @@ defmodule Sagents.Agent do
       response = %{type: :answer, selected: ["PostgreSQL"]}
       {:ok, final_state} = Agent.resume(agent, state, response)
   """
+  @spec resume(t(), State.t(), any(), keyword()) :: execute_result()
   def resume(%Agent{} = agent, %State{} = state, resume_data, opts \\ []) do
     # Ensure agent_id is set in state (library handles this automatically)
     state = %{state | agent_id: agent.agent_id}
@@ -835,23 +901,47 @@ defmodule Sagents.Agent do
     opts
   end
 
+  # `:until_tool` and `:until_tool_success` both name the target tool (string or
+  # list of strings). They are mutually exclusive: `:until_tool` stops when the
+  # tool is called (any result); `:until_tool_success` stops only on a successful
+  # (non-error) result, retrying on errors.
   defp validate_until_tool(%Agent{} = agent, opts) do
-    case Keyword.get(opts, :until_tool) do
-      nil ->
+    call = Keyword.get(opts, :until_tool)
+    success = Keyword.get(opts, :until_tool_success)
+
+    cond do
+      not is_nil(call) and not is_nil(success) ->
+        {:error,
+         "Cannot pass both :until_tool and :until_tool_success; they are mutually exclusive. " <>
+           "Use :until_tool to stop when the tool is called, or :until_tool_success to stop " <>
+           "only when it returns a successful result."}
+
+      not is_nil(call) ->
+        validate_until_tool_target(agent, :until_tool, call, opts)
+
+      not is_nil(success) ->
+        validate_until_tool_target(agent, :until_tool_success, success, opts)
+
+      true ->
         {:ok, opts}
-
-      tool when is_binary(tool) ->
-        do_validate_tool_names(agent, [tool], opts)
-
-      tools when is_list(tools) ->
-        do_validate_tool_names(agent, tools, opts)
-
-      other ->
-        {:error, "Invalid :until_tool option: expected string or list, got: #{inspect(other)}"}
     end
   end
 
-  defp do_validate_tool_names(%Agent{tools: tools}, target_names, opts) do
+  defp validate_until_tool_target(agent, key, value, opts) do
+    case value do
+      tool when is_binary(tool) ->
+        do_validate_tool_names(agent, key, [tool], opts)
+
+      tools when is_list(tools) ->
+        do_validate_tool_names(agent, key, tools, opts)
+
+      other ->
+        {:error,
+         "Invalid #{inspect(key)} option: expected string or list, got: #{inspect(other)}"}
+    end
+  end
+
+  defp do_validate_tool_names(%Agent{tools: tools}, key, target_names, opts) do
     available = MapSet.new(tools, & &1.name)
     missing = Enum.reject(target_names, &MapSet.member?(available, &1))
 
@@ -861,7 +951,7 @@ defmodule Sagents.Agent do
 
       names ->
         {:error,
-         "until_tool: tool(s) #{inspect(names)} not found. Available: #{inspect(MapSet.to_list(available))}"}
+         "#{key}: tool(s) #{inspect(names)} not found. Available: #{inspect(MapSet.to_list(available))}"}
     end
   end
 
@@ -872,7 +962,7 @@ defmodule Sagents.Agent do
       run_opts
       |> Keyword.put(:mode, agent.mode || Sagents.Modes.AgentExecution)
       |> Keyword.put(:middleware, middleware)
-      |> maybe_put_until_tool(opts)
+      |> put_until_tool_opts(opts)
       |> maybe_put_max_runs(agent, opts)
 
     if is_raw_langchain_mode?(agent.mode) do
@@ -913,10 +1003,22 @@ defmodule Sagents.Agent do
     end
   end
 
-  defp maybe_put_until_tool(mode_opts, opts) do
-    case Keyword.get(opts, :until_tool) do
-      nil -> mode_opts
-      until_tool -> Keyword.put(mode_opts, :until_tool, until_tool)
+  # Collapse the public either-or options into the mode's internal
+  # `:until_tool` + `:require_tool_success` representation (see
+  # `Sagents.Modes.AgentExecution.collapse_until_tool/2`). Mutual exclusivity is
+  # already enforced by `validate_until_tool/2`.
+  defp put_until_tool_opts(mode_opts, opts) do
+    case Sagents.Modes.AgentExecution.collapse_until_tool(
+           Keyword.get(opts, :until_tool),
+           Keyword.get(opts, :until_tool_success)
+         ) do
+      {nil, _require_success} ->
+        mode_opts
+
+      {until_tool, require_success} ->
+        mode_opts
+        |> Keyword.put(:until_tool, until_tool)
+        |> Keyword.put(:require_tool_success, require_success)
     end
   end
 

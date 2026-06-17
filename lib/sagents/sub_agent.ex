@@ -131,8 +131,13 @@ defmodule Sagents.SubAgent do
     # Error information (when status = :error)
     field :error, :any, virtual: true
 
-    # Until-tool termination: tool name (string) or list of tool names
+    # Until-tool termination: tool name (string) or list of tool names.
     field :until_tool, :any, virtual: true
+
+    # When true, :until_tool stops only on a successful (non-error) result; an
+    # error result keeps the loop running so the LLM can retry. Defaults to
+    # false (any call to :until_tool ends the run).
+    field :require_tool_success, :boolean, default: false, virtual: true
 
     # Maximum number of LLM calls per execution. Overrides the mode's default
     # (50 for AgentExecution). See Agent :max_runs for details.
@@ -151,6 +156,7 @@ defmodule Sagents.SubAgent do
           interrupt_data: map() | nil,
           error: term() | nil,
           until_tool: String.t() | [String.t()] | nil,
+          require_tool_success: boolean(),
           id: String.t() | nil,
           parent_agent_id: String.t() | nil,
           created_at: DateTime.t() | nil
@@ -291,6 +297,7 @@ defmodule Sagents.SubAgent do
     # `:scope` field if the caller didn't pass one (e.g., direct new_from_compiled).
     scope = Keyword.get(opts, :scope, agent.scope)
     until_tool = Keyword.get(opts, :until_tool)
+    require_tool_success = Keyword.get(opts, :require_tool_success, false)
     max_runs = Keyword.get(opts, :max_runs)
 
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
@@ -337,6 +344,7 @@ defmodule Sagents.SubAgent do
       chain: chain,
       interrupt_on: interrupt_on,
       until_tool: until_tool,
+      require_tool_success: require_tool_success,
       max_runs: max_runs,
       status: :idle,
       created_at: DateTime.utc_now()
@@ -697,6 +705,7 @@ defmodule Sagents.SubAgent do
   def build_mode_opts(%SubAgent{
         interrupt_on: interrupt_on,
         until_tool: until_tool,
+        require_tool_success: require_tool_success,
         max_runs: max_runs
       }) do
     opts = [mode: Sagents.Modes.AgentExecution]
@@ -722,8 +731,13 @@ defmodule Sagents.SubAgent do
 
     opts =
       case until_tool do
-        nil -> opts
-        ut -> Keyword.put(opts, :until_tool, ut)
+        nil ->
+          opts
+
+        ut ->
+          opts
+          |> Keyword.put(:until_tool, ut)
+          |> Keyword.put(:require_tool_success, require_tool_success)
       end
 
     opts =
@@ -782,6 +796,9 @@ defmodule Sagents.SubAgent do
       field :middleware, {:array, :any}, default: [], virtual: true
       field :interrupt_on, :map
       field :until_tool, :any, virtual: true
+      # See SubAgent.until_tool_success. Tool name (string) or list; mutually
+      # exclusive with :until_tool. Stops only on a successful result.
+      field :until_tool_success, :any, virtual: true
       field :max_runs, :integer, virtual: true
     end
 
@@ -798,6 +815,7 @@ defmodule Sagents.SubAgent do
             middleware: list(),
             interrupt_on: map() | nil,
             until_tool: String.t() | [String.t()] | nil,
+            until_tool_success: String.t() | [String.t()] | nil,
             max_runs: integer() | nil
           }
 
@@ -816,6 +834,7 @@ defmodule Sagents.SubAgent do
         :middleware,
         :interrupt_on,
         :until_tool,
+        :until_tool_success,
         :max_runs
       ])
       |> validate_required([:name, :description, :tools])
@@ -857,25 +876,43 @@ defmodule Sagents.SubAgent do
     end
 
     defp validate_until_tool(changeset) do
-      until_tool = get_field(changeset, :until_tool)
+      call = get_field(changeset, :until_tool)
+      success = get_field(changeset, :until_tool_success)
       tools = get_field(changeset, :tools)
 
-      case until_tool do
-        nil ->
+      cond do
+        not is_nil(call) and not is_nil(success) ->
+          add_error(
+            changeset,
+            :until_tool_success,
+            "cannot be set together with :until_tool (they are mutually exclusive)"
+          )
+
+        not is_nil(call) ->
+          validate_until_tool_value(changeset, :until_tool, call, tools)
+
+        not is_nil(success) ->
+          validate_until_tool_value(changeset, :until_tool_success, success, tools)
+
+        true ->
           changeset
-
-        name when is_binary(name) ->
-          validate_tool_names_exist(changeset, [name], tools)
-
-        names when is_list(names) ->
-          validate_tool_names_exist(changeset, names, tools)
-
-        _other ->
-          add_error(changeset, :until_tool, "must be a string or list of strings")
       end
     end
 
-    defp validate_tool_names_exist(changeset, names, tools) when is_list(tools) do
+    defp validate_until_tool_value(changeset, key, value, tools) do
+      case value do
+        name when is_binary(name) ->
+          validate_tool_names_exist(changeset, key, [name], tools)
+
+        names when is_list(names) ->
+          validate_tool_names_exist(changeset, key, names, tools)
+
+        _other ->
+          add_error(changeset, key, "must be a string or list of strings")
+      end
+    end
+
+    defp validate_tool_names_exist(changeset, key, names, tools) when is_list(tools) do
       tool_names =
         tools
         |> Enum.filter(&is_struct(&1, LangChain.Function))
@@ -889,13 +926,13 @@ defmodule Sagents.SubAgent do
       else
         add_error(
           changeset,
-          :until_tool,
+          key,
           "references tools that are not in the tools list: #{Enum.join(missing, ", ")}"
         )
       end
     end
 
-    defp validate_tool_names_exist(changeset, _names, _tools), do: changeset
+    defp validate_tool_names_exist(changeset, _key, _names, _tools), do: changeset
 
     # At least one of system_prompt, instructions, or system_prompt_override
     # must be present so the sub-agent has *some* task framing beyond the

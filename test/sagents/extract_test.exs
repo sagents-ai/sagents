@@ -203,4 +203,70 @@ defmodule Sagents.ExtractTest do
       assert_received :mw_callback_fired
     end
   end
+
+  describe "run/3 — validation and retry" do
+    # Submit tool that enforces a business rule the JSON schema can't: only a
+    # "good" title is accepted. Anything else returns an error result.
+    defp validating_tool do
+      LangChain.Function.new!(%{
+        name: "submit_result",
+        description: "Submit the result",
+        parameters_schema: @schema,
+        function: fn
+          %{"title" => "good"} = args, _ctx -> {:ok, Jason.encode!(args), args}
+          _args, _ctx -> {:error, "title must be 'good'"}
+        end
+      })
+    end
+
+    test "retries past a validation error and returns the corrected arguments" do
+      agent = build_agent()
+
+      # First call: rejected by the tool body -> error result -> loop continues.
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        call =
+          ToolCall.new!(%{
+            call_id: "c1",
+            name: "submit_result",
+            arguments: %{"title" => "bad", "summary" => "S"}
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [call]})]}
+      end)
+      # Second call: corrected args -> success -> run completes.
+      |> expect(:call, fn _model, _messages, _tools ->
+        call =
+          ToolCall.new!(%{
+            call_id: "c2",
+            name: "submit_result",
+            arguments: %{"title" => "good", "summary" => "S"}
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [call]})]}
+      end)
+
+      assert {:ok, %{"title" => "good", "summary" => "S"}} =
+               Extract.run(agent, build_state(), tool: validating_tool())
+    end
+
+    test "returns an error rather than malformed args when validation never passes" do
+      agent = build_agent()
+
+      # The model always submits bad args, so the tool always errors.
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        call =
+          ToolCall.new!(%{
+            call_id: "c#{System.unique_integer([:positive])}",
+            name: "submit_result",
+            arguments: %{"title" => "bad", "summary" => "S"}
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [call]})]}
+      end)
+
+      assert {:error, %LangChainError{}} =
+               Extract.run(agent, build_state(), tool: validating_tool(), max_runs: 2)
+    end
+  end
 end
