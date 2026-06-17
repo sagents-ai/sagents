@@ -131,7 +131,9 @@ defmodule Sagents.AgentResult do
   tool body can attach by returning `{:ok, "string for LLM", native_term}`.
 
   Useful when the tool wants to hand back something richer than a JSON-parseable
-  argument map (a struct, a tuple, etc.).
+  argument map (a struct, a tuple, etc.). Contrast with `tool_arguments/1`, which
+  returns the arguments the *LLM emitted*; `processed_content/1` returns what the
+  *tool body computed* from them.
   """
   @spec processed_content(execute_return()) ::
           {:ok, any()} | {:error, LangChainError.t()} | {:error, any()}

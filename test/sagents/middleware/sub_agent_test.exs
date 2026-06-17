@@ -169,7 +169,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       assert summary.descriptions["agent1"] == "First agent"
       assert summary.descriptions["agent2"] == "Second agent"
       assert is_list(summary.block_middleware)
-      assert is_map(summary.until_tool_map)
+      assert is_map(summary.until_tool_targets)
       assert summary.has_use_instructions == false
     end
 
@@ -2104,7 +2104,7 @@ defmodule Sagents.Middleware.SubAgentTest do
   end
 
   describe "until_tool configuration" do
-    test "init stores until_tool_map from subagent configs with until_tool" do
+    test "init stores until_tool_targets from configs with until_tool / until_tool_success" do
       config_with_until =
         SubAgent.Config.new!(%{
           name: "finisher",
@@ -2114,22 +2114,34 @@ defmodule Sagents.Middleware.SubAgentTest do
           until_tool: "finish_tool"
         })
 
+      config_with_success =
+        SubAgent.Config.new!(%{
+          name: "validator",
+          description: "Agent with until_tool_success",
+          system_prompt: "You are an agent that uses submit_tool",
+          tools: [test_tool("submit_tool")],
+          until_tool_success: "submit_tool"
+        })
+
       config_without_until = build_subagent_config("plain", "Plain agent")
 
       opts = [
         agent_id: "parent",
         model: test_model(),
         middleware: [],
-        subagents: [config_with_until, config_without_until]
+        subagents: [config_with_until, config_with_success, config_without_until]
       ]
 
       assert {:ok, middleware_config} = SubAgentMiddleware.init(opts)
-      assert is_map(middleware_config.until_tool_map)
-      assert middleware_config.until_tool_map["finisher"] == "finish_tool"
-      refute Map.has_key?(middleware_config.until_tool_map, "plain")
+      assert is_map(middleware_config.until_tool_targets)
+      # until_tool collapses to require_success: false
+      assert middleware_config.until_tool_targets["finisher"] == {"finish_tool", false}
+      # until_tool_success collapses to require_success: true
+      assert middleware_config.until_tool_targets["validator"] == {"submit_tool", true}
+      refute Map.has_key?(middleware_config.until_tool_targets, "plain")
     end
 
-    test "init stores empty until_tool_map when no configs have until_tool" do
+    test "init stores empty until_tool_targets when no configs have until-tool set" do
       config = build_subagent_config("plain", "Plain agent")
 
       opts = [
@@ -2140,7 +2152,7 @@ defmodule Sagents.Middleware.SubAgentTest do
       ]
 
       assert {:ok, middleware_config} = SubAgentMiddleware.init(opts)
-      assert middleware_config.until_tool_map == %{}
+      assert middleware_config.until_tool_targets == %{}
     end
 
     test "SubAgent created with until_tool from config" do

@@ -167,6 +167,7 @@ defmodule Sagents.Middleware.SubAgent do
                                         "as `task_name` and provide clear `instructions` describing what the " <>
                                         "handler should accomplish. Do not guess at task types on your own."
 
+  alias Sagents.Modes.AgentExecution
   alias Sagents.State
   alias Sagents.SubAgent
   alias Sagents.SubAgentServer
@@ -204,13 +205,19 @@ defmodule Sagents.Middleware.SubAgent do
         # Build descriptions map for tool schema
         descriptions = SubAgent.build_descriptions(subagents)
 
-        # Build until_tool map from subagent configs that have until_tool set
-        until_tool_map =
+        # Collapse each config's mutually-exclusive until_tool / until_tool_success
+        # into the internal {tool_name, require_success} representation, keyed by
+        # task name. Tasks with neither set are omitted.
+        until_tool_targets =
           subagents
-          |> Enum.filter(fn config ->
-            is_struct(config, SubAgent.Config) and config.until_tool != nil
+          |> Enum.filter(&is_struct(&1, SubAgent.Config))
+          |> Enum.flat_map(fn config ->
+            case AgentExecution.collapse_until_tool(config.until_tool, config.until_tool_success) do
+              {nil, _require_success} -> []
+              {name, require_success} -> [{config.name, {name, require_success}}]
+            end
           end)
-          |> Map.new(fn config -> {config.name, config.until_tool} end)
+          |> Map.new()
 
         # Build display_texts map: %{task_name => display_text}.
         # Used by the :on_tool_call_identified callback to re-label the
@@ -250,7 +257,7 @@ defmodule Sagents.Middleware.SubAgent do
           agent_id: agent_id,
           model: model,
           block_middleware: block_middleware,
-          until_tool_map: until_tool_map,
+          until_tool_targets: until_tool_targets,
           display_texts_map: display_texts_map,
           use_instructions_map: use_instructions_map,
           include_task_list: include_task_list
@@ -396,7 +403,7 @@ defmodule Sagents.Middleware.SubAgent do
       subagents: subagents,
       descriptions: config.descriptions,
       block_middleware: config.block_middleware,
-      until_tool_map: config.until_tool_map,
+      until_tool_targets: Map.get(config, :until_tool_targets, %{}),
       has_use_instructions: not Enum.empty?(Map.get(config, :use_instructions_map, %{}))
     }
   end
@@ -674,9 +681,10 @@ defmodule Sagents.Middleware.SubAgent do
         start_dynamic_subagent(instructions, args, context, config, per_call_initial)
 
       {:ok, agent_config} ->
-        # Look up until_tool configuration for this subagent type
-        until_tool_map = Map.get(config, :until_tool_map, %{})
-        until_tool = Map.get(until_tool_map, task_name)
+        # Look up the collapsed until-tool target for this subagent type:
+        # {tool_name, require_success}, or {nil, false} when not configured.
+        until_tool_targets = Map.get(config, :until_tool_targets, %{})
+        {until_tool, require_tool_success} = Map.get(until_tool_targets, task_name, {nil, false})
 
         # Extract parent's tool_context, metadata, runtime, and scope so
         # SubAgent tools see the same context as parent tools. Agent.build_chain
@@ -700,6 +708,7 @@ defmodule Sagents.Middleware.SubAgent do
                 compiled_agent: compiled.agent,
                 initial_messages: final_initial,
                 until_tool: until_tool,
+                require_tool_success: require_tool_success,
                 parent_tool_context: parent_tool_context,
                 parent_metadata: parent_metadata,
                 parent_runtime: parent_runtime,
@@ -714,6 +723,7 @@ defmodule Sagents.Middleware.SubAgent do
                 agent_config: agent,
                 initial_messages: per_call_initial,
                 until_tool: until_tool,
+                require_tool_success: require_tool_success,
                 parent_tool_context: parent_tool_context,
                 parent_metadata: parent_metadata,
                 parent_runtime: parent_runtime,

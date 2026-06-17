@@ -111,6 +111,43 @@ defmodule Sagents.ExtractTest do
     end
   end
 
+  describe "run/3 — processed_content" do
+    test "returns the tool's processed_content, not the raw LLM args" do
+      # Tool shapes the raw args into a different structure and hands it back as
+      # the 3rd element. run/3 should return that, not the LLM-supplied map.
+      tool =
+        LangChain.Function.new!(%{
+          name: "submit_result",
+          description: "Submit",
+          parameters_schema: @schema,
+          function: fn args, _ctx ->
+            {:ok, "saved", %{id: 42, title: args["title"]}}
+          end
+        })
+
+      agent = build_agent()
+      stub_submit_call("submit_result", %{"title" => "T", "summary" => "S"})
+
+      assert {:ok, %{id: 42, title: "T"}} = Extract.run(agent, build_state(), tool: tool)
+    end
+
+    test "falls back to LLM args when the tool returns a 2-tuple (no processed_content)" do
+      tool =
+        LangChain.Function.new!(%{
+          name: "submit_result",
+          description: "Submit",
+          parameters_schema: @schema,
+          function: fn args, _ctx -> {:ok, Jason.encode!(args)} end
+        })
+
+      agent = build_agent()
+      stub_submit_call("submit_result", %{"title" => "T", "summary" => "S"})
+
+      assert {:ok, %{"title" => "T", "summary" => "S"}} =
+               Extract.run(agent, build_state(), tool: tool)
+    end
+  end
+
   describe "run/3 — error paths" do
     test "errors when neither :schema nor :tool is supplied" do
       agent = build_agent()
@@ -201,6 +238,72 @@ defmodule Sagents.ExtractTest do
 
       assert_received :supplied_fired
       assert_received :mw_callback_fired
+    end
+  end
+
+  describe "run/3 — validation and retry" do
+    # Submit tool that enforces a business rule the JSON schema can't: only a
+    # "good" title is accepted. Anything else returns an error result.
+    defp validating_tool do
+      LangChain.Function.new!(%{
+        name: "submit_result",
+        description: "Submit the result",
+        parameters_schema: @schema,
+        function: fn
+          %{"title" => "good"} = args, _ctx -> {:ok, Jason.encode!(args), args}
+          _args, _ctx -> {:error, "title must be 'good'"}
+        end
+      })
+    end
+
+    test "retries past a validation error and returns the corrected arguments" do
+      agent = build_agent()
+
+      # First call: rejected by the tool body -> error result -> loop continues.
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        call =
+          ToolCall.new!(%{
+            call_id: "c1",
+            name: "submit_result",
+            arguments: %{"title" => "bad", "summary" => "S"}
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [call]})]}
+      end)
+      # Second call: corrected args -> success -> run completes.
+      |> expect(:call, fn _model, _messages, _tools ->
+        call =
+          ToolCall.new!(%{
+            call_id: "c2",
+            name: "submit_result",
+            arguments: %{"title" => "good", "summary" => "S"}
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [call]})]}
+      end)
+
+      assert {:ok, %{"title" => "good", "summary" => "S"}} =
+               Extract.run(agent, build_state(), tool: validating_tool())
+    end
+
+    test "returns an error rather than malformed args when validation never passes" do
+      agent = build_agent()
+
+      # The model always submits bad args, so the tool always errors.
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        call =
+          ToolCall.new!(%{
+            call_id: "c#{System.unique_integer([:positive])}",
+            name: "submit_result",
+            arguments: %{"title" => "bad", "summary" => "S"}
+          })
+
+        {:ok, [Message.new_assistant!(%{tool_calls: [call]})]}
+      end)
+
+      assert {:error, %LangChainError{}} =
+               Extract.run(agent, build_state(), tool: validating_tool(), max_runs: 2)
     end
   end
 end

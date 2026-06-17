@@ -9,7 +9,7 @@ defmodule Sagents.Modes.AgentExecutionTest do
   alias LangChain.Message.ToolCall
   alias LangChain.Message.ToolResult
   alias LangChain.LangChainError
-  alias LangChain.Function, as: LFunction
+  alias LangChain.Function
   alias Sagents.MiddlewareEntry
   alias Sagents.Middleware.HumanInTheLoop
 
@@ -37,7 +37,7 @@ defmodule Sagents.Modes.AgentExecutionTest do
   end
 
   defp submit_tool do
-    LFunction.new!(%{
+    Function.new!(%{
       name: "submit_report",
       description: "Submit a report",
       parameters_schema: %{
@@ -49,7 +49,7 @@ defmodule Sagents.Modes.AgentExecutionTest do
   end
 
   defp other_tool do
-    LFunction.new!(%{
+    Function.new!(%{
       name: "search",
       description: "Search for information",
       parameters_schema: %{
@@ -61,7 +61,7 @@ defmodule Sagents.Modes.AgentExecutionTest do
   end
 
   defp finalize_tool do
-    LFunction.new!(%{
+    Function.new!(%{
       name: "finalize",
       description: "Finalize the work",
       parameters_schema: %{
@@ -69,6 +69,23 @@ defmodule Sagents.Modes.AgentExecutionTest do
         properties: %{"status" => %{type: "string"}}
       },
       function: fn args, _ctx -> {:ok, Jason.encode!(args)} end
+    })
+  end
+
+  # Submit tool whose body validates business rules: only "good" titles
+  # succeed; anything else returns {:error, ...} (an error ToolResult).
+  defp validating_submit_tool do
+    Function.new!(%{
+      name: "submit_report",
+      description: "Submit a report",
+      parameters_schema: %{
+        type: "object",
+        properties: %{"title" => %{type: "string"}}
+      },
+      function: fn
+        %{"title" => "good"} = args, _ctx -> {:ok, Jason.encode!(args)}
+        _args, _ctx -> {:error, "title must be 'good'"}
+      end
     })
   end
 
@@ -260,6 +277,64 @@ defmodule Sagents.Modes.AgentExecutionTest do
 
       assert {:error, %LLMChain{}, %LangChainError{type: "exceeded_max_runs"} = error} = result
       assert error.message =~ "Exceeded maximum number of runs (3/3)"
+    end
+  end
+
+  describe "require_tool_success: true (retry on error)" do
+    test "retries on an error result and terminates on the later success" do
+      tools = [validating_submit_tool()]
+      chain = build_chain(tools, [Message.new_user!("Write a report")])
+
+      # Iteration 1: bad args -> tool returns {:error, ...} -> loop continues
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [assistant_with_tool_call("submit_report", %{"title" => "bad"}, "call_1")]}
+      end)
+      # Iteration 2: corrected args -> success -> terminate
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [assistant_with_tool_call("submit_report", %{"title" => "good"}, "call_2")]}
+      end)
+
+      result =
+        AgentExecution.run(chain, until_tool: "submit_report", require_tool_success: true)
+
+      assert {:ok, %LLMChain{}, %ToolResult{name: "submit_report", is_error: false}} = result
+    end
+
+    test "exhausts max_runs when the target tool always errors" do
+      tools = [validating_submit_tool()]
+      chain = build_chain(tools, [Message.new_user!("Write a report")])
+
+      # LLM always submits bad args -> always an error result -> never terminates
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [assistant_with_tool_call("submit_report", %{"title" => "bad"}, "call_x")]}
+      end)
+
+      result =
+        AgentExecution.run(chain,
+          until_tool: "submit_report",
+          require_tool_success: true,
+          max_runs: 3
+        )
+
+      assert {:error, %LLMChain{}, %LangChainError{type: "exceeded_max_runs"}} = result
+    end
+  end
+
+  describe "until_tool: target name (stop on call)" do
+    test "terminates on the first call even when the result is an error" do
+      tools = [validating_submit_tool()]
+      chain = build_chain(tools, [Message.new_user!("Write a report")])
+
+      # A single bad call. Call-based until_tool terminates on the error result.
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [assistant_with_tool_call("submit_report", %{"title" => "bad"}, "call_1")]}
+      end)
+
+      result = AgentExecution.run(chain, until_tool: "submit_report")
+
+      assert {:ok, %LLMChain{}, %ToolResult{name: "submit_report", is_error: true}} = result
     end
   end
 

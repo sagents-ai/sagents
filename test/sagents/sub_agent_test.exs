@@ -230,6 +230,58 @@ defmodule Sagents.SubAgentTest do
       assert {:ok, config} = SubAgentConfig.new(attrs)
       assert length(config.tools) == 3
     end
+
+    test "defaults until_tool_success to nil" do
+      attrs = %{
+        name: "test",
+        description: "Test",
+        system_prompt: "Test",
+        tools: [test_tool("submit")]
+      }
+
+      assert {:ok, config} = SubAgentConfig.new(attrs)
+      assert config.until_tool_success == nil
+    end
+
+    test "casts until_tool_success name" do
+      attrs = %{
+        name: "test",
+        description: "Test",
+        system_prompt: "Test",
+        tools: [test_tool("submit")],
+        until_tool_success: "submit"
+      }
+
+      assert {:ok, config} = SubAgentConfig.new(attrs)
+      assert config.until_tool_success == "submit"
+    end
+
+    test "rejects until_tool_success referencing an unknown tool" do
+      attrs = %{
+        name: "test",
+        description: "Test",
+        system_prompt: "Test",
+        tools: [test_tool("submit")],
+        until_tool_success: "missing"
+      }
+
+      assert {:error, changeset} = SubAgentConfig.new(attrs)
+      assert %{until_tool_success: [_msg]} = errors_on(changeset)
+    end
+
+    test "rejects setting both until_tool and until_tool_success" do
+      attrs = %{
+        name: "test",
+        description: "Test",
+        system_prompt: "Test",
+        tools: [test_tool("submit")],
+        until_tool: "submit",
+        until_tool_success: "submit"
+      }
+
+      assert {:error, changeset} = SubAgentConfig.new(attrs)
+      assert %{until_tool_success: [_msg]} = errors_on(changeset)
+    end
   end
 
   describe "SubAgentConfig.new!/1" do
@@ -1630,6 +1682,54 @@ defmodule Sagents.SubAgentTest do
       assert Keyword.get(opts, :mode) == Sagents.Modes.AgentExecution
       assert [%MiddlewareEntry{}] = Keyword.get(opts, :middleware)
       assert Keyword.get(opts, :until_tool) == ["submit", "finalize"]
+    end
+
+    test "threads require_tool_success: true alongside until_tool when set" do
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: test_agent(),
+          parent_state: %{messages: []},
+          until_tool: "submit",
+          require_tool_success: true
+        )
+
+      opts = SubAgent.build_mode_opts(subagent)
+
+      assert Keyword.get(opts, :until_tool) == "submit"
+      assert Keyword.get(opts, :require_tool_success) == true
+    end
+
+    test "threads require_tool_success: false by default with until_tool" do
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: test_agent(),
+          parent_state: %{messages: []},
+          until_tool: "submit"
+        )
+
+      opts = SubAgent.build_mode_opts(subagent)
+
+      assert Keyword.get(opts, :until_tool) == "submit"
+      assert Keyword.get(opts, :require_tool_success) == false
+    end
+
+    test "omits until-tool keys entirely when no until_tool is set" do
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: test_agent(),
+          parent_state: %{messages: []}
+        )
+
+      opts = SubAgent.build_mode_opts(subagent)
+
+      refute Keyword.has_key?(opts, :until_tool)
+      refute Keyword.has_key?(opts, :require_tool_success)
     end
 
     test "does not include middleware when interrupt_on is empty map" do

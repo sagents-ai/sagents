@@ -1012,6 +1012,47 @@ defmodule Sagents.AgentTest do
       assert msg =~ "not found"
     end
 
+    test "until_tool_success validation: invalid tool name returns error" do
+      {:ok, agent} =
+        Agent.new(
+          %{model: mock_model(), tools: [], middleware: []},
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:error, msg} =
+               Agent.execute(agent, initial_state, until_tool_success: "nonexistent")
+
+      assert msg =~ "until_tool_success"
+      assert msg =~ "not found"
+    end
+
+    test "until_tool and until_tool_success are mutually exclusive" do
+      search_tool =
+        LangChain.Function.new!(%{
+          name: "search",
+          description: "Search",
+          function: fn _args, _params -> {:ok, "result"} end
+        })
+
+      {:ok, agent} =
+        Agent.new(
+          %{model: mock_model(), tools: [search_tool], middleware: []},
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:error, msg} =
+               Agent.execute(agent, initial_state,
+                 until_tool: "search",
+                 until_tool_success: "search"
+               )
+
+      assert msg =~ "mutually exclusive"
+    end
+
     test "until_tool validation: multiple tools, one invalid" do
       search_tool =
         LangChain.Function.new!(%{

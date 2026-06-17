@@ -10,9 +10,13 @@ defmodule Sagents.Extract do
 
   The trick is the same one `DataExtractionChain` uses: define a single tool
   whose `parameters_schema` is the desired result shape, run the agent with
-  `until_tool: "<that tool>"`, and read the LLM-supplied arguments back out.
-  The tool's body never has to do real work — it just hands `args` back as
-  `processed_content`.
+  `until_tool_success: "<tool_name>"`, and read the result back out. `run/3`
+  returns the tool's `processed_content` — the value the tool body produces — so
+  the tool can shape the raw LLM arguments into whatever data structure you
+  actually want (a struct, a persisted record, an id). When the tool sets no
+  `processed_content`, `run/3` falls back to the LLM-supplied argument map. The
+  default schema tool simply hands `args` back as `processed_content`, so the
+  no-frills path still returns the LLM arguments. See "Shaping the result".
 
   ## Basic usage
 
@@ -29,7 +33,8 @@ defmodule Sagents.Extract do
 
       {:ok, result} = Sagents.Extract.run(agent, state, schema: schema)
 
-      # result is the LLM-supplied map: %{"title" => "...", "summary" => "..."}
+      # result is the submit tool's processed_content. For the default schema
+      # tool that is the LLM-supplied map: %{"title" => "...", "summary" => "..."}
 
   ## Options
 
@@ -39,7 +44,10 @@ defmodule Sagents.Extract do
     * `:tool` (required, unless `:schema` is given) — A pre-built
       `LangChain.Function`. Use this when you want full control over the
       tool's name, description, `parse_args` callback, etc. When supplied,
-      `:schema`, `:tool_name`, and `:description` are ignored.
+      `:schema`, `:tool_name`, and `:description` are ignored. Return
+      `{:ok, "text for LLM", processed_term}` from the tool body to make
+      `processed_term` the value `run/3` returns; a 2-tuple `{:ok, "text"}`
+      falls back to the LLM arguments. See "Shaping the result".
     * `:tool_name` (default `"submit_result"`) — Name of the submit tool the
       LLM will be required to call. Only meaningful when `:schema` is used.
     * `:description` (default a generic string) — Description sent to the LLM
@@ -56,12 +64,57 @@ defmodule Sagents.Extract do
 
   ## What `run/3` returns
 
-    * `{:ok, map()}` — The arguments the LLM passed to the submit tool, with
-      keys exactly as the provider returned them (or as the `parse_args`
-      callback processes them).
+    * `{:ok, term()}` — The submit tool's `processed_content`: the value the
+      tool body returns as the 3rd element of `{:ok, "text for LLM", term}`.
+      This can be any term — a map, a struct, a persisted record, an id. When
+      the tool sets no `processed_content` (it returned a 2-tuple
+      `{:ok, "text"}`), this falls back to the LLM-supplied argument map, with
+      keys exactly as the provider returned them. The default schema tool hands
+      `args` back as `processed_content`, so the schema path returns the LLM
+      arguments.
     * `{:error, term()}` — A `LangChainError` if the LLM never successfully
       called the submit tool within `max_runs`, if a same-named tool already
       exists on the agent, or anything else that `Sagents.Agent.execute/3` would surface.
+
+  ## Shaping the result
+
+  `run/3` returns whatever the submit tool *produces*, not just what the LLM
+  *emitted*. That lets the tool body turn the raw LLM arguments into the exact
+  data shape you want, in three escalating tiers:
+
+  1. **Raw arguments (default).** With `:schema` and no custom tool, `run/3`
+     returns the LLM-supplied argument map unchanged. Nothing to do.
+
+  2. **Process inside the tool body.** Supply a `:tool` whose body transforms,
+     validates, or persists the args and returns the shaped value as the 3rd
+     element. That value is what `run/3` returns; the LLM only ever sees the
+     2nd element (the string), never the 3rd.
+
+         submit =
+           LangChain.Function.new!(%{
+             name: "submit_result",
+             description: "Submit the structured result.",
+             parameters_schema: schema,
+             function: fn args, _ctx ->
+               # shape the raw LLM args into the data structure you want
+               person = %MyApp.Person{name: args["name"], age: args["age"]}
+               # (or persist here and return the inserted struct / id instead)
+               {:ok, "Saved \#{person.name}.", person}
+             end
+           })
+
+         {:ok, %MyApp.Person{} = person} =
+           Sagents.Extract.run(agent, state, tool: submit)
+
+  3. **`:parse_args` for coercion/validation.** A `LangChain.Function`
+     `:parse_args` callback (Zoi schemas work well) can coerce the args before
+     the body runs; pair it with a body that returns the shaped value as the
+     3rd element. Returning `{:error, "reason"}` from `parse_args` or the body
+     keeps the loop running so the LLM corrects the call — see "Validation and
+     retry".
+
+  Callers who only care about the raw arguments need none of this: a 2-tuple
+  `{:ok, "text"}`, or just using `:schema`, returns the LLM args.
 
   ## Provider-side `tool_choice`
 
@@ -98,8 +151,10 @@ defmodule Sagents.Extract do
        or `:max_runs` is hit. Write error messages that are actionable — the
        LLM is the one reading them.
 
-  Nothing here needs to know about either layer. They fall out of how
-  `until_tool` already loops.
+  Nothing here needs to know about either layer. The retry behavior is driven
+  by `Extract` running with `until_tool_success: <submit tool>`: an error result
+  from the submit tool keeps the loop running (feeding the error back to the
+  LLM) instead of terminating the run with malformed args.
 
   ## Middleware compatibility
 
@@ -152,20 +207,41 @@ defmodule Sagents.Extract do
   The `state` carries the full conversation (system messages, user prompts,
   any prior turns). See the module doc for option details.
   """
-  @spec run(Agent.t(), State.t(), opts()) :: {:ok, map()} | {:error, term()}
+  @spec run(Agent.t(), State.t(), opts()) :: {:ok, any()} | {:error, term()}
   def run(%Agent{} = agent, %State{} = state, opts) when is_list(opts) do
     with {:ok, submit_tool} <- build_submit_tool(opts),
          :ok <- check_tool_name_unique(agent, submit_tool.name) do
       augmented_agent = %{agent | tools: agent.tools ++ [submit_tool]}
       max_runs = Keyword.get(opts, :max_runs, @default_max_runs)
 
+      # Use the success variant so a validation error from the submit tool keeps
+      # the loop running (the LLM retries) instead of terminating with bad args.
       execute_opts =
-        [until_tool: submit_tool.name, max_runs: max_runs]
+        [until_tool_success: submit_tool.name, max_runs: max_runs]
         |> maybe_put_callbacks(opts)
 
       augmented_agent
       |> Agent.execute(state, execute_opts)
-      |> AgentResult.tool_arguments()
+      |> extract_result()
+    end
+  end
+
+  # Prefer the submit tool's `processed_content` (position 3 of its 3-tuple
+  # return) so a tool that validates/parses/persists can hand its processed
+  # result back through Extract. Fall back to the LLM-supplied arguments only
+  # when the tool set no `processed_content` (e.g. it returned a 2-tuple) — the
+  # default submit tool passes `args` through, so the schema path is unchanged.
+  # Genuine failures (until_tool_not_called, interrupt, pause) pass through.
+  defp extract_result(execute_return) do
+    case AgentResult.processed_content(execute_return) do
+      {:ok, content} ->
+        {:ok, content}
+
+      {:error, %LangChainError{type: "no_processed_content"}} ->
+        AgentResult.tool_arguments(execute_return)
+
+      {:error, _reason} = err ->
+        err
     end
   end
 
