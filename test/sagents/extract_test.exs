@@ -111,6 +111,43 @@ defmodule Sagents.ExtractTest do
     end
   end
 
+  describe "run/3 — processed_content" do
+    test "returns the tool's processed_content, not the raw LLM args" do
+      # Tool shapes the raw args into a different structure and hands it back as
+      # the 3rd element. run/3 should return that, not the LLM-supplied map.
+      tool =
+        LangChain.Function.new!(%{
+          name: "submit_result",
+          description: "Submit",
+          parameters_schema: @schema,
+          function: fn args, _ctx ->
+            {:ok, "saved", %{id: 42, title: args["title"]}}
+          end
+        })
+
+      agent = build_agent()
+      stub_submit_call("submit_result", %{"title" => "T", "summary" => "S"})
+
+      assert {:ok, %{id: 42, title: "T"}} = Extract.run(agent, build_state(), tool: tool)
+    end
+
+    test "falls back to LLM args when the tool returns a 2-tuple (no processed_content)" do
+      tool =
+        LangChain.Function.new!(%{
+          name: "submit_result",
+          description: "Submit",
+          parameters_schema: @schema,
+          function: fn args, _ctx -> {:ok, Jason.encode!(args)} end
+        })
+
+      agent = build_agent()
+      stub_submit_call("submit_result", %{"title" => "T", "summary" => "S"})
+
+      assert {:ok, %{"title" => "T", "summary" => "S"}} =
+               Extract.run(agent, build_state(), tool: tool)
+    end
+  end
+
   describe "run/3 — error paths" do
     test "errors when neither :schema nor :tool is supplied" do
       agent = build_agent()
