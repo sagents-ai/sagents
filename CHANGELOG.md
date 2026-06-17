@@ -1,5 +1,99 @@
 # Changelog
 
+## v0.8.0-rc.13
+
+Final release of the `v0.8.0` RC phase.
+
+**Two breaking changes, both still within the RC.** See the Upgrading section below, plus the `v0.8.0-rc.9` entry for upgrading from `v0.8.0-rc.8`, the `v0.8.0-rc.5` entry for upgrading from `v0.8.0-rc.4`, and the `v0.8.0-rc.1` entry for upgrading from `v0.7.0`.
+
+1. `Sagents.Extract` no longer synthesizes a submit tool from `:schema`/`:tool` options. The tool is now owned by the agent and named via the stop condition. [#129](https://github.com/sagents-ai/sagents/pull/129)
+2. The `mix sagents.gen.persistence` templates denormalize the tool-call linking id into a dedicated indexed `tool_call_id` column. Affects host apps that have generated persistence scaffolding. [#127](https://github.com/sagents-ai/sagents/pull/127)
+
+### Added
+- `:until_tool_success` for `Sagents.Agent.execute/3` and `Sagents.SubAgent`: a sibling of `:until_tool` that completes a run only when the target tool returns a *successful* (non-error) result. An error keeps the loop running so the LLM can correct its arguments, bounded by `:max_runs`. The two options are mutually exclusive and validated at every entry boundary. Enables the validate-and-retry pattern. [#128](https://github.com/sagents-ai/sagents/pull/128)
+
+### Changed
+- **BREAKING (`Sagents.Extract` API):** Tool ownership moves to the agent. Define the submit tool on the agent (`Agent.new!(%{tools: [submit]})`) and select it with `:until_tool_success` (or `:until_tool`); `run/3` validates the named tool is present and forwards straight to `Agent.execute/3`. The `:schema`, `:tool`, `:tool_name`, and `:description` options and the dynamic tool-injection machinery are removed; error `extract_tool_conflict` becomes `extract_tool_not_found`. [#129](https://github.com/sagents-ai/sagents/pull/129)
+- `Sagents.Extract.run/3` now returns the submit tool's `processed_content` (the 3rd element of a `{:ok, "text", term}` tool return), so a tool can shape the raw LLM args into a struct, persisted record, id, or whatever. Falls back to the LLM argument map when the tool returns a 2-tuple. [#128](https://github.com/sagents-ai/sagents/pull/128)
+- **BREAKING (generated code):** The persistence templates promote the tool-call id (`content["call_id"]` for `tool_call` rows, `content["tool_call_id"]` for `tool_result` rows) to a top-level, B-tree-indexed `tool_call_id` column. The generated `tool_call_query/1` and `tool_result_query/1` switch from a JSONB `fragment(...)` to indexed `m.tool_call_id == ^id` equality on the hot tool-execution path. The old `(content->>'call_id')` partial **unique** index and its matching `unique_constraint` are removed (tool-call rows are written exactly once from the `AgentServer`, so duplicates are not expected). `is_interrupt`/`hitl_decision` reads and `search_messages/2` still use the JSONB `content` and are unchanged. [#127](https://github.com/sagents-ai/sagents/pull/127)
+
+### Upgrading from v0.8.0-rc.12 to v0.8.0-rc.13
+
+**`Sagents.Extract` callers (#129).** Move the submit tool onto the agent and name it via the stop condition:
+
+```elixir
+# Before
+Extract.run(agent, messages, schema: my_schema)
+
+# After
+submit = Function.new!(%{name: "submit", parameters_schema: my_schema, function: ...})
+agent = Agent.new!(%{model: model, tools: [submit]})
+Extract.run(agent, messages, until_tool_success: "submit")
+```
+
+Use `:until_tool` instead of `:until_tool_success` if you want to stop on the first call rather than the first successful result.
+
+**Generated persistence scaffolding (#127).** Only affects host apps that ran `mix sagents.gen.persistence`. New generations are clean and need nothing.
+
+*If you have no production data (or can reset your dev DB):* re-run `mix sagents.gen.persistence` on a clean, committed workspace with the same options and merge your customizations back in.
+
+*If you have existing rows:* apply the four template code changes and add a one-off data migration.
+
+- **Schema** (`MyApp.Conversations.DisplayMessage`): add `field :tool_call_id, :string`; add `:tool_call_id` to both `cast/3` lists; remove the `unique_constraint(..., name: :unique_tool_call_per_conversation)` call.
+- **Context** (`MyApp.Conversations`): change `tool_call_query/1` and `tool_result_query/1` to `where: m.tool_call_id == ^id` (leave the `is_interrupt` fragment, `hitl_decision`, and `search_messages` alone).
+- **Persistence** (`MyApp.Agents.DisplayMessagePersistence`): in `save_message/3`, copy `content["call_id"]` (tool_call) / `content["tool_call_id"]` (tool_result) into a top-level `"tool_call_id"` attr.
+
+The data migration (replace `sagents_display_messages` with your table prefix if customized):
+
+```elixir
+defmodule MyApp.Repo.Migrations.DenormalizeDisplayMessageToolCallId do
+  use Ecto.Migration
+
+  def up do
+    alter table(:sagents_display_messages) do
+      add :tool_call_id, :string
+    end
+
+    execute """
+    UPDATE sagents_display_messages
+    SET tool_call_id = content->>'call_id'
+    WHERE content_type = 'tool_call'
+    """
+
+    execute """
+    UPDATE sagents_display_messages
+    SET tool_call_id = content->>'tool_call_id'
+    WHERE content_type = 'tool_result'
+    """
+
+    drop_if_exists unique_index(
+                     :sagents_display_messages,
+                     [:conversation_id, "(content->>'call_id')"],
+                     name: :unique_tool_call_per_conversation
+                   )
+
+    create index(:sagents_display_messages, [:tool_call_id])
+  end
+
+  def down do
+    drop_if_exists index(:sagents_display_messages, [:tool_call_id])
+
+    create unique_index(
+             :sagents_display_messages,
+             [:conversation_id, "(content->>'call_id')"],
+             name: :unique_tool_call_per_conversation,
+             where: "content_type = 'tool_call'"
+           )
+
+    alter table(:sagents_display_messages) do
+      remove :tool_call_id
+    end
+  end
+end
+```
+
+The code and migration must land together. To keep a per-conversation dedup guarantee, use a partial `unique_index([:conversation_id, :tool_call_id], where: "content_type = 'tool_call'")` and retain the schema's `unique_constraint`; the library default no longer does.
+
 ## v0.8.0-rc.12
 
 No breaking changes from `v0.8.0-rc.11`. See the `v0.8.0-rc.9` entry below for upgrading from `v0.8.0-rc.8`, the `v0.8.0-rc.5` entry for upgrading from `v0.8.0-rc.4`, and the `v0.8.0-rc.1` entry for upgrading from `v0.7.0`.
