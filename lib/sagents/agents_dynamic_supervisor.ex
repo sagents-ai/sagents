@@ -127,9 +127,20 @@ defmodule Sagents.AgentsDynamicSupervisor do
         {:ok, pid, :already_started}
 
       {:error, reason} = error ->
-        Logger.error(
-          "Failed to start AgentSupervisor for agent_id=#{agent_id}: #{inspect(reason)}"
-        )
+        if registration_timeout?(reason) do
+          # Retryable: the :via registration call exceeded Horde's hardcoded 5s
+          # default. Logged at warning since `start_agent_sync/1` retries it; a
+          # genuinely-live prior registration surfaces as {:already_started, _}
+          # above, so we deliberately do NOT trust a possibly-dead remote pid
+          # here (Process.alive?/1 can't check a remote node).
+          Logger.warning(
+            "AgentSupervisor registration for agent_id=#{agent_id} timed out: #{inspect(reason)}"
+          )
+        else
+          Logger.error(
+            "Failed to start AgentSupervisor for agent_id=#{agent_id}: #{inspect(reason)}"
+          )
+        end
 
         error
     end
@@ -146,6 +157,30 @@ defmodule Sagents.AgentsDynamicSupervisor do
 
   Same as `start_agent/1`, plus:
   - `:startup_timeout` - Maximum time to wait for AgentServer to be ready (default: 5000ms)
+  - `:registration_retries` - How many extra times to retry the start if the
+    AgentSupervisor's `:via` registration times out (Horde/distributed only).
+    Defaults to `1`. See "Registration timeouts" below.
+  - `:registration_retry_backoff` - Milliseconds to wait between registration
+    retries (default: 250ms).
+
+  ## Registration timeouts
+
+  Under the `:horde` distribution backend, a newly-spawned `AgentSupervisor`
+  registers its `:via` name in `Horde.Registry` before `init/1` runs, via a
+  `GenServer.call` that uses Horde's hardcoded 5000ms default. On a busy or
+  churning cluster that call can time out, surfacing as
+  `{:timeout, {GenServer, :call, [Sagents.Registry, {:register, ...}, 5000]}}`.
+
+  The `GenServer.call` timeout runs *inside the spawning supervisor* during
+  `:gen.init_it`, so the timeout exit kills that process — after this error the
+  supervisor is gone, not lingering. This function therefore simply **retries**
+  the start with a short backoff (up to `:registration_retries` times).
+
+  It deliberately does not try to "recover" by looking the pid back up: the
+  process is dead, and the placed pid is typically on a remote node where
+  `Process.alive?/1` cannot verify liveness anyway. A genuinely-live prior
+  registration (e.g. a concurrent start that won) still surfaces correctly as
+  `{:ok, pid, :already_started}` from `start_agent/1`.
 
   ## Examples
 
@@ -160,8 +195,13 @@ defmodule Sagents.AgentsDynamicSupervisor do
   @spec start_agent_sync(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_agent_sync(opts) do
     startup_timeout = Keyword.get(opts, :startup_timeout, 5_000)
+    retries = Keyword.get(opts, :registration_retries, 1)
     agent_id = Keyword.fetch!(opts, :agent_id)
 
+    do_start_agent_sync(opts, agent_id, startup_timeout, retries)
+  end
+
+  defp do_start_agent_sync(opts, agent_id, startup_timeout, retries_left) do
     case start_agent(opts) do
       {:ok, _pid} ->
         # Wait for AgentServer to be registered
@@ -171,8 +211,20 @@ defmodule Sagents.AgentsDynamicSupervisor do
         # Already running, verify it's ready
         wait_for_agent_ready(agent_id, startup_timeout)
 
-      {:error, _reason} = error ->
-        error
+      {:error, reason} = error ->
+        if retries_left > 0 and registration_timeout?(reason) do
+          backoff = Keyword.get(opts, :registration_retry_backoff, 250)
+
+          Logger.warning(
+            "Retrying AgentSupervisor start for agent_id=#{agent_id} after registration " <>
+              "timeout (#{retries_left} attempt(s) left, backoff=#{backoff}ms)"
+          )
+
+          Process.sleep(backoff)
+          do_start_agent_sync(opts, agent_id, startup_timeout, retries_left - 1)
+        else
+          error
+        end
     end
   end
 
@@ -265,6 +317,17 @@ defmodule Sagents.AgentsDynamicSupervisor do
   # ============================================================================
   # Private Functions
   # ============================================================================
+
+  # Matches the exact shape of a Horde `:via` registration timeout, e.g.
+  # `{:timeout, {GenServer, :call, [Sagents.Registry, {:register, _, _, _}, 5000]}}`.
+  # Anything else (a real crash, :already_present, etc.) is a genuine failure.
+  defp registration_timeout?(
+         {:timeout, {GenServer, :call, [registry, {:register, _key, _value, _pid} | _rest]}}
+       ) do
+    registry == Sagents.ProcessRegistry.registry_name()
+  end
+
+  defp registration_timeout?(_reason), do: false
 
   defp wait_for_agent_ready(agent_id, timeout) do
     deadline = System.monotonic_time(:millisecond) + timeout

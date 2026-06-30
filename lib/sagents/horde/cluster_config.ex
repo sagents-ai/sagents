@@ -2,85 +2,98 @@ defmodule Sagents.Horde.ClusterConfig do
   @moduledoc """
   Configuration helpers for Horde clustering.
 
-  ## Configuration Examples
+  Two membership modes are supported, both dynamic:
 
-  ### Auto-discovery (all nodes in cluster)
+  ### Auto-discovery (all visible nodes) — default
 
       config :sagents, :horde,
         members: :auto
 
-  ### Static member list
+  This is also the behaviour when no `:members` key is set. The literal atom
+  `:auto` is passed straight through to Horde, which starts a
+  `Horde.NodeListener` and keeps the member set in sync with *all visible* BEAM
+  nodes as they come and go — dead nodes are pruned on `:nodedown`.
+
+  > #### `:auto` includes every visible node {: .warning}
+  >
+  > Horde's `:auto` means *all* connected nodes, regardless of role. If your
+  > Erlang cluster meshes multiple unrelated service roles together (e.g. a
+  > shared libcluster selector), do not use `:auto` — agents will be scattered
+  > across unrelated nodes and the DeltaCrdt fan-out will span all of them. Use
+  > `:participation` instead.
+
+  ### Participation-based (scoped to nodes running Sagents) — recommended for mixed clusters
 
       config :sagents, :horde,
-        members: [
-          {Sagents.Horde.AgentsSupervisorImpl, :node1@host},
-          {Sagents.Horde.AgentsSupervisorImpl, :node2@host}
-        ]
+        members: :participation
 
-  ### Dynamic via MFA tuple
+  Membership is the set of nodes that actually run `Sagents.Supervisor`,
+  discovered via an OTP `:pg` group and kept current on `:nodeup`/`:nodedown` by
+  `Sagents.Horde.MembershipManager`. Use this when your Erlang cluster contains
+  nodes that should *not* host agents (other service roles): gate
+  `Sagents.Supervisor` to the agent-hosting role(s) and membership follows
+  automatically — no node-name predicate, dead nodes pruned for free. Unlike
+  `:auto`, it never pulls non-participating nodes into the Horde cluster.
 
-      config :sagents, :horde,
-        members: {MyApp.HordeConfig, :get_members, []}
-
-  ### Regional clustering (Fly.io example)
-
-      # In config/runtime.exs
-      region = System.get_env("FLY_REGION") || "default"
+  #### Partitioning participation
 
       config :sagents, :horde,
-        members: {Sagents.Horde.ClusterConfig, :regional_members, [region]}
+        members: :participation,
+        partition: System.get_env("FLY_REGION")
+
+  An optional `:partition` further isolates participation into independent
+  groups: a node only clusters with other nodes sharing the same partition
+  value. It is any opaque grouping key, set per node (commonly from an env var).
+  The motivating case is geography — set it to a Fly.io `FLY_REGION` so an agent
+  for an Illinois user is never placed on, or routed through, a node in France —
+  but it can be anything (datacenter, tenant tier, …).
+  `nil`/unset means a single global participation group (the default).
+
+  Only meaningful with `members: :participation`. See `docs/clustering.md`.
   """
 
   @doc """
   Resolve cluster members for a given module name.
 
-  Reads the `:members` config from `:sagents, :horde` and resolves it
-  to a list of `{module, node}` tuples suitable for Horde.
+  Reads the `:members` config from `:sagents, :horde` and returns a value
+  suitable for Horde's `:members` init option:
+
+  - `:auto` (and the default when unset) returns the literal atom `:auto`, so
+    Horde starts a `Horde.NodeListener` and manages membership dynamically.
+  - `:participation` returns a self-only seed `[{module, Node.self()}]`; Horde
+    starts with no `NodeListener`, and `Sagents.Horde.MembershipManager`
+    maintains the real member set from the `:pg` participation group.
   """
   def resolve_members(module_name) do
     case Application.get_env(:sagents, :horde, [])[:members] do
-      :auto -> auto_members(module_name)
-      list when is_list(list) -> list
-      fun when is_function(fun, 0) -> fun.()
-      {mod, fun, args} -> apply(mod, fun, [module_name | args])
-      nil -> auto_members(module_name)
+      :participation -> [{module_name, Node.self()}]
+      nil -> :auto
+      :auto -> :auto
+      other -> raise ArgumentError, invalid_members_message(other)
     end
   end
 
   @doc """
-  Returns members for auto-discovery mode.
+  Whether participation-based membership is enabled.
 
-  Includes all connected nodes plus the current node.
+  True when running under the `:horde` backend with `members: :participation`.
+  `Sagents.Supervisor` uses this to decide whether to start the `:pg` scope and
+  `Sagents.Horde.MembershipManager`.
   """
-  def auto_members(module_name) do
-    [Node.self() | Node.list()]
-    |> Enum.map(&{module_name, &1})
+  def participation_membership? do
+    Application.get_env(:sagents, :distribution, :local) == :horde and
+      Application.get_env(:sagents, :horde, [])[:members] == :participation
   end
 
   @doc """
-  Returns members for regional clustering.
+  The configured participation partition, or `nil` when unset.
 
-  Only includes nodes with matching region metadata.
-  Useful for Fly.io deployments where you want agents to stay
-  within a geographic region.
-
-  ## Examples
-
-      # In config/runtime.exs
-      region = System.get_env("FLY_REGION") || "default"
-
-      config :sagents, :horde,
-        members: {Sagents.Horde.ClusterConfig, :regional_members, [region]}
+  When set (any non-nil term), `Sagents.Horde.MembershipManager` isolates
+  membership so this node only clusters with nodes sharing the same partition.
+  Only meaningful with `members: :participation`.
   """
-  def regional_members(module_name, region) when is_binary(region) do
-    # Store region in persistent_term on startup
-    region_key = {:sagents_region, Node.self()}
-    :persistent_term.put(region_key, region)
-
-    # Get all nodes in same region
-    [Node.self() | Node.list()]
-    |> Enum.filter(&in_region?(&1, region))
-    |> Enum.map(&{module_name, &1})
+  def partition do
+    Application.get_env(:sagents, :horde, [])[:partition]
   end
 
   @doc """
@@ -114,55 +127,34 @@ defmodule Sagents.Horde.ClusterConfig do
   # Private
   # ---------------------------------------------------------------------------
 
-  defp in_region?(node, expected_region) do
-    case :rpc.call(node, :persistent_term, :get, [{:sagents_region, node}, nil]) do
-      ^expected_region -> true
-      _other -> false
-    end
-  end
-
   defp validate_members_config! do
     members = Application.get_env(:sagents, :horde, [])[:members]
 
-    cond do
-      members == :auto ->
-        :ok
-
-      is_list(members) ->
-        unless Enum.all?(members, &valid_member_tuple?/1) do
-          raise """
-          Invalid :members configuration for Horde.
-          Expected list of {module, node} tuples, got: #{inspect(members)}
-          """
-        end
-
-      is_function(members, 0) ->
-        :ok
-
-      is_tuple(members) and tuple_size(members) == 3 ->
-        {mod, fun, args} = members
-
-        unless is_atom(mod) and is_atom(fun) and is_list(args) do
-          raise "Invalid MFA tuple for :members: #{inspect(members)}"
-        end
-
-      members == nil ->
-        :ok
-
-      true ->
-        raise """
-        Invalid :members configuration for Horde.
-        Must be one of:
-          - :auto
-          - [{module, node}, ...]
-          - function/0
-          - {Module, :function, args}
-
-        Got: #{inspect(members)}
-        """
+    unless members in [:auto, :participation, nil] do
+      raise ArgumentError, invalid_members_message(members)
     end
+
+    if partition() != nil and members != :participation do
+      raise ArgumentError, """
+      Invalid Sagents Horde configuration: :partition is set (#{inspect(partition())}) \
+      but :members is #{inspect(members)}.
+
+      :partition only applies to participation-based membership. Set:
+
+          config :sagents, :horde, members: :participation, partition: ...
+      """
+    end
+
+    :ok
   end
 
-  defp valid_member_tuple?({mod, node}) when is_atom(mod) and is_atom(node), do: true
-  defp valid_member_tuple?(_other), do: false
+  defp invalid_members_message(value) do
+    """
+    Invalid :members configuration for Horde: #{inspect(value)}
+
+    Must be one of:
+      - :auto          # all visible nodes (default)
+      - :participation # nodes running Sagents.Supervisor
+    """
+  end
 end

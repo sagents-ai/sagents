@@ -57,75 +57,111 @@ defmodule Sagents.Horde.ClusterConfigTest do
       assert :ok = ClusterConfig.validate!()
     end
 
-    test "validates list members config" do
+    test "validates :participation members config" do
       Application.put_env(:sagents, :distribution, :horde)
-      Application.put_env(:sagents, :horde, members: [{SomeModule, :nonode@nohost}])
+      Application.put_env(:sagents, :horde, members: :participation)
 
       assert :ok = ClusterConfig.validate!()
     end
 
-    test "validates MFA members config" do
+    test "validates :participation with a partition" do
       Application.put_env(:sagents, :distribution, :horde)
-      Application.put_env(:sagents, :horde, members: {SomeModule, :some_function, ["region"]})
+      Application.put_env(:sagents, :horde, members: :participation, partition: "ord")
 
       assert :ok = ClusterConfig.validate!()
     end
 
-    test "raises on invalid members config" do
+    test "raises when :partition is set with non-:participation members" do
       Application.put_env(:sagents, :distribution, :horde)
-      Application.put_env(:sagents, :horde, members: "invalid")
+      Application.put_env(:sagents, :horde, members: :auto, partition: "ord")
 
-      assert_raise RuntimeError, ~r/Invalid :members configuration/, fn ->
+      assert_raise ArgumentError, ~r/:partition only applies to participation/, fn ->
         ClusterConfig.validate!()
       end
     end
 
-    test "raises on invalid list members (not {module, node} tuples)" do
+    test "raises on a string members config" do
       Application.put_env(:sagents, :distribution, :horde)
-      Application.put_env(:sagents, :horde, members: ["not_a_tuple"])
+      Application.put_env(:sagents, :horde, members: "invalid")
 
-      assert_raise RuntimeError, ~r/Expected list of \{module, node\} tuples/, fn ->
+      assert_raise ArgumentError, ~r/Invalid :members configuration/, fn ->
+        ClusterConfig.validate!()
+      end
+    end
+
+    test "raises on a now-unsupported static list members config" do
+      Application.put_env(:sagents, :distribution, :horde)
+      Application.put_env(:sagents, :horde, members: [{SomeModule, :nonode@nohost}])
+
+      assert_raise ArgumentError, ~r/Invalid :members configuration/, fn ->
         ClusterConfig.validate!()
       end
     end
   end
 
   describe "resolve_members/1" do
-    test "returns auto members when config is :auto" do
+    test "passes the literal :auto atom through to Horde when config is :auto" do
       Application.put_env(:sagents, :horde, members: :auto)
 
-      result = ClusterConfig.resolve_members(TestModule)
-      assert [{TestModule, node}] = result
-      assert node == Node.self()
+      assert :auto = ClusterConfig.resolve_members(TestModule)
     end
 
-    test "returns auto members when config is nil" do
+    test "passes the literal :auto atom through when no members config is set" do
       Application.delete_env(:sagents, :horde)
 
-      result = ClusterConfig.resolve_members(TestModule)
-      assert [{TestModule, node}] = result
+      assert :auto = ClusterConfig.resolve_members(TestModule)
+    end
+
+    test "returns a self-only seed for :participation" do
+      Application.put_env(:sagents, :horde, members: :participation)
+
+      assert [{TestModule, node}] = ClusterConfig.resolve_members(TestModule)
       assert node == Node.self()
     end
 
-    test "returns static list when provided" do
-      members = [{MyModule, :node1@host}, {MyModule, :node2@host}]
-      Application.put_env(:sagents, :horde, members: members)
+    test "raises for an unsupported members value" do
+      Application.put_env(:sagents, :horde, members: [{MyModule, :node1@host}])
 
-      assert ^members = ClusterConfig.resolve_members(TestModule)
-    end
-
-    test "calls function when provided" do
-      Application.put_env(:sagents, :horde, members: fn -> [{TestModule, :test@host}] end)
-
-      assert [{TestModule, :test@host}] = ClusterConfig.resolve_members(TestModule)
+      assert_raise ArgumentError, ~r/Invalid :members configuration/, fn ->
+        ClusterConfig.resolve_members(TestModule)
+      end
     end
   end
 
-  describe "auto_members/1" do
-    test "includes current node" do
-      result = ClusterConfig.auto_members(TestModule)
-      assert [{TestModule, node}] = result
-      assert node == Node.self()
+  describe "participation_membership?/0" do
+    test "true under :horde with members: :participation" do
+      Application.put_env(:sagents, :distribution, :horde)
+      Application.put_env(:sagents, :horde, members: :participation)
+
+      assert ClusterConfig.participation_membership?()
+    end
+
+    test "false when members is not :participation" do
+      Application.put_env(:sagents, :distribution, :horde)
+      Application.put_env(:sagents, :horde, members: :auto)
+
+      refute ClusterConfig.participation_membership?()
+    end
+
+    test "false under :local even if members: :participation" do
+      Application.put_env(:sagents, :distribution, :local)
+      Application.put_env(:sagents, :horde, members: :participation)
+
+      refute ClusterConfig.participation_membership?()
+    end
+  end
+
+  describe "partition/0" do
+    test "returns the configured partition" do
+      Application.put_env(:sagents, :horde, members: :participation, partition: "ord")
+
+      assert ClusterConfig.partition() == "ord"
+    end
+
+    test "returns nil when unset" do
+      Application.put_env(:sagents, :horde, members: :participation)
+
+      assert ClusterConfig.partition() == nil
     end
   end
 end

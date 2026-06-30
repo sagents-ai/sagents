@@ -8,6 +8,9 @@ Mimic.copy(LangChain.ChatModels.ChatAnthropic)
 Mimic.copy(LangChain.ChatModels.ChatOpenAI)
 Mimic.copy(Sagents.SubAgentServer)
 Mimic.copy(Sagents.FileSystem.FileSystemSupervisor)
+Mimic.copy(Sagents.ProcessSupervisor)
+Mimic.copy(Sagents.AgentSupervisor)
+Mimic.copy(Horde.Cluster)
 
 # Start a shared PubSub for tests
 {:ok, _pid} = Phoenix.PubSub.Supervisor.start_link(name: :test_pubsub)
