@@ -60,12 +60,27 @@ defmodule Sagents.Supervisor do
     # Validate Horde configuration early (raises on invalid config)
     Sagents.Horde.ClusterConfig.validate!()
 
-    children = [
-      Sagents.ProcessRegistry.child_spec([]),
-      Sagents.ProcessSupervisor.agents_supervisor_child_spec([]),
-      Sagents.ProcessSupervisor.filesystem_supervisor_child_spec([])
-    ]
+    children =
+      [
+        Sagents.ProcessRegistry.child_spec([]),
+        Sagents.ProcessSupervisor.agents_supervisor_child_spec([]),
+        Sagents.ProcessSupervisor.filesystem_supervisor_child_spec([])
+      ] ++ membership_children()
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  # With `members: :participation`, start the `:pg` scope and the membership
+  # manager *after* the Horde clusters (so set_members/2 has live targets). The
+  # manager keeps Horde membership scoped to nodes running this supervisor.
+  defp membership_children do
+    if Sagents.Horde.ClusterConfig.participation_membership?() do
+      [
+        Sagents.Horde.MembershipManager.pg_scope_spec(),
+        Sagents.Horde.MembershipManager
+      ]
+    else
+      []
+    end
   end
 end

@@ -42,43 +42,24 @@ defmodule Sagents.Horde.NodeTransferTest do
     {:ok, cluster} =
       LocalCluster.start_link(count,
         environment: [
-          sagents: [distribution: :horde]
+          # :participation scopes membership to the nodes that run
+          # Sagents.Supervisor (started below), automatically excluding the
+          # manager/test-runner node — which `:auto` would wrongly pull in.
+          sagents: [distribution: :horde, horde: [members: :participation]]
         ]
       )
 
     {:ok, nodes} = LocalCluster.nodes(cluster)
 
-    # Start Sagents.Supervisor (registry + Horde supervisors) on each node.
-    # Uses ClusterTestHelper to unlink from the RPC caller process, otherwise
-    # the supervisor dies when the temporary RPC process exits.
+    # Start Sagents.Supervisor (registry + Horde supervisors + membership
+    # manager) on each node. ClusterTestHelper unlinks from the RPC caller so
+    # the supervisor survives the temporary RPC process exiting.
     for node <- nodes do
       {:ok, _pid} = :rpc.call(node, Sagents.ClusterTestHelper, :start_supervisor, [])
     end
 
-    # Set explicit Horde members on each node, excluding the test runner (manager) node.
-    # auto_members includes all connected nodes, which includes the test runner that
-    # doesn't run Horde processes - this confuses distribution and redistribution.
-    agent_members = Enum.map(nodes, &{Sagents.AgentsDynamicSupervisor, &1})
-    fs_members = Enum.map(nodes, &{Sagents.FileSystem.FileSystemSupervisor, &1})
-    registry_members = Enum.map(nodes, &{Sagents.Registry, &1})
-
-    for node <- nodes do
-      :ok =
-        :rpc.call(node, Horde.Cluster, :set_members, [
-          Sagents.AgentsDynamicSupervisor,
-          agent_members
-        ])
-
-      :ok =
-        :rpc.call(node, Horde.Cluster, :set_members, [
-          Sagents.FileSystem.FileSystemSupervisor,
-          fs_members
-        ])
-
-      :ok = :rpc.call(node, Horde.Cluster, :set_members, [Sagents.Registry, registry_members])
-    end
-
-    # Wait for Horde CRDTs to sync membership between nodes.
+    # Wait for :pg participation + Horde CRDTs to converge across nodes before
+    # placing agents.
     Process.sleep(2_000)
 
     {cluster, nodes}

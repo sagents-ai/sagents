@@ -320,7 +320,8 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
       _other ->
         Logger.warning(
           "Registry propagation timeout for #{inspect(registry_key)}, " <>
-            "pid #{inspect(expected_pid)} is alive=#{Process.alive?(expected_pid)}"
+            "expected pid #{inspect(expected_pid)} on node #{inspect(node(expected_pid))} " <>
+            "not visible via lookup"
         )
 
         :ok
@@ -331,24 +332,7 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
   # Retries with exponential backoff up to the timeout
   # Uses fast-fail strategy: if supervisor not found on first check, only retry briefly
   defp do_wait_for_supervisor_ready(supervisor, deadline, retry_delay_ms) do
-    # Try to check if the supervisor is alive
-    ready =
-      try do
-        case supervisor do
-          pid when is_pid(pid) ->
-            Process.alive?(pid)
-
-          name when is_atom(name) ->
-            case Process.whereis(name) do
-              nil -> false
-              pid -> Process.alive?(pid)
-            end
-        end
-      catch
-        _kind, _reason -> false
-      end
-
-    if ready do
+    if supervisor_ready?(supervisor) do
       :ok
     else
       now = System.monotonic_time(:millisecond)
@@ -379,5 +363,20 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
         do_wait_for_supervisor_ready(supervisor, adjusted_deadline, next_delay)
       end
     end
+  end
+
+  # Whether the FileSystemSupervisor process is up on this node.
+  #
+  # The supervisor is a per-node process (registered locally via `name:`, even
+  # under Horde), so readiness is always a *local* question. We therefore avoid
+  # Process.alive?/1 on arbitrary pids — a remote supervisor reference is not
+  # supported and cannot be liveness-checked without a cross-node call.
+  defp supervisor_ready?(name) when is_atom(name) do
+    # Process.whereis/1 only returns a live, locally-registered pid (or nil).
+    not is_nil(Process.whereis(name))
+  end
+
+  defp supervisor_ready?(pid) when is_pid(pid) do
+    node(pid) == node() and Process.alive?(pid)
   end
 end

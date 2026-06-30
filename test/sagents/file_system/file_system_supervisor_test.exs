@@ -26,6 +26,26 @@ defmodule Sagents.FileSystem.FileSystemSupervisorTest do
     config
   end
 
+  describe "wait_for_supervisor_ready/2" do
+    test "returns :ok when the supervisor is registered by name" do
+      name = :"fs_sup_ready_#{System.unique_integer([:positive])}"
+      start_supervised!(Supervisor.child_spec({FileSystemSupervisor, name: name}, id: name))
+
+      assert :ok = FileSystemSupervisor.wait_for_supervisor_ready(name, 1_000)
+    end
+
+    test "returns :ok for a live local supervisor pid", %{supervisor_pid: pid} do
+      assert :ok = FileSystemSupervisor.wait_for_supervisor_ready(pid, 1_000)
+    end
+
+    test "returns error when the named supervisor is not running" do
+      name = :"fs_sup_missing_#{System.unique_integer([:positive])}"
+
+      assert {:error, :supervisor_not_ready} =
+               FileSystemSupervisor.wait_for_supervisor_ready(name, 200)
+    end
+  end
+
   describe "start_link/1" do
     test "starts supervisor successfully" do
       supervisor_name = :"fs_sup_#{System.unique_integer([:positive])}"
