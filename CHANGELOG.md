@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.9.0
+
+Reworks the optional `:horde` distribution backend so cluster membership is
+correct, dynamic, and scopable. Full write-up in
+[#134](https://github.com/sagents-ai/sagents/pull/134).
+
+### `members: :participation` — dynamic, role-scoped membership
+
+    config :sagents, :distribution, :horde
+    config :sagents, :horde, members: :participation
+
+Membership becomes exactly the nodes that run `Sagents.Supervisor`, discovered
+via an OTP `:pg` group and kept current on `:nodeup`/`:nodedown` by the new
+`Sagents.Horde.MembershipManager`. Gate `Sagents.Supervisor` to your
+agent-hosting role(s) and membership follows automatically — no node-name
+predicate, and dead nodes are pruned for free. Prefer this over `:auto` whenever
+the Erlang cluster also contains nodes that should not host agents.
+
+### `:partition` — isolate participation into independent groups
+
+    config :sagents, :horde,
+      members: :participation,
+      partition: System.get_env("FLY_REGION")
+
+An optional per-node `:partition` (any stable, opaque grouping key) scopes
+membership further so a node only clusters with same-partition nodes. The
+motivating case is geographic — set it to a Fly.io `FLY_REGION` so an agent for
+an Illinois user is never placed on, or routed through, a node in France — but it
+works for any per-node grouping. Cross-partition request routing remains an
+infra/app concern (e.g. Fly `fly-replay`). See
+[`docs/clustering.md`](https://github.com/sagents-ai/sagents/blob/main/docs/clustering.md).
+
+### Also in this release
+
+See [#134](https://github.com/sagents-ai/sagents/pull/134) for details on each:
+
+- **`members: :auto` is now real** — potential behaviour change. It previously
+  froze to a one-time node snapshot; it now drives Horde's `NodeListener` for
+  genuine dynamic membership with dead-node pruning. The undocumented static
+  `:members` forms (list / `function/0` / `{m, f, a}`) are removed; the only
+  values are `:auto` (default) and `:participation`.
+- **Registration-timeout resilience** — `AgentsDynamicSupervisor.start_agent_sync/1`
+  retries on Horde's hardcoded-5s `:via` registration timeout, via new
+  `:registration_retries` / `:registration_retry_backoff` options.
+- **FileSystem distribution-safety** — dropped `Process.alive?/1` checks on
+  potentially-remote pids that could raise.
+
 ## v0.8.0
 
 A large release that reworks the runtime foundations of the library: a new direct point-to-point event transport (replacing `Phoenix.PubSub`), session/factory lifecycle ownership moved into the library, interrupts that survive a process restart, a richer interrupt model (`:halt`, configurable `ask_user`), structured data extraction through the full middleware stack, cross-process caller-context propagation, and new tool-driven stop conditions.

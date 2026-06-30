@@ -14,7 +14,7 @@ A sage is a person who has attained wisdom and is often characterized by sound j
 - **Phoenix.Presence Integration** - Smart resource management that knows when to shut down idle agents
 - **PubSub Real-Time Events** - Stream agent state, messages, and events to multiple LiveView subscribers
 - **Middleware System** - Extensible plugin architecture for adding capabilities to agents, including composable observability callbacks for OpenTelemetry, metrics, or custom logging
-- **Cluster-Aware Distribution** - Optional Horde-based distribution for running agents across a cluster of nodes with automatic state migration, or run locally on a single node (the default)
+- **Cluster-Aware Distribution** - Optional Horde-based distribution for running agents across a cluster of nodes, with automatic state migration and configurable membership (role-scoped, or partitioned by region/grouping), or run locally on a single node (the default)
 - **State Persistence** - Save and restore agent conversations via optional behaviour modules for agent state and display messages
 - **Virtual Filesystem** - Isolated, in-memory file operations with optional persistence
 
@@ -45,7 +45,7 @@ Add `sagents` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:sagents, "~> 0.8.0"}
+    {:sagents, "~> 0.9.0"}
   ]
 end
 ```
@@ -679,10 +679,26 @@ When Horde is enabled, `Sagents.ProcessRegistry` and `Sagents.ProcessSupervisor`
 
 - **Automatic agent redistribution** across cluster nodes
 - **State migration** when nodes join or leave the cluster
-- **Regional clustering** for Fly.io deployments via `Sagents.Horde.ClusterConfig`
 - **Node transfer events** broadcast during redistribution so your UI can react
 
 Agents broadcast `{:agent, {:node_transferring, data}}` and `{:agent, {:node_transferred, data}}` events during Horde redistribution, allowing connected clients to follow their agent to a new node.
+
+#### Controlling membership
+
+Choose which nodes form the Horde cluster with `config :sagents, :horde, members:`:
+
+- `:auto` (default) — every visible BEAM node hosts agents.
+- `:participation` — only the nodes that run `Sagents.Supervisor`. Gate it to your agent-hosting role(s) and the other service roles stay out of the cluster. Membership is tracked via an OTP `:pg` group, and dead nodes are pruned automatically.
+
+An optional per-node `:partition` isolates participation further, so nodes only cluster with same-partition peers:
+
+```elixir
+config :sagents, :horde,
+  members: :participation,
+  partition: System.get_env("FLY_REGION")   # keep a region's agents on that region's nodes
+```
+
+`:partition` is any stable per-node grouping key — geography (a Fly.io `FLY_REGION`) is the motivating case, but a datacenter or dedicated node pool works too. See [Clustering & Distribution](docs/clustering.md) for the full model.
 
 No code changes are needed beyond the config — the `ProcessRegistry` and `ProcessSupervisor` abstractions handle backend switching transparently.
 
@@ -814,6 +830,7 @@ See [Conversations Architecture](docs/conversations_architecture.md) for the com
 
 - [Conversations Architecture](docs/conversations_architecture.md) - How the dual-view pattern works with agent state and display messages
 - [Lifecycle Management](docs/lifecycle.md) - Process supervision, timeouts, and shutdown
+- [Clustering & Distribution](docs/clustering.md) - Horde membership modes, participation, and region/partition scoping
 - [Subscriptions & Presence](docs/subscriptions_and_presence.md) - Real-time events, agent-discovery presence, and viewer-presence shutdown
 - [Middleware Development](docs/middleware.md) - Building custom middleware
 - [Observability](docs/observability.md) - Middleware-based callbacks for OpenTelemetry, metrics, and logging
