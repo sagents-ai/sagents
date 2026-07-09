@@ -249,6 +249,63 @@ defmodule Sagents.Middleware do
   @callback after_model(State.t(), middleware_config) :: middleware_result()
 
   @doc """
+  Transform an outbound message into its display representation before it is
+  persisted or broadcast.
+
+  This is the outbound mirror of `Sagents.MessagePreprocessor`. Where a
+  preprocessor turns user input (a display chip, a mention) into something for
+  the model, this callback turns a model-produced message into something for the
+  UI. The most common use is **metadata annotation**: a middleware inspects the
+  message and sets `metadata` on it so the UI renders it accordingly. It could
+  also rewrite content (for example, an XML tag with a JSON body becoming a
+  renderable structure).
+
+  ## When it runs
+
+  Runs per message at display-commit time, inside `AgentServer`, just before the
+  message is handed to `DisplayMessagePersistence.save_message/3` and broadcast.
+  It receives the message that is about to become a display message and returns
+  the version to persist and broadcast. The message in agent state (what the LLM
+  sees next turn) is left untouched.
+
+  ## Metadata vs the LLM
+
+  `LangChain.Message.metadata` is a local field and is not sent to the LLM, so
+  annotating a message with metadata is safe: it never changes what the model
+  sees. Note that for annotated metadata to reach the persisted display record,
+  the `DisplayMessagePersistence` implementation must carry `message.metadata`
+  onto the record it stores; live subscribers receive it via the broadcast
+  message regardless.
+
+  ## Streaming caveat
+
+  Because this fires when a message is complete, a middleware that **rewrites
+  content** while the integrator streams responses will cause the streamed text
+  to be replaced once complete. Metadata annotation does not have this problem.
+
+  Because divergence between what the user sees and what the model sees is
+  possible when content is rewritten, keeping it intentional is the developer's
+  responsibility.
+
+  All of an agent's middleware run in order, each receiving the previous one's
+  output, so transforms compose.
+
+  ## Parameters
+
+  - `message` - The `LangChain.Message` about to become a display message.
+  - `config` - This middleware's configuration.
+
+  ## Returns
+
+  - `{:ok, message}` - The (possibly transformed) message to persist/broadcast.
+  - `{:error, reason}` - Failure; the untransformed message is used and the error logged.
+
+  Defaults to returning the message unchanged if not implemented.
+  """
+  @callback transform_display_message(LangChain.Message.t(), middleware_config) ::
+              {:ok, LangChain.Message.t()} | {:error, term()}
+
+  @doc """
   Handle messages sent to this middleware.
 
   Messages are routed to a specific middleware by ID through the AgentServer's
@@ -481,6 +538,7 @@ defmodule Sagents.Middleware do
     tools: 1,
     before_model: 2,
     after_model: 2,
+    transform_display_message: 2,
     handle_message: 3,
     state_schema: 0,
     on_server_start: 2,
@@ -655,6 +713,37 @@ defmodule Sagents.Middleware do
       module.after_model(state, config)
     rescue
       UndefinedFunctionError -> {:ok, state}
+    end
+  end
+
+  @doc """
+  Apply the transform_display_message callback from middleware.
+
+  Returns the (possibly transformed) message. Middleware that doesn't implement
+  the callback, returns an unexpected shape, or raises `UndefinedFunctionError`
+  passes the message through unchanged.
+
+  ## Parameters
+
+  - `message` - The `LangChain.Message` about to become a display message
+  - `entry` - MiddlewareEntry struct with module and config
+
+  ## Returns
+
+  - `{:ok, message}` - The message to persist/broadcast
+  - `{:error, reason}` - Middleware returned an error (caller decides handling)
+  """
+  @spec apply_transform_display_message(LangChain.Message.t(), Sagents.MiddlewareEntry.t()) ::
+          {:ok, LangChain.Message.t()} | {:error, term()}
+  def apply_transform_display_message(message, %MiddlewareEntry{module: module, config: config}) do
+    try do
+      case module.transform_display_message(message, config) do
+        {:ok, %LangChain.Message{} = transformed} -> {:ok, transformed}
+        {:error, reason} -> {:error, reason}
+        _other -> {:ok, message}
+      end
+    rescue
+      UndefinedFunctionError -> {:ok, message}
     end
   end
 

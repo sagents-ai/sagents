@@ -3092,6 +3092,13 @@ defmodule Sagents.AgentServer do
 
   # Save message via DisplayMessagePersistence behaviour and broadcast display messages
   defp maybe_save_and_broadcast_message(server_state, message) do
+    # Give middleware a chance to shape the message into its display
+    # representation (annotate metadata for the UI, or rewrite content) before it
+    # is persisted or broadcast. The message in agent state is untouched; this
+    # only affects the display/transcript. See
+    # Sagents.Middleware.transform_display_message/2.
+    message = apply_display_transforms(server_state, message)
+
     if server_state.display_message_persistence && server_state.conversation_id do
       module = server_state.display_message_persistence
       scope = current_scope(server_state)
@@ -3117,6 +3124,26 @@ defmodule Sagents.AgentServer do
       # No persistence configured — just broadcast the message event
       broadcast_event(server_state, {:llm_message, message})
     end
+  end
+
+  # Fold an outbound message through each middleware's transform_display_message
+  # hook, in order. Middleware that doesn't implement it passes the message
+  # through unchanged. An {:error, _} from a middleware is logged and the
+  # untransformed message continues down the chain.
+  defp apply_display_transforms(server_state, message) do
+    Enum.reduce(server_state.agent.middleware, message, fn entry, msg ->
+      case Middleware.apply_transform_display_message(msg, entry) do
+        {:ok, transformed} ->
+          transformed
+
+        {:error, reason} ->
+          Logger.error(
+            "transform_display_message failed in #{inspect(entry.module)}: #{inspect(reason)}"
+          )
+
+          msg
+      end
+    end)
   end
 
   # Persist a middleware-originated synthetic display message via the configured
