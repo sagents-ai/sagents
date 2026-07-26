@@ -109,6 +109,8 @@ defmodule Sagents.SubAgent do
   alias Sagents.State
   alias LangChain.Chains.LLMChain
   alias LangChain.Message
+  alias LangChain.Message.ContentPart
+  alias LangChain.Message.ToolResult
   alias LangChain.Utils
 
   @primary_key false
@@ -630,6 +632,14 @@ defmodule Sagents.SubAgent do
   This is the default extraction - middleware or custom logic can provide
   different extraction.
 
+  An `until_tool` run terminates the moment the target tool's result lands, so
+  its final message is a *tool* message and the result the caller wants is that
+  tool's content — not assistant prose. Those runs extract the matched tool
+  result directly; every other completion still goes through
+  `LangChain.Utils.ChainResult.to_string/1`. A tool result flagged `is_error`
+  is returned as `{:error, content}` so a failed submission does not read as a
+  successful one.
+
   Returns `{:ok, string}` on success or `{:error, reason}` on failure.
 
   ## Examples
@@ -638,16 +648,50 @@ defmodule Sagents.SubAgent do
       {:ok, result} = SubAgent.extract_result(completed_subagent)
       # => {:ok, "Research complete: Solar energy has shown..."}
   """
+  def extract_result(%SubAgent{status: :completed, chain: chain, until_tool: until_tool})
+      when not is_nil(until_tool) do
+    case matched_tool_result(chain, until_tool) do
+      %ToolResult{is_error: true} = result -> {:error, tool_result_to_string(result)}
+      %ToolResult{} = result -> {:ok, tool_result_to_string(result)}
+      # The run ended some other way (e.g. a resume that completed with prose).
+      nil -> chain_result_to_string(chain)
+    end
+  end
+
   def extract_result(%SubAgent{status: :completed, chain: chain}) do
+    chain_result_to_string(chain)
+  end
+
+  def extract_result(%SubAgent{status: status}) do
+    {:error, {:invalid_status, status, :expected_completed}}
+  end
+
+  defp chain_result_to_string(chain) do
     case Utils.ChainResult.to_string(chain) do
       {:ok, result} -> {:ok, result}
       {:error, _chain, reason} -> {:error, reason}
     end
   end
 
-  def extract_result(%SubAgent{status: status}) do
-    {:error, {:invalid_status, status, :expected_completed}}
+  # The tool result that ended the run, mirroring the match the mode's
+  # until-tool step made on the same final message.
+  defp matched_tool_result(
+         %LLMChain{last_message: %Message{role: :tool, tool_results: results}},
+         until_tool
+       )
+       when is_list(results) do
+    names = List.wrap(until_tool)
+    Enum.find(results, &(&1.name in names))
   end
+
+  defp matched_tool_result(_chain, _until_tool), do: nil
+
+  defp tool_result_to_string(%ToolResult{content: content}) when is_binary(content), do: content
+
+  defp tool_result_to_string(%ToolResult{content: content}) when is_list(content),
+    do: ContentPart.parts_to_string(content)
+
+  defp tool_result_to_string(%ToolResult{content: nil}), do: ""
 
   ## Private Helper Functions
 
