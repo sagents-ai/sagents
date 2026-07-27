@@ -51,15 +51,28 @@ defmodule Sagents.FileSystem.FileEntry do
   This is the full internal changeset used by `new_file/3` and friends.
   It casts all schema fields including `:path`, `:content`, and
   `:dirty_content`.
+
+  `empty_values: []` opts out of Ecto's default empty-value coercion. By
+  default Ecto treats any string that trims to `""` as absent and replaces
+  it with the field's default — so `""`, `"\\n"`, and `"   "` would all be
+  stored as `nil`. A filesystem must store bytes verbatim: a file holding a
+  single newline is a real file with real content, not a missing value.
+  Without this, whitespace-only writes report success while silently
+  discarding the content.
   """
   def internal_changeset(entry \\ %FileEntry{}, attrs) do
     entry
-    |> cast(attrs, [
-      :path,
-      :content,
-      :loaded,
-      :dirty_content
-    ])
+    |> cast(
+      attrs,
+      [
+        :path,
+        :content,
+        :loaded,
+        :dirty_content
+      ],
+      # NOTE: Passing an empty list means NO values are treated as empty.
+      empty_values: []
+    )
     |> cast_embed(:metadata, with: &FileMetadata.changeset/2)
     |> validate_path()
     |> validate_required([:loaded, :dirty_content])
