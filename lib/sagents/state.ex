@@ -680,4 +680,94 @@ defmodule Sagents.State do
   end
 
   defp demote_for_cancel(other), do: other
+
+  @doc """
+  Drop the trailing messages an aborted turn left behind, so the log is a
+  shape a provider accepts again.
+
+  A run that fails partway through — a rate limit, a timeout, a transport
+  error, a crashed execution task — stops wherever it was. The messages
+  already appended stay in the state, and the tail is frequently malformed:
+  an assistant message announcing tool calls whose results never landed. Every
+  provider rejects that log, so the next execution fails for the shape of the
+  history rather than for anything the caller did, and the conversation is
+  stuck.
+
+  The boundary this trims back to is the longest prefix of the log in which
+  every assistant tool call has its matching tool result and every tool result
+  has its matching call. Messages after that boundary are dropped. Nothing
+  before it is edited: an earlier turn's messages, its tool results, and any
+  completed work are exactly as they were.
+
+  Returns `{state, dropped}` where `dropped` is the number of messages
+  removed. Idempotent: a log that is already well formed is unchanged and
+  answers `0`.
+
+  ## Examples
+
+      # the model asked for a tool and the run died before the result
+      state = State.new!(%{messages: [user, assistant_with_tool_calls]})
+      {trimmed, 1} = State.trim_unfinished_turn(state)
+      # trimmed.messages == [user]
+  """
+  @spec trim_unfinished_turn(t()) :: {t(), non_neg_integer()}
+  def trim_unfinished_turn(%State{} = state) do
+    kept = drop_unmatched_tail(Enum.reverse(state.messages), [])
+    dropped = length(state.messages) - length(kept)
+
+    {%{state | messages: kept}, dropped}
+  end
+
+  # Walks the log from its end. `older` is what has not been examined yet,
+  # newest first; `tail` is the suffix kept so far, oldest first. A message
+  # joins the tail only once the rest of the log can answer it, and a message
+  # that cannot be answered discards the whole tail behind it — which is what
+  # makes the result the longest well-formed prefix rather than merely a log
+  # without a trailing tool call.
+  defp drop_unmatched_tail([], tail), do: tail
+
+  defp drop_unmatched_tail([message | older], tail) do
+    if matched?(message, older, tail) do
+      drop_unmatched_tail(older, [message | tail])
+    else
+      drop_unmatched_tail(older, [])
+    end
+  end
+
+  # An assistant message is matched when every tool call it made has a result
+  # later in the log. A tool message is matched when every result it carries
+  # answers a call earlier in the log. Any other message stands on its own.
+  defp matched?(%LangChain.Message{role: :assistant, tool_calls: calls}, _older, tail)
+       when is_list(calls) and calls != [] do
+    answered = result_ids(tail)
+
+    Enum.all?(calls, &MapSet.member?(answered, &1.call_id))
+  end
+
+  defp matched?(%LangChain.Message{role: :tool, tool_results: results}, older, _tail)
+       when is_list(results) and results != [] do
+    called = call_ids(older)
+
+    Enum.all?(results, &MapSet.member?(called, &1.tool_call_id))
+  end
+
+  defp matched?(_message, _older, _tail), do: true
+
+  defp result_ids(messages) do
+    for %LangChain.Message{role: :tool, tool_results: results} <- messages,
+        is_list(results),
+        result <- results,
+        into: MapSet.new() do
+      result.tool_call_id
+    end
+  end
+
+  defp call_ids(messages) do
+    for %LangChain.Message{role: :assistant, tool_calls: calls} <- messages,
+        is_list(calls),
+        call <- calls,
+        into: MapSet.new() do
+      call.call_id
+    end
+  end
 end

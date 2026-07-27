@@ -1006,6 +1006,55 @@ defmodule Sagents.AgentServer do
   end
 
   @doc """
+  Recover an errored server to `:idle`, keeping the conversation.
+
+  A run that fails partway through leaves the server in `:error`, and
+  `execute/1` refuses from there, so a transient provider fault — a rate
+  limit, a timeout, a transport error — ends the conversation permanently.
+  `reset/1` is the only other way out and it clears the whole message log,
+  which is a different thing from recovering: it discards the conversation to
+  save the process.
+
+  Recovery keeps the messages and drops only what the aborted turn left
+  behind. The state is trimmed by `Sagents.State.trim_unfinished_turn/1` to
+  the longest well-formed prefix, because the tail an aborted run leaves is
+  frequently an assistant message announcing tool calls whose results never
+  arrived — a log every provider rejects. Without the trim the next execution
+  fails on the shape of the history rather than on anything the caller did.
+
+  Returns `{:ok, info}` where `info` carries:
+
+  - `:reason` — the error the run failed with, preserved so the host can show
+    a person why the turn stopped. The server clears its own `:error` field,
+    so this reply is the only place the reason survives.
+  - `:dropped` — how many messages the trim removed. `0` means the failure
+    landed on a well-formed boundary and no work was discarded.
+
+  Broadcasts `{:status_changed, :idle, nil}` like every other transition to
+  idle, so a subscriber watching the status stream learns the server is usable
+  again without polling.
+
+  Returns `{:error, reason}` when the server is not in `:error` — recovery is
+  for a failed run, and a running, interrupted, or already-idle server is
+  asked to `cancel/1`, `resume/2`, or nothing at all.
+
+  ## Examples
+
+      # a turn failed on a provider rate limit
+      :error = AgentServer.get_status("my-agent-1")
+
+      {:ok, %{reason: reason, dropped: 1}} = AgentServer.recover("my-agent-1")
+
+      # the conversation continues from the last well-formed boundary
+      :ok = AgentServer.add_message("my-agent-1", Message.new_user!("Try again"))
+  """
+  @spec recover(String.t()) ::
+          {:ok, %{reason: term(), dropped: non_neg_integer()}} | {:error, term()}
+  def recover(agent_id) do
+    safe_call(agent_id, :recover)
+  end
+
+  @doc """
   Get the current inactivity status of an agent.
 
   Returns a map with:
@@ -1782,6 +1831,43 @@ defmodule Sagents.AgentServer do
     updated_server_state = reset_inactivity_timer(updated_server_state)
 
     {:reply, :ok, updated_server_state}
+  end
+
+  @impl true
+  def handle_call(:recover, _from, %ServerState{status: :error} = server_state) do
+    reason = server_state.error
+    {recovered_state, dropped} = State.trim_unfinished_turn(server_state.state)
+
+    # `execution_seq` is bumped for the same reason `dismiss_interrupt` bumps
+    # it: a late cast from the run that failed must not be applied to the state
+    # the recovery just established.
+    updated_server_state = %{
+      server_state
+      | state: recovered_state,
+        status: :idle,
+        error: nil,
+        interrupt_data: nil,
+        execution_seq: server_state.execution_seq + 1
+    }
+
+    # The trimmed log has to survive a restart. Without this, a cold load
+    # restores the malformed messages the failure left and the recovery is
+    # undone by the next process death.
+    updated_server_state = maybe_persist_state(updated_server_state, :on_completion)
+
+    broadcast_event(updated_server_state, {:status_changed, :idle, nil})
+    update_presence_status(updated_server_state, :idle)
+    broadcast_state_changes(updated_server_state, recovered_state)
+
+    updated_server_state = reset_inactivity_timer(updated_server_state)
+
+    {:reply, {:ok, %{reason: reason, dropped: dropped}}, updated_server_state}
+  end
+
+  @impl true
+  def handle_call(:recover, _from, server_state) do
+    {:reply, {:error, "Cannot recover, server is not in error (status: #{server_state.status})"},
+     server_state}
   end
 
   @impl true
