@@ -62,6 +62,27 @@ defmodule Sagents.FileSystem.FileEntryTest do
       assert {:error, error} = FileEntry.new_file("/path//file.txt", "data")
       assert error =~ "invalid segment"
     end
+
+    # A filesystem stores bytes verbatim. Whitespace-only content is a real
+    # file, not an absent value, so it must survive the write unchanged —
+    # Ecto's default empty-value coercion would turn every one of these into
+    # nil while still reporting success.
+    for {label, content} <- [
+          {"empty string", ""},
+          {"single newline", "\n"},
+          {"two newlines", "\n\n"},
+          {"spaces", "   "},
+          {"tab", "\t"},
+          {"mixed whitespace", " \n \t\n"}
+        ] do
+      test "preserves whitespace-only content: #{label}" do
+        content = unquote(content)
+
+        assert {:ok, entry} = FileEntry.new_file("/tmp/spacer.md", content)
+        assert entry.content == content
+        assert entry.metadata.size == byte_size(content)
+      end
+    end
   end
 
   describe "new_indexed_file/1" do

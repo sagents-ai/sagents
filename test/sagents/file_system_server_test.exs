@@ -128,6 +128,39 @@ defmodule Sagents.FileSystemServerTest do
       assert entry.dirty_content == false
     end
 
+    # Whitespace-only payloads are legitimate file contents (a spacer file
+    # holding one newline, for example). They must round-trip byte-for-byte
+    # rather than being coerced to nil on the way in.
+    for {label, content} <- [
+          {"empty string", ""},
+          {"single newline", "\n"},
+          {"two newlines", "\n\n"},
+          {"spaces", "   "},
+          {"mixed whitespace", " \n \t\n"}
+        ] do
+      test "round-trips whitespace-only content: #{label}", %{agent_id: agent_id} do
+        {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+        content = unquote(content)
+        path = "/scratch/spacer.md"
+
+        assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, content)
+        assert {:ok, entry} = FileSystemServer.read_file({:agent, agent_id}, path)
+        assert entry.content == content
+        assert entry.metadata.size == byte_size(content)
+      end
+
+      test "overwrite with whitespace-only content: #{label}", %{agent_id: agent_id} do
+        {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+        content = unquote(content)
+        path = "/scratch/spacer.md"
+
+        {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, "original")
+        assert {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, path, content)
+        assert {:ok, entry} = FileSystemServer.read_file({:agent, agent_id}, path)
+        assert entry.content == content
+      end
+    end
+
     test "writes to unconfigured directory as memory-only", %{
       agent_id: agent_id
     } do
