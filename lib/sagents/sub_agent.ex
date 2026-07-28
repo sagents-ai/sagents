@@ -686,12 +686,14 @@ defmodule Sagents.SubAgent do
 
   defp matched_tool_result(_chain, _until_tool), do: nil
 
-  defp tool_result_to_string(%ToolResult{content: content}) when is_binary(content), do: content
-
-  defp tool_result_to_string(%ToolResult{content: content}) when is_list(content),
-    do: ContentPart.parts_to_string(content)
-
-  defp tool_result_to_string(%ToolResult{content: nil}), do: ""
+  # `ToolResult` normalizes content into a list of ContentParts (see
+  # `LangChain.Utils.migrate_to_content_parts/1`), so this reads parts far more
+  # often than a bare string. `content_to_string/1` returns nil for an empty
+  # result or one carrying no text parts (an image-only result, say), and
+  # `extract_result/1` promises a string — so fall back to "".
+  defp tool_result_to_string(%ToolResult{content: content}) do
+    ContentPart.content_to_string(content) || ""
+  end
 
   ## Private Helper Functions
 

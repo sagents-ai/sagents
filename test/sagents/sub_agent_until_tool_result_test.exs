@@ -16,6 +16,7 @@ defmodule Sagents.SubAgentUntilToolResultTest do
   alias LangChain.ChatModels.ChatAnthropic
   alias LangChain.Function
   alias LangChain.Message
+  alias LangChain.Message.ContentPart
   alias LangChain.Message.ToolCall
 
   setup :verify_on_exit!
@@ -117,6 +118,22 @@ defmodule Sagents.SubAgentUntilToolResultTest do
 
       assert {:ok, %SubAgent{status: :completed} = completed, _extra} = SubAgent.execute(subagent)
       assert {:ok, ^payload} = SubAgent.extract_result(completed)
+    end
+
+    test "returns a string when the terminating result carries no text part" do
+      # `ContentPart.content_to_string/1` yields nil for a result with no text
+      # part. extract_result/1 promises a string, so this must not leak a nil.
+      image = ContentPart.image!("base64data", media: :png)
+
+      subagent =
+        build_subagent(submit_tool(fn _args, _ctx -> {:ok, [image]} end),
+          until_tool: "submit_report"
+        )
+
+      script_submit_call(%{"summary" => "picture"})
+
+      assert {:ok, %SubAgent{status: :completed} = completed, _extra} = SubAgent.execute(subagent)
+      assert {:ok, ""} = SubAgent.extract_result(completed)
     end
 
     test "still reads assistant prose when no until_tool is configured" do
