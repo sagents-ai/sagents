@@ -968,8 +968,11 @@ defmodule Sagents.Middleware.SubAgent do
         {:ok, final_result}
 
       {:ok, final_result, extra} ->
-        # SubAgent completed with extra data (e.g., until_tool result)
+        # SubAgent completed with extra data (e.g., until_tool result). The run
+        # is over either way, so the process is stopped exactly as it is for a
+        # plain completion.
         Logger.debug("Task #{sub_agent_id} completed with extra data")
+        SubAgentServer.stop(sub_agent_id)
         {:ok, final_result, extra}
 
       {:interrupt, interrupt_data} ->
