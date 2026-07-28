@@ -144,6 +144,26 @@ defmodule Sagents.Middleware.SubAgent do
       7. Parent agent resumes
       8. Task tool calls SubAgentServer.resume(decisions)
       9. SubAgent continues and completes
+
+  ## Halts are propagated, not wrapped
+
+  The flow above applies to interrupts that can be *resolved*: a HITL
+  approval, a question. A `:halt` is different. It declares the workflow
+  over, so there is nothing to approve and nothing to resume.
+
+  When a sub-agent tool emits `%{type: :halt}` (or a `:multiple_interrupts`
+  batch containing one, since "halt wins"), the halt is propagated to the parent
+  **as a halt** rather than wrapped in `:subagent_hitl`, and the sub-agent
+  process is stopped. This is what lets the parent's existing halt machinery
+  apply: the loop terminates without another LLM call,
+  `Sagents.Middleware.Haltable` claims the interrupt for cold-start restore,
+  and `Sagents.AgentUtils.interrupt_session_changes/1` surfaces the halt's
+  author-facing `:message`.
+
+  The propagated halt keeps the emitting tool's `:source_tool` and gains a
+  `:source_task` naming the sub-agent that ran it. It deliberately carries no
+  `:sub_agent_id`, because a restorable interrupt must be pure data and the
+  sub-agent process does not survive a reboot.
   """
 
   @behaviour Sagents.Middleware
@@ -973,17 +993,23 @@ defmodule Sagents.Middleware.SubAgent do
         {:ok, final_result, extra}
 
       {:interrupt, interrupt_data} ->
-        Logger.info("Task '#{task_name}' interrupted for HITL")
+        case find_halt(interrupt_data) do
+          nil ->
+            Logger.info("Task '#{task_name}' interrupted for HITL")
 
-        # Return 3-tuple that LangChain.execute_tool_call recognizes
-        # Keep alive — needs resume later
-        {:interrupt, "'#{task_name}' requires human approval.",
-         %{
-           type: :subagent_hitl,
-           sub_agent_id: sub_agent_id,
-           task_name: task_name,
-           interrupt_data: interrupt_data
-         }}
+            # Return 3-tuple that LangChain.execute_tool_call recognizes
+            # Keep alive — needs resume later
+            {:interrupt, "'#{task_name}' requires human approval.",
+             %{
+               type: :subagent_hitl,
+               sub_agent_id: sub_agent_id,
+               task_name: task_name,
+               interrupt_data: interrupt_data
+             }}
+
+          halt ->
+            propagate_halt(halt, sub_agent_id, task_name)
+        end
 
       {:error, reason} ->
         Logger.error("Task #{sub_agent_id} failed: #{inspect(reason)}")
@@ -994,6 +1020,47 @@ defmodule Sagents.Middleware.SubAgent do
         SubAgentServer.stop(sub_agent_id)
         {:error, format_subagent_error(reason, task_name)}
     end
+  end
+
+  # Locate a `:halt` in sub-agent interrupt data.
+  #
+  # "Halt wins": inside a `:multiple_interrupts` batch a single halt terminates
+  # the workflow, so sibling questions/approvals are moot. This mirrors the
+  # policy already implemented in `Haltable.restorable_interrupt?/1` and
+  # `AgentUtils.interrupt_session_changes/1`.
+  defp find_halt(%{type: :halt} = halt), do: halt
+
+  defp find_halt(%{type: :multiple_interrupts, interrupts: subs}) when is_list(subs) do
+    Enum.find(subs, &match?(%{type: :halt}, &1))
+  end
+
+  defp find_halt(_other), do: nil
+
+  # A `:halt` raised inside a sub-agent is terminal: there is nothing to approve
+  # and nothing to resume. Propagate it to the parent *as a halt* rather than
+  # wrapping it in `:subagent_hitl`, so the parent's existing halt machinery
+  # applies: the loop stops without another LLM call, `Middleware.Haltable`
+  # claims it for cold-start restore, and `AgentUtils.interrupt_session_changes/1`
+  # surfaces the author-facing `:message` instead of an empty approval prompt.
+  #
+  # The sub-agent process is stopped, unlike the HITL pause above: there is no
+  # resume leg to keep it alive for. Dropping the sub-agent's `:tool_call_id` is
+  # what makes the propagated halt pure data and therefore restorable. It must
+  # not reference a process that will not survive a reboot. LangChain refills
+  # `:tool_call_id` with the parent's `task` call when it normalizes this return.
+  defp propagate_halt(halt, sub_agent_id, task_name) do
+    Logger.info("Task '#{task_name}' halted by a sub-agent tool")
+    SubAgentServer.stop(sub_agent_id)
+
+    message = Map.get(halt, :message, "Sub-agent task '#{task_name}' halted.")
+
+    propagated =
+      halt
+      |> Map.drop([:tool_call_id])
+      |> Map.put(:type, :halt)
+      |> Map.put(:source_task, task_name)
+
+    {:interrupt, "Task '#{task_name}' halted: #{message}", propagated}
   end
 
   # Preserve structure for LangChainError (e.g., length-stopped) so the caller
@@ -1091,17 +1158,23 @@ defmodule Sagents.Middleware.SubAgent do
         {:ok, final_result, extra}
 
       {:interrupt, interrupt_data} ->
-        Logger.info("SubAgent '#{task_name}' interrupted again")
+        case find_halt(interrupt_data) do
+          nil ->
+            Logger.info("SubAgent '#{task_name}' interrupted again")
 
-        # Return 3-tuple that LangChain.execute_tool_call recognizes
-        # Keep alive — needs resume later
-        {:interrupt, "'#{task_name}' requires human approval.",
-         %{
-           type: :subagent_hitl,
-           sub_agent_id: sub_agent_id,
-           task_name: task_name,
-           interrupt_data: interrupt_data
-         }}
+            # Return 3-tuple that LangChain.execute_tool_call recognizes
+            # Keep alive — needs resume later
+            {:interrupt, "'#{task_name}' requires human approval.",
+             %{
+               type: :subagent_hitl,
+               sub_agent_id: sub_agent_id,
+               task_name: task_name,
+               interrupt_data: interrupt_data
+             }}
+
+          halt ->
+            propagate_halt(halt, sub_agent_id, task_name)
+        end
 
       {:error, reason} ->
         Logger.error("SubAgent #{sub_agent_id} resume failed: #{inspect(reason)}")
