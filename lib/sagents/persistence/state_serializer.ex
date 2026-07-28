@@ -67,13 +67,43 @@ defmodule Sagents.Persistence.StateSerializer do
   part of the conversation state. When restoring state, you must provide the
   agent_id to `deserialize_server_state/2` or `AgentServer.start_link_from_state/2`.
   """
-  def serialize_server_state(%Agent{} = _agent, %State{} = state) do
-    %{
+  def serialize_server_state(agent, state, opts \\ [])
+
+  def serialize_server_state(%Agent{} = _agent, %State{} = state, opts) do
+    base = %{
       # Version stays at 1, but now only contains state
       "version" => @current_version,
       "state" => serialize_state(state),
       "serialized_at" => DateTime.utc_now() |> DateTime.to_iso8601()
     }
+
+    # A message queued while a run was in flight lives on ServerState, which is
+    # otherwise not serialized at all. Without this key, a node dying mid-run
+    # loses the user's own words. Payloads written before this existed simply
+    # lack the key, which `deserialize_pending_message/1` reads as "nothing
+    # queued".
+    case Keyword.get(opts, :pending_message) do
+      nil -> base
+      %Message{} = message -> Map.put(base, "pending_message", serialize_message(message))
+    end
+  end
+
+  @doc """
+  Reads the queued (not yet delivered) message out of a serialized payload.
+
+  Returns `nil` when the payload has no pending message, which includes every
+  payload written before the key existed.
+
+  This is a separate function rather than an extra element in
+  `deserialize_server_state/3`'s return, so that function's `{:ok, state}`
+  contract, which callers and tests depend on, is unchanged.
+  """
+  @spec deserialize_pending_message(map()) :: Message.t() | nil
+  def deserialize_pending_message(data) when is_map(data) do
+    case data["pending_message"] do
+      message_data when is_map(message_data) -> deserialize_message(message_data)
+      _other -> nil
+    end
   end
 
   @doc """
