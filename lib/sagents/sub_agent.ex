@@ -469,7 +469,30 @@ defmodule Sagents.SubAgent do
 
   - `{:ok, completed_subagent}` - Execution completed
   - `{:interrupt, interrupted_subagent}` - Another interrupt (multiple HITL tools)
-  - `{:error, error_subagent}` - Resume failed
+  - `{:error, error_subagent}` - Resume ran but failed; the `SubAgent` carries
+    the reason in its `:error` field
+  - `{:error, {:unsupported_interrupt, :tool_raised}}` - Interrupted on a shape
+    this function cannot apply decisions to (see below)
+  - `{:error, {:invalid_status, status, :expected_interrupted}}` - Not interrupted
+
+  ## Supported interrupt shapes
+
+  Only the pre-tool HITL interrupt is resumable. That shape carries
+  `:action_requests` and `:hitl_tool_call_ids`, and names tool calls that have
+  *not* run yet, so the decisions can be applied by executing them.
+
+  An interrupt raised from inside a tool body (`is_interrupt: true` on a
+  `ToolResult`, surfaced by `check_tool_interrupts/2`) is **not** resumable
+  here and returns `{:error, {:unsupported_interrupt, :tool_raised}}`. Its
+  tool has already executed, so resolving it means replacing the recorded
+  tool result rather than executing a pending call — the job of the
+  middleware that owns the interrupt type, working on `Sagents.State` via
+  `State.replace_tool_result/3`. A sub-agent runs a bare chain with no
+  `handle_resume/5` dispatch, so it has no owner to hand the interrupt to.
+
+  Callers resolve these at the parent instead: `Sagents.Middleware.SubAgent`
+  turns the error into a tool result for the parent chain and stops the
+  sub-agent process.
 
   ## Examples
 
@@ -495,7 +518,9 @@ defmodule Sagents.SubAgent do
         %SubAgent{
           status: :interrupted,
           chain: chain,
-          interrupt_data: interrupt_data
+          interrupt_data:
+            %{action_requests: _action_requests, hitl_tool_call_ids: _hitl_tool_call_ids} =
+              interrupt_data
         } = subagent,
         decisions,
         opts
@@ -588,6 +613,19 @@ defmodule Sagents.SubAgent do
              error: reason
          }}
     end
+  end
+
+  # Interrupted, but on a shape this function cannot apply decisions to —
+  # a tool-raised interrupt whose tool has already executed. Fail with a named
+  # error the caller can match on instead of a KeyError from destructuring
+  # fields that only the pre-tool HITL shape carries.
+  def resume(%SubAgent{status: :interrupted} = subagent, _decisions, _opts) do
+    Logger.warning(
+      "SubAgent #{subagent.id} cannot resume a tool-raised interrupt; " <>
+        "resolve it at the parent instead"
+    )
+
+    {:error, {:unsupported_interrupt, :tool_raised}}
   end
 
   def resume(%SubAgent{status: status}, _decisions, _opts) do
