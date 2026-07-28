@@ -69,8 +69,19 @@ defmodule Sagents.Middleware.SubAgent do
   1. **SubAgent middleware is ALWAYS excluded** - This prevents recursive subagent
      nesting which could lead to resource exhaustion. You cannot override this.
 
-  2. **Blocked middleware is excluded** - Any modules listed in `:block_middleware`
+  2. **AskUserQuestion middleware is excluded** - A subagent has no user to ask.
+     Its `:ask_user_question` interrupt is raised from inside a tool body, so it
+     returns to the parent wrapped as `:subagent_hitl` with the question buried
+     where the question-rendering path does not look. The task-subagent system
+     prompt already states "You cannot ask the user questions. There is no user
+     in this conversation.", so inheriting the `ask_user` tool handed the
+     subagent a capability the prompt then had to police.
+
+  3. **Blocked middleware is excluded** - Any modules listed in `:block_middleware`
      are filtered out before passing to the subagent.
+
+  Exclusions apply to *inheritance* only. A pre-configured subagent that names
+  one of these in its own `:middleware` list still receives it.
 
   ### Example: Blocking Unnecessary Middleware
 

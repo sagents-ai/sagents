@@ -1819,6 +1819,80 @@ defmodule Sagents.SubAgentTest do
     end
   end
 
+  describe "subagent_middleware_stack/3 excludes AskUserQuestion from inheritance" do
+    alias Sagents.Middleware.AskUserQuestion
+    alias Sagents.Middleware.FileSystem
+    alias Sagents.Middleware.TodoList
+
+    test "is filtered without being named in block_middleware" do
+      middleware = [TodoList, AskUserQuestion, FileSystem]
+
+      result = SubAgent.subagent_middleware_stack(middleware)
+      modules = Enum.map(result, &SubAgent.extract_middleware_module/1)
+
+      assert [TodoList, FileSystem] = modules
+    end
+
+    test "is filtered from initialized MiddlewareEntry structs" do
+      # agent.middleware holds MiddlewareEntry structs rather than raw specs.
+      # This is the shape the production path actually passes in.
+      {:ok, agent} =
+        Agent.new(%{
+          model: test_model(),
+          middleware: [TodoList, AskUserQuestion, FileSystem]
+        })
+
+      assert Enum.any?(agent.middleware, &match?(%MiddlewareEntry{module: AskUserQuestion}, &1))
+
+      result = SubAgent.subagent_middleware_stack(agent.middleware)
+
+      refute Enum.any?(result, &match?(%MiddlewareEntry{module: AskUserQuestion}, &1))
+      assert Enum.any?(result, &match?(%MiddlewareEntry{module: TodoList}, &1))
+    end
+
+    test "is still filtered when block_middleware names other modules" do
+      middleware = [TodoList, AskUserQuestion, FileSystem]
+
+      result = SubAgent.subagent_middleware_stack(middleware, [], block_middleware: [FileSystem])
+      modules = Enum.map(result, &SubAgent.extract_middleware_module/1)
+
+      assert [TodoList] = modules
+    end
+
+    test "is kept when the sub-agent asks for it explicitly" do
+      # Only inheritance is filtered. A SubAgent.Config naming AskUserQuestion in
+      # its own :middleware list passes it through additional_middleware, which
+      # is the opt-back-in route.
+      result = SubAgent.subagent_middleware_stack([TodoList, AskUserQuestion], [AskUserQuestion])
+      modules = Enum.map(result, &SubAgent.extract_middleware_module/1)
+
+      assert [TodoList, AskUserQuestion] = modules
+    end
+
+    test "removes the ask_user_question tool from an inheriting sub-agent" do
+      # The point of the exclusion: the sub-agent must not be handed a tool the
+      # task-subagent system prompt then has to tell it not to use.
+      {:ok, parent} =
+        Agent.new(%{
+          model: test_model(),
+          middleware: [TodoList, AskUserQuestion]
+        })
+
+      assert "ask_user" in Enum.map(parent.tools, & &1.name)
+
+      {:ok, subagent} =
+        Agent.new(%{
+          model: test_model(),
+          middleware:
+            parent.middleware
+            |> SubAgent.subagent_middleware_stack()
+            |> MiddlewareEntry.to_raw_specs()
+        })
+
+      refute "ask_user" in Enum.map(subagent.tools, & &1.name)
+    end
+  end
+
   # Helper function to extract errors from changeset
   defp errors_on(changeset) do
     Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->

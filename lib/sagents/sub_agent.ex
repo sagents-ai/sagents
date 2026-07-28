@@ -111,6 +111,23 @@ defmodule Sagents.SubAgent do
   alias LangChain.Message
   alias LangChain.Utils
 
+  # Middleware never inherited by a sub-agent from its parent, whether or not
+  # the caller lists it in `:block_middleware`.
+  #
+  # `SubAgent` would allow recursive nesting. `AskUserQuestion` contributes the
+  # `ask_user` tool, but a sub-agent has no user to ask: its interrupt
+  # is raised from inside a tool body, so it comes back to the parent wrapped as
+  # `:subagent_hitl` with the question buried where nothing looks for it. See
+  # `compose_child_system_prompt/1`, which already instructs every task
+  # sub-agent that it cannot ask questions.
+  #
+  # This filters inheritance only. A `SubAgent.Config` naming one of these in
+  # its own `:middleware` list still gets it.
+  @never_inherited_middleware [
+    Sagents.Middleware.SubAgent,
+    Sagents.Middleware.AskUserQuestion
+  ]
+
   @primary_key false
   embedded_schema do
     # Core execution context - THE KEY FIELD
@@ -1146,8 +1163,20 @@ defmodule Sagents.SubAgent do
   @doc """
   Build a middleware stack for subagents, filtering out blocked middleware.
 
-  The SubAgent middleware itself is ALWAYS filtered out to prevent recursive
-  subagent nesting, regardless of whether it appears in the block list.
+  Two middleware modules are excluded from inheritance by default, without
+  needing to appear in `:block_middleware`:
+
+  - `Sagents.Middleware.SubAgent`, to prevent recursive subagent nesting.
+  - `Sagents.Middleware.AskUserQuestion`, because a sub-agent has no user to
+    ask. `compose_child_system_prompt/1` already tells every task sub-agent
+    "You cannot ask the user questions. There is no user in this
+    conversation.", so inheriting the `ask_user` tool handed the sub-agent a
+    capability the prompt then had to police.
+
+  Only *inherited* middleware is filtered. Middleware passed explicitly as
+  `additional_middleware` (a `SubAgent.Config`'s own `:middleware` list) is
+  always kept, so a sub-agent that genuinely needs one of these can still opt
+  back in.
 
   This function handles middleware in all formats:
   - Raw module atoms (e.g., `Sagents.Middleware.SubAgent`)
@@ -1161,7 +1190,7 @@ defmodule Sagents.SubAgent do
 
   ## Examples
 
-      # Default behavior: only SubAgent middleware is filtered
+      # Default behavior: SubAgent and AskUserQuestion middleware are filtered
       subagent_middleware_stack(parent_middleware)
 
       # Block additional middleware from being inherited
@@ -1179,15 +1208,18 @@ defmodule Sagents.SubAgent do
   def subagent_middleware_stack(default_middleware, additional_middleware \\ [], opts \\ []) do
     block_list = Keyword.get(opts, :block_middleware, [])
 
-    # Always block SubAgent middleware + user-specified modules
+    # Always block the never-inherited modules + user-specified ones.
     # Use MapSet for O(1) lookup performance
-    blocked_modules = MapSet.new([Sagents.Middleware.SubAgent | block_list])
+    blocked_modules = MapSet.new(@never_inherited_middleware ++ block_list)
 
     filtered =
       Enum.reject(default_middleware, fn mw ->
         extract_middleware_module(mw) in blocked_modules
       end)
 
+    # Only inherited middleware is filtered. `additional_middleware` is the
+    # sub-agent's own explicit list, so it passes through untouched and stays
+    # the opt-back-in route for anything blocked above.
     filtered ++ additional_middleware
   end
 
