@@ -1011,7 +1011,7 @@ defmodule Sagents.AgentServer do
 
   This is deliberate and load-bearing: previously the message was written into
   the rolling state and then silently destroyed when the canonical state from
-  `Agent.execute/3` replaced it wholesale, while the caller got a misleading
+  `Sagents.Agent.execute/3` replaced it wholesale, while the caller got a misleading
   `{:error, "Cannot execute, server is in state: running"}` despite the message
   having been accepted. Returning `:ok` is both more truthful and non-breaking
   for consumers that match only on `:ok` and `{:error, reason}`.
@@ -1037,7 +1037,7 @@ defmodule Sagents.AgentServer do
       transcript.
 
   The two halves are independent messages, **including their role**. Because
-  `Sagents.DisplayMessagePersistence.save_message/3` derives the transcript
+  `c:Sagents.DisplayMessagePersistence.save_message/3` derives the transcript
   entry's attribution from `message.role`, a message that is `:user` to the
   model can be `:assistant` in the transcript. That is the shape a
   tool-initiated injection needs: nobody typed it, so attributing it to the
@@ -1100,7 +1100,7 @@ defmodule Sagents.AgentServer do
 
   The cost is that the caller cannot learn whether the queue accepted the
   message. The `GenServer.whereis` guard below covers the dominant failure mode:
-  no server at all, which is unit tests and bare `Agent.execute/3`. It returns
+  no server at all, which is unit tests and bare `Sagents.Agent.execute/3`. It returns
   `{:error, :no_server}` so a tool can fall back to inline content rather than
   silently doing nothing.
 
