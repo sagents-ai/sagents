@@ -124,6 +124,13 @@ defmodule Sagents.AgentServer do
     persisted via `display_message_persistence` behaviour.
     The `{:llm_message, ...}` event is also broadcast alongside this event
 
+  ### Queued Message Events
+  - `{:agent, {:message_queued, %Message{}}}` - A message arrived while a run was
+    in flight and is being held for delivery at the next run boundary. See
+    `add_message/3` and `queue_message_from_tool/3`. Subscribe to this rather than
+    reading a "queued" signal off `add_message/2`'s return value, which stays
+    `:ok` deliberately.
+
   **Note**: File events are NOT broadcast by AgentServer. Files are managed by
   `FileSystemServer` which provides its own event handling mechanism.
 
@@ -139,6 +146,18 @@ defmodule Sagents.AgentServer do
   ### Middleware Debug Events
   - `{:agent, {:debug, {:agent_state_update, state}}}` - Middleware state update with
     full state snapshot
+
+  ### Queued Message Debug Events
+  - `{:agent, {:debug, {:messages_drained, count}}}` - A queued message was
+    delivered and a follow-up run started. Note that **no** `:idle` status is
+    broadcast between the two runs; this is the event for observers who need to
+    know the extra run happened.
+  - `{:agent, {:debug, {:pending_message_held, :error}}}` - A run failed while a
+    message was queued. The message is kept, not delivered.
+  - `{:agent, {:debug, {:auto_execution_limit_reached, limit}}}` - Too many
+    consecutive runs were started by queued messages with no human input in
+    between. The message was added to the conversation but no further run was
+    started.
 
   ## Usage
 
@@ -228,6 +247,14 @@ defmodule Sagents.AgentServer do
 
   @presence_check_delay 1_000
 
+  # Hard ceiling on runs started by a drain with no human input in between.
+  # Not configurable on purpose: ten consecutive machine-initiated runs is likely never
+  # intentional, so a knob would imply a tuning decision nobody actually has to
+  # make. This is a stop on a newly built engine, not a loop detector. It will
+  # not stop a badly designed playbook from wasting the nine runs before it,
+  # which is a playbook concern.
+  @max_consecutive_auto_executions 10
+
   # Topic for agent presence tracking - enables discovery of running agents
   @agent_presence_topic "agent_server:presence"
 
@@ -264,6 +291,21 @@ defmodule Sagents.AgentServer do
       # Monotonic counter bumped on each execute/resume. Turn casts carry their seq
       # so late messages from a cancelled or superseded run are rejected.
       execution_seq: 0,
+      # A single `%LangChain.Message{role: :user}` waiting for the current run to
+      # finish, or nil. Deliberately on ServerState and NOT on State: the `{:ok,
+      # new_state}` clause of handle_execution_result/2 replaces `state` wholesale
+      # so middleware after_model transformations win, which would destroy a queue
+      # kept inside it. Multiple arrivals merge their content parts into this one
+      # message rather than growing a list. The GenServer already serializes every
+      # write, so the merge needs no coordination.
+      pending_message: nil,
+      # Consecutive executions started by a drain rather than by a human. Reset by
+      # handle_call({:add_message, ...}) (the human door), never by
+      # handle_cast({:queue_message, ...}) (the tool door). Bounds the one new
+      # thing this feature introduces: the framework's ability to start a run on
+      # its own. NOT redundant with `:max_runs`, which counts LLM calls *within*
+      # one execution and resets to 0 on every fresh chain.
+      consecutive_auto_executions: 0,
       # Whether this server was restored from persisted state (vs fresh start)
       # Used to broadcast :node_transferred event on startup after Horde migration
       restored: false,
@@ -303,7 +345,9 @@ defmodule Sagents.AgentServer do
             message_preprocessor: module() | nil,
             presence_module: module() | nil,
             restored: boolean(),
-            interrupt_persisted: boolean()
+            interrupt_persisted: boolean(),
+            pending_message: LangChain.Message.t() | nil,
+            consecutive_auto_executions: non_neg_integer()
           }
   end
 
@@ -958,20 +1002,170 @@ defmodule Sagents.AgentServer do
 
   Returns `:ok` on success.
 
+  ## Adding a message while the agent is running
+
+  A `:user` message that arrives while the agent is `:running` is **queued**,
+  not rejected. It is delivered at the next run boundary: appended to the
+  conversation once the in-flight run completes successfully, which then starts
+  a follow-up run. `add_message/2` still returns `:ok` in that case.
+
+  This is deliberate and load-bearing: previously the message was written into
+  the rolling state and then silently destroyed when the canonical state from
+  `Agent.execute/3` replaced it wholesale, while the caller got a misleading
+  `{:error, "Cannot execute, server is in state: running"}` despite the message
+  having been accepted. Returning `:ok` is both more truthful and non-breaking
+  for consumers that match only on `:ok` and `{:error, reason}`.
+
+  A consumer that wants to render a "queued" affordance should subscribe to the
+  `{:message_queued, message}` event rather than read it off the return value.
+
+  Messages that arrive with a non-`:user` role while running are still
+  rejected. Injecting an assistant turn mid-run is not a supported operation.
+
+  ## Options
+
+  - `:display` - controls the transcript half of the message, independently of
+    what the model sees. Three values:
+
+    - **absent** (default) - existing behavior. The configured
+      `Sagents.MessagePreprocessor` runs if one is set; with none, the display
+      and LLM halves are the same message.
+    - **a `%LangChain.Message{}`** - the caller supplies both halves directly.
+      The configured preprocessor is **not** run; the caller has already made
+      the decision the preprocessor exists to make.
+    - **`:none`** - model-visible, display-invisible. Nothing reaches the
+      transcript.
+
+  The two halves are independent messages, **including their role**. Because
+  `Sagents.DisplayMessagePersistence.save_message/3` derives the transcript
+  entry's attribution from `message.role`, a message that is `:user` to the
+  model can be `:assistant` in the transcript. That is the shape a
+  tool-initiated injection needs: nobody typed it, so attributing it to the
+  author would put words in their mouth.
+
   ## Examples
 
       # After agent completes
       :ok = AgentServer.add_message("my-agent-1", Message.new_user!("What's next?"))
       :ok = AgentServer.execute("my-agent-1")
+
+      # The author typed a shorthand; the model receives the expansion.
+      :ok = AgentServer.add_message("my-agent-1", Message.new_user!(expanded),
+              display: Message.new_user!("/changelog for the latest release"))
+
+      # Model-visible, transcript-invisible.
+      :ok = AgentServer.add_message("my-agent-1", Message.new_user!(playbook),
+              display: :none)
   """
-  @spec add_message(String.t(), LangChain.Message.t()) :: :ok | {:error, term()}
-  def add_message(agent_id, %LangChain.Message{} = message) do
-    case safe_call(agent_id, {:add_message, message}) do
+  @spec add_message(String.t(), LangChain.Message.t(), keyword()) :: :ok | {:error, term()}
+  def add_message(agent_id, message, opts \\ [])
+
+  def add_message(agent_id, %LangChain.Message{} = message, opts) when is_list(opts) do
+    case safe_call(agent_id, {:add_message, message, opts}) do
       :ok ->
         execute(agent_id)
 
+      # Accepted into the queue while a run is in flight. Do NOT call execute/1:
+      # the server is busy and the drain will start the follow-up run itself.
+      :queued ->
+        :ok
+
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  @doc """
+  Queue a message into the conversation from inside a running tool or middleware.
+
+  This is the tool-facing door to the same queue `add_message/3` uses. The
+  message is held for the duration of the current run and delivered at the run
+  boundary, arriving as an ordinary `:user` message at the head of a follow-up
+  run. Nothing downstream needs to distinguish it from a message the user typed,
+  because there is nothing to distinguish: it *is* an ordinary user message.
+
+  Use this when a tool needs to hand the model **instructions** rather than
+  data. Models are trained to treat a tool result as data and a user turn as
+  instruction, so returning a playbook as tool-result text is a functional
+  downgrade, not a stylistic one.
+
+  ## Why this is a cast
+
+  `handle_call(:cancel, ...)` blocks the AgentServer in `Task.shutdown(task,
+  2_000)`. Tool code runs inside that Task. A tool blocked in a `GenServer.call`
+  back to its own server during a cancel is a mutual wait that only resolves
+  when the 2s grace expires and the task is brutal-killed. Both existing
+  tool-to-server helpers (`publish_event_from/2`, `save_synthetic_message_from/2`)
+  are casts for the same reason.
+
+  The cost is that the caller cannot learn whether the queue accepted the
+  message. The `GenServer.whereis` guard below covers the dominant failure mode:
+  no server at all, which is unit tests and bare `Agent.execute/3`. It returns
+  `{:error, :no_server}` so a tool can fall back to inline content rather than
+  silently doing nothing.
+
+  ## Options
+
+  Same `:display` option as `add_message/3`, with one difference: a configured
+  `Sagents.MessagePreprocessor` is **never** run for a queued message. The
+  behaviour is scoped to messages a human submitted; a tool-generated playbook
+  is machine-generated and there is nothing coherent for a preprocessor to do
+  with it.
+
+  **Prefer `display: :none`.** The model emits a narration turn after the tool
+  result anyway, and that turn becomes its own display message. Supplying a
+  `display:` acknowledgement *as well* produces two acknowledgements back to
+  back. Reach for an explicit `display:` only when the wording, role, or
+  guaranteed presence of the acknowledgement has to be deterministic.
+
+  ## Returns
+
+  - `:ok` - the cast was sent
+  - `{:error, :no_server}` - no AgentServer is running for this `agent_id`
+
+  ## Limitations
+
+  Sub-agents register under `{:sub_agent, id}`, not `{:agent_server, id}`, and
+  block their own process for the whole of `SubAgentServer.execute/1`. A tool
+  running inside a sub-agent therefore gets `{:error, :no_server}` and should
+  take its fallback path. Queueing into the *parent* conversation is
+  deliberately not offered.
+
+  ## Examples
+
+      def activate_command(%{"command" => name} = args, context) do
+        playbook = render_playbook(name, args)
+
+        case AgentServer.queue_message_from_tool(context.state.agent_id,
+               Message.new_user!(playbook),
+               display: :none
+             ) do
+          :ok ->
+            {:ok, "The \#{name} command has been initiated. Its instructions " <>
+                  "will arrive as the next message. Acknowledge briefly and stop."}
+
+          {:error, :no_server} ->
+            # Degraded path: no AgentServer (unit test, one-shot Agent.execute).
+            # Return the playbook inline rather than silently doing nothing.
+            {:ok, playbook}
+        end
+      end
+  """
+  @spec queue_message_from_tool(String.t(), LangChain.Message.t(), keyword()) ::
+          :ok | {:error, :no_server}
+  def queue_message_from_tool(agent_id, message, opts \\ [])
+
+  def queue_message_from_tool(agent_id, %LangChain.Message{} = message, opts)
+      when is_binary(agent_id) and is_list(opts) do
+    # Cheap, non-blocking guard. Mirrors TodoList.save_todo_snapshot/2 so unit
+    # tests and serverless Agent.execute/3 degrade to a reportable no-op rather
+    # than raising out of a tool body.
+    case GenServer.whereis(get_name(agent_id)) do
+      nil ->
+        {:error, :no_server}
+
+      _pid ->
+        GenServer.cast(get_name(agent_id), {:queue_message, message, opts})
     end
   end
 
@@ -1272,7 +1466,16 @@ defmodule Sagents.AgentServer do
         # process-bound interrupts (e.g. sub-agent HITL) get demoted.
         # `agent.middleware` is already initialized to MiddlewareEntry structs.
         state = State.clean_stale_interrupts(state, agent.middleware)
-        build_server_state(agent, state, Keyword.put(opts, :restored, true))
+
+        opts =
+          opts
+          |> Keyword.put(:restored, true)
+          |> Keyword.put(
+            :pending_message,
+            StateSerializer.deserialize_pending_message(persisted_state)
+          )
+
+        build_server_state(agent, state, opts)
 
       {:error, reason} ->
         {:stop, {:restore_failed, reason}}
@@ -1377,7 +1580,11 @@ defmodule Sagents.AgentServer do
       # If we boot in :interrupted, the integrator's durable flag is (or
       # should be) `true`. Seed the tracker so the next clearing lifecycle
       # transitions through and fires set_interrupted(false) once.
-      interrupt_persisted: boot_status == :interrupted
+      interrupt_persisted: boot_status == :interrupted,
+      # A message that was queued when the previous incarnation of this server
+      # died. It drains at the next clean run boundary, exactly as if it had
+      # been queued a moment ago.
+      pending_message: Keyword.get(opts, :pending_message)
     }
 
     # Start the inactivity timer
@@ -1493,31 +1700,7 @@ defmodule Sagents.AgentServer do
 
   @impl true
   def handle_call(:execute, _from, %ServerState{status: :idle} = server_state) do
-    # Bump execution sequence so late callbacks from any prior run are rejected.
-    # Build callbacks AFTER bumping so the closure captures the current seq.
-    new_state = %{
-      server_state
-      | execution_seq: server_state.execution_seq + 1,
-        status: :running
-    }
-
-    pubsub_callbacks = build_pubsub_callbacks(new_state)
-
-    broadcast_event(new_state, {:status_changed, :running, nil})
-    update_presence_status(new_state, :running)
-
-    # Reset inactivity timer on execution start
-    new_state = reset_inactivity_timer(new_state)
-
-    # Start async execution
-    task =
-      Task.async(fn ->
-        execute_agent(new_state, pubsub_callbacks)
-      end)
-
-    # Store task reference if needed, or just let it run
-    # For now, we'll handle the result in handle_info
-    {:reply, :ok, Map.put(new_state, :task, task)}
+    {:reply, :ok, start_execution(server_state)}
   end
 
   @impl true
@@ -1688,10 +1871,40 @@ defmodule Sagents.AgentServer do
     {:reply, {:ok, server_state.agent}, server_state}
   end
 
+  # Backwards-compatible 2-tuple form. The internal protocol gained an options
+  # list; callers that predate it keep working.
   @impl true
-  def handle_call({:add_message, message}, _from, server_state) do
-    # Run message preprocessor if configured (splits into display + LLM versions)
-    case run_message_preprocessor(server_state, message) do
+  def handle_call({:add_message, message}, from, server_state) do
+    handle_call({:add_message, message, []}, from, server_state)
+  end
+
+  # A run is in flight. Queue rather than reject: writing into `server_state.state`
+  # here is what the old code did, and the canonical state from Agent.execute
+  # replaced it wholesale a moment later, silently destroying the message.
+  @impl true
+  def handle_call(
+        {:add_message, message, opts},
+        _from,
+        %ServerState{status: :running} = server_state
+      ) do
+    case queue_incoming_message(server_state, message, opts, true) do
+      {:ok, updated_server_state} ->
+        # A human just spoke, so this run is no longer part of an unbroken chain
+        # of machine-initiated runs. Resetting here, and never in the tool door,
+        # is the whole of the breaker's source distinction. It costs nothing
+        # because it is already encoded in *which function clause ran*.
+        {:reply, :queued, %{updated_server_state | consecutive_auto_executions: 0}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, server_state}
+    end
+  end
+
+  @impl true
+  def handle_call({:add_message, message, opts}, _from, server_state) do
+    # Resolve the display/LLM split. With no `:display` option this runs the
+    # configured message preprocessor, exactly as before.
+    case resolve_message_halves(server_state, message, opts, true) do
       {:ok, display_message, llm_message} ->
         # Add LLM message to the state
         new_state = State.add_message(server_state.state, llm_message)
@@ -1717,7 +1930,10 @@ defmodule Sagents.AgentServer do
           | state: new_state,
             status: new_status,
             interrupt_data: new_interrupt_data,
-            error: nil
+            error: nil,
+            # A human just spoke. See the :running clause above for why this
+            # reset lives on the human door and only on the human door.
+            consecutive_auto_executions: 0
         }
 
         # Reset inactivity timer on user message
@@ -1731,10 +1947,11 @@ defmodule Sagents.AgentServer do
           update_presence_status(updated_server_state, :idle)
         end
 
-        # Save and broadcast the display message
+        # Save and broadcast the display message. `:none` skips the transcript
+        # entirely (model-visible, display-invisible).
         # Note: During LLM execution, assistant messages are also saved via on_message_processed callback
         # But if manually adding assistant messages, we should also save them here
-        maybe_save_and_broadcast_message(updated_server_state, display_message)
+        save_display_half(updated_server_state, display_message)
 
         # Note: Debug event for user messages is NOT broadcast here.
         # The authoritative state (with potential middleware modifications)
@@ -1804,7 +2021,8 @@ defmodule Sagents.AgentServer do
     serialized =
       StateSerializer.serialize_server_state(
         server_state.agent,
-        server_state.state
+        server_state.state,
+        pending_message: server_state.pending_message
       )
 
     {:reply, serialized, server_state}
@@ -1863,6 +2081,34 @@ defmodule Sagents.AgentServer do
 
       Logger.error(error_msg)
       {:reply, {:error, error_msg}, server_state}
+    end
+  end
+
+  # The tool door. Unlike the human door this never resets
+  # `consecutive_auto_executions`. A tool queueing a message is exactly the
+  # thing the breaker is counting.
+  @impl true
+  def handle_cast({:queue_message, message, opts}, server_state) do
+    case queue_incoming_message(server_state, message, opts, false) do
+      {:ok, %ServerState{status: :idle} = updated_server_state} ->
+        # No run is in flight, so there is no boundary to wait for. The
+        # boundary is now. Without this, a message queued from outside a run
+        # would sit in the queue until some unrelated future run happened to
+        # finish, which is the same class of silent loss this queue exists to
+        # fix. (Tools normally run only while :running, so this is the
+        # defensive path, not the common one.)
+        {_outcome, drained_server_state} = drain_pending_message(updated_server_state)
+        {:noreply, drained_server_state}
+
+      {:ok, updated_server_state} ->
+        {:noreply, updated_server_state}
+
+      {:error, reason} ->
+        Logger.error(
+          "Rejected queued message for agent #{server_state.agent.agent_id}: #{inspect(reason)}"
+        )
+
+        {:noreply, server_state}
     end
   end
 
@@ -2436,6 +2682,10 @@ defmodule Sagents.AgentServer do
     # state wholesale. The rolling state is a best-effort live view; middleware
     # after_model hooks may have transformed the state in ways our per-turn
     # appender doesn't capture.
+    #
+    # This wholesale replacement is exactly why `pending_message` lives on
+    # ServerState rather than on State. A queue kept inside `new_state` would
+    # be destroyed right here, by the mechanism it exists to survive.
     updated_state = %{
       server_state
       | status: :idle,
@@ -2443,24 +2693,48 @@ defmodule Sagents.AgentServer do
         error: nil
     }
 
-    # Persist agent state on completion
-    updated_state = maybe_persist_state(updated_state, :on_completion)
+    # A clean finish is the safe boundary for delivering a queued message.
+    # Note the `:task` key is dropped on the :idle branch only, matching what
+    # this clause did before. On the drained branch `start_execution/1`
+    # overwrites it with the new task anyway.
+    case drain_pending_message(updated_state) do
+      {:drained, drained_state} ->
+        # Deliberately NO {:status_changed, :idle, nil} broadcast, no presence
+        # update to :idle, and no shutdown/inactivity check. Every UI treats
+        # :idle as "done, re-enable the input"; flickering it here would clear
+        # the loading state a beat before the agent resumes. The agent is not
+        # idle. It has more to do. Observers who care about the extra run get
+        # {:messages_drained, count} on the debug channel.
+        broadcast_debug_event(drained_state, {:agent_state_update, drained_state.state})
 
-    broadcast_event(updated_state, {:status_changed, :idle, nil})
-    update_presence_status(updated_state, :idle)
+        {:noreply, drained_state}
 
-    # Check if we should shutdown based on presence
-    maybe_shutdown_if_no_viewers(updated_state)
+      {:idle, idle_state} ->
+        # Persist agent state on completion
+        idle_state = maybe_persist_state(idle_state, :on_completion)
 
-    # Reset activity timer after completion
-    updated_state = reset_inactivity_timer(updated_state)
+        broadcast_event(idle_state, {:status_changed, :idle, nil})
+        update_presence_status(idle_state, :idle)
 
-    # Broadcast debug event for state update
-    broadcast_debug_event(updated_state, {:agent_state_update, new_state})
+        # Check if we should shutdown based on presence
+        maybe_shutdown_if_no_viewers(idle_state)
 
-    {:noreply, Map.delete(updated_state, :task)}
+        # Reset activity timer after completion
+        idle_state = reset_inactivity_timer(idle_state)
+
+        # Broadcast debug event for state update
+        broadcast_debug_event(idle_state, {:agent_state_update, idle_state.state})
+
+        {:noreply, Map.delete(idle_state, :task)}
+    end
   end
 
+  # Queue policy: HOLD. The user is answering a question, not extending the
+  # conversation. Delivering a queued message here would land it between an
+  # interrupt's placeholder tool result and the resume path's real results.
+  # The held message drains when the resume completes as {:ok, _}; if the user
+  # sends a new message instead of resuming, handle_call({:add_message, ...})
+  # demotes the interrupt and the message takes the ordinary path.
   defp handle_execution_result({:interrupt, interrupted_state, interrupt_data}, server_state) do
     updated_state = %{
       server_state
@@ -2500,6 +2774,9 @@ defmodule Sagents.AgentServer do
     {:noreply, Map.delete(updated_state, :task)}
   end
 
+  # Queue policy: HOLD. An infrastructure pause (node draining) is not a
+  # conversation boundary. The queue survives in ServerState and drains when the
+  # resumed run finishes cleanly.
   defp handle_execution_result({:pause, paused_state}, server_state) do
     updated_state = %{
       server_state
@@ -2525,12 +2802,20 @@ defmodule Sagents.AgentServer do
     {:noreply, Map.delete(updated_state, :task)}
   end
 
+  # Queue policy: HOLD, and surface. Delivering a queued message into a failed
+  # run compounds the failure, so the queue is kept and a debug event announces
+  # that something is waiting, so a host can decide whether to retry, drop
+  # it, or tell the user.
   defp handle_execution_result({:error, reason}, server_state) do
     updated_state = %{
       server_state
       | status: :error,
         error: reason
     }
+
+    if updated_state.pending_message do
+      broadcast_debug_event(updated_state, {:pending_message_held, :error})
+    end
 
     # Persist agent state on error
     updated_state = maybe_persist_state(updated_state, :on_error)
@@ -2765,7 +3050,8 @@ defmodule Sagents.AgentServer do
         state_data =
           StateSerializer.serialize_server_state(
             server_state.agent,
-            server_state.state
+            server_state.state,
+            pending_message: server_state.pending_message
           )
 
         scope = current_scope(server_state)
@@ -3064,6 +3350,182 @@ defmodule Sagents.AgentServer do
           :ok
       end
     end
+  end
+
+  # ── The pending-message queue ───────────────────────────────────
+  #
+  # Shared by the human door (handle_call({:add_message, ...}) while :running)
+  # and the tool door (handle_cast({:queue_message, ...})). Resolves the
+  # display/LLM split, saves the display half *immediately*, and merges the LLM
+  # half into `pending_message`.
+  #
+  # The split resolving entirely at queue time is what lets the queue be a bare
+  # `%Message{}`: nothing display-related ever waits in it. A user who typed
+  # while the agent was busy sees their words right away, and a tool's
+  # acknowledgement lands when the tool ran rather than a turn later.
+  defp queue_incoming_message(
+         server_state,
+         %LangChain.Message{role: :user} = message,
+         opts,
+         preprocess?
+       ) do
+    case resolve_message_halves(server_state, message, opts, preprocess?) do
+      {:ok, display_message, llm_message} ->
+        save_display_half(server_state, display_message)
+
+        updated_server_state =
+          %{
+            server_state
+            | pending_message: merge_pending(server_state.pending_message, llm_message)
+          }
+          |> reset_inactivity_timer()
+
+        broadcast_event(updated_server_state, {:message_queued, llm_message})
+
+        {:ok, updated_server_state}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Constraining the queue to :user is what lets merge_pending/2 be
+  # unconditional: no role comparison, no mixed-role fallback, no list needed
+  # for the odd case. Rejecting a non-:user message while running is not a
+  # regression: today *every* message is rejected in that state.
+  defp queue_incoming_message(
+         _server_state,
+         %LangChain.Message{role: role} = _message,
+         _opts,
+         _preprocess?
+       ) do
+    {:error, "Cannot queue a #{inspect(role)} message. Only :user messages can be queued."}
+  end
+
+  # Merge on arrival rather than growing a list. The GenServer already
+  # serializes every write, so this is a plain function over two values with no
+  # coordination and no race. Two queued messages are one user turn, not two,
+  # and merging here makes that shape provider-independent instead of
+  # inheriting it from Anthropic's message combiner.
+  defp merge_pending(nil, %LangChain.Message{} = incoming), do: incoming
+
+  defp merge_pending(%LangChain.Message{} = pending, %LangChain.Message{} = incoming) do
+    %LangChain.Message{pending | content: pending.content ++ incoming.content}
+  end
+
+  # Resolve the (display, llm) pair for an incoming message.
+  #
+  # `:display` absent  -> preprocessor when allowed, else display == llm
+  # `:display` message -> caller supplied both halves; preprocessor is skipped
+  #                       because the caller already made its decision
+  # `:display` :none   -> model-visible, display-invisible
+  defp resolve_message_halves(server_state, message, opts, preprocess?) do
+    case Keyword.fetch(opts, :display) do
+      :error when preprocess? ->
+        run_message_preprocessor(server_state, message)
+
+      :error ->
+        {:ok, message, message}
+
+      {:ok, :none} ->
+        {:ok, :none, message}
+
+      {:ok, %LangChain.Message{} = display_message} ->
+        {:ok, display_message, message}
+
+      {:ok, other} ->
+        {:error,
+         "Invalid :display option. Expected a %LangChain.Message{} or :none, got: #{inspect(other)}"}
+    end
+  end
+
+  defp save_display_half(_server_state, :none), do: :ok
+
+  defp save_display_half(server_state, %LangChain.Message{} = display_message) do
+    maybe_save_and_broadcast_message(server_state, display_message)
+  end
+
+  # Called from the {:ok, _} terminal clause once the canonical state is
+  # installed. Returns {:drained, server_state} when a follow-up run was
+  # started, {:idle, server_state} when the caller should take the ordinary
+  # completion path.
+  defp drain_pending_message(%ServerState{pending_message: nil} = server_state) do
+    {:idle, server_state}
+  end
+
+  defp drain_pending_message(%ServerState{pending_message: pending} = server_state) do
+    # The message is real conversation either way, so it lands in state.messages
+    # before the breaker is consulted. A tripped breaker declines to *run*; it
+    # does not discard what the user or tool said.
+    appended = %{
+      server_state
+      | state: State.add_message(server_state.state, pending),
+        pending_message: nil
+    }
+
+    if appended.consecutive_auto_executions >= @max_consecutive_auto_executions do
+      Logger.error(
+        "Agent #{appended.agent.agent_id} reached the auto-execution ceiling " <>
+          "(#{@max_consecutive_auto_executions} consecutive runs started by a queued " <>
+          "message with no human input). Refusing to start another run. The queued " <>
+          "message was added to the conversation but will not be acted on until a " <>
+          "human sends one. Last queued content: " <>
+          inspect(
+            String.slice(
+              LangChain.Message.ContentPart.content_to_string(pending.content) || "",
+              0,
+              200
+            )
+          )
+      )
+
+      broadcast_debug_event(
+        appended,
+        {:auto_execution_limit_reached, @max_consecutive_auto_executions}
+      )
+
+      {:idle, %{appended | consecutive_auto_executions: 0}}
+    else
+      # Persist before the follow-up run starts so the drained message is
+      # durable even if that run dies.
+      persisted = maybe_persist_state(appended, :on_completion)
+
+      broadcast_debug_event(persisted, {:messages_drained, 1})
+
+      {:drained,
+       start_execution(%{
+         persisted
+         | consecutive_auto_executions: persisted.consecutive_auto_executions + 1
+       })}
+    end
+  end
+
+  # Start an async agent run. Extracted from handle_call(:execute, ...) so the
+  # drain can start a run without going back through the call, which it cannot
+  # do from inside handle_info/2.
+  defp start_execution(%ServerState{} = server_state) do
+    # Bump execution sequence so late callbacks from any prior run are rejected.
+    # Build callbacks AFTER bumping so the closure captures the current seq.
+    new_state = %{
+      server_state
+      | execution_seq: server_state.execution_seq + 1,
+        status: :running
+    }
+
+    pubsub_callbacks = build_pubsub_callbacks(new_state)
+
+    broadcast_event(new_state, {:status_changed, :running, nil})
+    update_presence_status(new_state, :running)
+
+    # Reset inactivity timer on execution start
+    new_state = reset_inactivity_timer(new_state)
+
+    task =
+      Task.async(fn ->
+        execute_agent(new_state, pubsub_callbacks)
+      end)
+
+    Map.put(new_state, :task, task)
   end
 
   # Run message preprocessor if configured, splitting message into display and LLM versions.
