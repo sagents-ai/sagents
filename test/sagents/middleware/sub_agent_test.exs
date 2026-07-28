@@ -2266,6 +2266,57 @@ defmodule Sagents.Middleware.SubAgentTest do
       assert result == "Finished!"
       assert extra == extra_data
     end
+
+    test "execute_subagent stops the SubAgentServer after a 3-tuple completion" do
+      agent_id = "parent-3tuple-stop-#{System.unique_integer([:positive])}"
+
+      {:ok, sup} =
+        start_supervised({
+          SubAgentsDynamicSupervisor,
+          agent_id: agent_id
+        })
+
+      config_with_until =
+        SubAgent.Config.new!(%{
+          name: "finisher",
+          description: "Agent with until_tool",
+          system_prompt: "You are an agent",
+          tools: [test_tool("finish_tool")],
+          until_tool: "finish_tool"
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: agent_id,
+          model: test_model(),
+          middleware: [],
+          subagents: [config_with_until]
+        )
+
+      [task_tool] = SubAgentMiddleware.tools(middleware_config)
+
+      assistant_message = Message.new_assistant!(%{content: "Finished!"})
+
+      LLMChain
+      |> stub(:run, fn chain, _opts ->
+        updated_chain =
+          chain
+          |> Map.put(:messages, chain.messages ++ [assistant_message])
+          |> Map.put(:last_message, assistant_message)
+          |> Map.put(:needs_response, false)
+
+        {:ok, updated_chain, %{tool_name: "finish_tool"}}
+      end)
+
+      args = %{"instructions" => "Finish the task", "task_name" => "finisher"}
+      context = %{state: State.new!(%{messages: []})}
+
+      assert {:ok, _result, _extra} = task_tool.function.(args, context)
+
+      # An until_tool run is over when it returns, same as a plain completion,
+      # so its server must not be left behind under the parent's supervisor.
+      assert %{active: 0} = DynamicSupervisor.count_children(sup)
+    end
   end
 
   describe "handle_resume/5" do
