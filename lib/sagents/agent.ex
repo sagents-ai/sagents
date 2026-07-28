@@ -530,6 +530,8 @@ defmodule Sagents.Agent do
     the third element is the matching `%LangChain.Message.ToolResult{}` (see those
     options and `Sagents.AgentResult`)
   - `{:interrupt, state, interrupt_data}` - Execution paused for human approval
+  - `{:pause, state}` - Infrastructure pause; `state.pause_reason` carries the
+    cause the mode attached (nil when it attached none)
   - `{:error, reason}` - Execution failed
 
   ## Examples
@@ -781,13 +783,20 @@ defmodule Sagents.Agent do
   end
 
   defp handle_chain_result({:pause, paused_chain}, state) do
-    # Infrastructure pause (e.g., node draining). Extract state and propagate.
+    # Infrastructure pause (e.g., node draining). Extract state and propagate,
+    # carrying the pause cause onto the state the way the interrupt clause
+    # above carries interrupt_data. Sagents.Modes.AgentExecution folds a
+    # step's `{:pause, chain, reason}` into `custom_context.pause_reason`;
+    # a pause without one keeps the nil default.
     with {:ok, paused_state} <- extract_state_from_chain(paused_chain, state) do
-      {:pause, paused_state}
+      {:pause, %{paused_state | pause_reason: pause_reason_from_chain(paused_chain)}}
     end
   end
 
   defp handle_chain_result({:error, reason}, _state), do: {:error, reason}
+
+  defp pause_reason_from_chain(%LLMChain{custom_context: %{pause_reason: reason}}), do: reason
+  defp pause_reason_from_chain(_chain), do: nil
 
   defp check_for_streaming_error(%State{messages: messages}) do
     case List.last(messages) do

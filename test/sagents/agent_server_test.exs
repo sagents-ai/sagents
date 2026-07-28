@@ -833,6 +833,43 @@ defmodule Sagents.AgentServerTest do
       assert_receive {:agent, {:status_changed, :idle, nil}}, 100
     end
 
+    test "broadcasts the pause cause as the :paused event payload", %{
+      agent: agent,
+      agent_id: agent_id
+    } do
+      pause_reason = {:node_draining, "node-1"}
+
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        {:pause, %{state | pause_reason: pause_reason}}
+      end)
+
+      :ok = AgentServer.execute(agent_id)
+
+      assert_receive {:agent, {:status_changed, :running, nil}}, 100
+
+      # The subscriber learns why the run paused from the event it already
+      # receives -- the way :interrupted delivers interrupt_data
+      assert_receive {:agent, {:status_changed, :paused, ^pause_reason}}, 200
+    end
+
+    test "broadcasts a nil :paused payload when the pause carries no cause", %{
+      agent: agent,
+      agent_id: agent_id
+    } do
+      Agent
+      |> expect(:execute, fn ^agent, state, _opts ->
+        {:pause, state}
+      end)
+
+      :ok = AgentServer.execute(agent_id)
+
+      assert_receive {:agent, {:status_changed, :running, nil}}, 100
+
+      # Backward compatible: a reason-less pause keeps the nil payload
+      assert_receive {:agent, {:status_changed, :paused, nil}}, 200
+    end
+
     test "broadcasts idle status on 3-tuple until_tool completion", %{
       agent: agent,
       agent_id: agent_id

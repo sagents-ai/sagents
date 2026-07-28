@@ -67,6 +67,10 @@ defmodule Sagents.State do
     field :runtime, :map, default: %{}, virtual: true
     # Interrupt data for HumanInTheLoop middleware
     field :interrupt_data, :map, default: nil, virtual: true
+    # Cause of an infrastructure pause, read from `custom_context.pause_reason`
+    # on the paused chain. Any term; nil when the mode paused without one.
+    # Virtual like interrupt_data: never persisted.
+    field :pause_reason, :any, default: nil, virtual: true
   end
 
   @type t :: %State{}
@@ -88,7 +92,15 @@ defmodule Sagents.State do
   """
   def new(attrs \\ %{}) do
     %State{}
-    |> cast(attrs, [:agent_id, :messages, :todos, :metadata, :runtime, :interrupt_data])
+    |> cast(attrs, [
+      :agent_id,
+      :messages,
+      :todos,
+      :metadata,
+      :runtime,
+      :interrupt_data,
+      :pause_reason
+    ])
     |> apply_action(:insert)
   end
 
@@ -265,7 +277,8 @@ defmodule Sagents.State do
       todos: merge_todos(left.todos, right.todos),
       metadata: deep_merge_maps(left.metadata, right.metadata),
       runtime: merge_runtime(left.runtime, right.runtime),
-      interrupt_data: right.interrupt_data || left.interrupt_data
+      interrupt_data: right.interrupt_data || left.interrupt_data,
+      pause_reason: right.pause_reason || left.pause_reason
     }
   end
 
