@@ -475,25 +475,8 @@ defmodule Sagents.AgentTest do
       assert paused_state.pause_reason == nil
     end
 
-    test "carries the pause cause from a {:pause, chain, reason} mode onto the state" do
-      # A custom mode may return the pause cause positionally
-      {:ok, agent} =
-        Agent.new(%{
-          model: mock_model(),
-          mode: Sagents.Test.PauseReasonMode,
-          replace_default_middleware: true
-        })
-
-      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
-
-      assert {:pause, paused_state} = Agent.execute(agent, initial_state)
-      assert paused_state.pause_reason == {:node_draining, "test-node"}
-      # The reason rides the state; the messages are untouched by the pause
-      assert [%{role: :user}] = paused_state.messages
-    end
-
     test "carries the pause cause from custom_context.pause_reason onto the state" do
-      # The normalized shape: reason folded into custom_context (what
+      # The only supported shape: reason folded into custom_context (what
       # Sagents.Mode.Steps.normalize_pause/1 produces) with a 2-tuple pause
       {:ok, agent} =
         Agent.new(%{
@@ -506,6 +489,8 @@ defmodule Sagents.AgentTest do
 
       assert {:pause, paused_state} = Agent.execute(agent, initial_state)
       assert paused_state.pause_reason == %{cause: :store_unreachable}
+      # The reason rides the state; the messages are untouched by the pause
+      assert [%{role: :user}] = paused_state.messages
     end
 
     test "forwards max_runs from agent struct to mode" do

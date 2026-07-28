@@ -793,14 +793,6 @@ defmodule Sagents.Agent do
     end
   end
 
-  defp handle_chain_result({:pause, paused_chain, reason}, state) do
-    # A custom mode may return the pause cause positionally instead of via
-    # custom_context. Same handling; the explicit reason wins.
-    with {:ok, paused_state} <- extract_state_from_chain(paused_chain, state) do
-      {:pause, %{paused_state | pause_reason: reason}}
-    end
-  end
-
   defp handle_chain_result({:error, reason}, _state), do: {:error, reason}
 
   defp pause_reason_from_chain(%LLMChain{custom_context: %{pause_reason: reason}}), do: reason
@@ -1002,12 +994,6 @@ defmodule Sagents.Agent do
 
       {:pause, chain} ->
         {:pause, chain}
-
-      {:pause, chain, reason} ->
-        # A custom mode returning the pause cause positionally. Only reachable
-        # without fallbacks (with_fallbacks matches the documented 2-tuple);
-        # Sagents.Modes.AgentExecution normalizes to the 2-tuple before this.
-        {:pause, chain, reason}
 
       {:error, _chain, %LangChainError{type: "exceeded_max_runs"} = reason} ->
         Logger.warning(

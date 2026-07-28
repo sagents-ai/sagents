@@ -163,10 +163,16 @@ defmodule Sagents.Mode.Steps do
   A pipeline step that pauses for a cause it knows precisely (a draining node,
   an unreachable backing store) returns `{:pause, chain, reason}`; this step,
   applied to the mode's final result, carries the reason on the chain so the
-  agent layer can read it back onto `State.pause_reason`. The 3-tuple must not
-  cross `LLMChain.run/2` itself: the fallback machinery (`try_chain_with_llm/4`)
-  matches only the documented shapes and would rescue the miss into a retry,
-  silently turning the pause into an error.
+  agent layer can read it back onto `State.pause_reason`.
+
+  The 3-tuple must not escape the mode. `LangChain.Chains.LLMChain.Mode`'s
+  `run_result()` type admits only `{:pause, chain}`, and a 3-tuple returned
+  from `Mode.run/2` breaks under `with_fallbacks:` — `try_chain_with_llm/4`
+  has no catch-all clause, so the unmatched shape raises `CaseClauseError`,
+  is swallowed by that function's `rescue`, and retries against each fallback
+  LLM until the run reports `"Failed all attempts to generate response"`.
+  The pause becomes an error and the reason is lost. Applying this step to
+  the mode's final result is what keeps that from happening.
 
   Every other result — including a bare `{:pause, chain}`, which keeps a nil
   reason — passes through unchanged.

@@ -42,6 +42,13 @@ defmodule Sagents.Modes.AgentExecution do
   passes the fallback machinery unchanged; the agent layer reads the reason
   back onto `State.pause_reason`. A step that pauses with the plain 2-tuple
   (like `check_pause/2`) keeps a nil reason.
+
+  The 3-tuple is a *step*-level shape only. A custom mode must not return it
+  from `run/2`: `LangChain.Chains.LLMChain.Mode`'s `run_result()` type does
+  not admit it, and it corrupts into a generic error under `with_fallbacks:`
+  (see `Sagents.Mode.Steps.normalize_pause/1`). Custom modes that want to
+  report a pause cause should apply `normalize_pause/1` to their final result,
+  as this mode does, or set `custom_context.pause_reason` themselves.
   """
 
   @behaviour LangChain.Chains.LLMChain.Mode

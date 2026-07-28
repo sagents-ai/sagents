@@ -67,9 +67,9 @@ defmodule Sagents.State do
     field :runtime, :map, default: %{}, virtual: true
     # Interrupt data for HumanInTheLoop middleware
     field :interrupt_data, :map, default: nil, virtual: true
-    # Cause of an infrastructure pause, attached by the mode step that paused
-    # the run (`{:pause, chain, reason}`). Any term; nil when the mode paused
-    # without one. Virtual like interrupt_data: never persisted.
+    # Cause of an infrastructure pause, read from `custom_context.pause_reason`
+    # on the paused chain. Any term; nil when the mode paused without one.
+    # Virtual like interrupt_data: never persisted.
     field :pause_reason, :any, default: nil, virtual: true
   end
 
