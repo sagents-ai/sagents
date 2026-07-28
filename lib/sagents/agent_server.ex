@@ -85,6 +85,8 @@ defmodule Sagents.AgentServer do
   - `{:agent, {:status_changed, :idle, nil}}` - Server ready for work (also broadcast after successful execution completion)
   - `{:agent, {:status_changed, :running, nil}}` - Agent executing
   - `{:agent, {:status_changed, :interrupted, interrupt_data}}` - Awaiting human decision
+  - `{:agent, {:status_changed, :paused, pause_reason}}` - Infrastructure pause; the payload
+    is the cause the mode attached (nil when it attached none)
   - `{:agent, {:status_changed, :cancelled, nil}}` - Execution was cancelled by user
   - `{:agent, {:status_changed, :error, reason}}` - Execution failed
 
@@ -2509,7 +2511,9 @@ defmodule Sagents.AgentServer do
     # Persist agent state so it can be resumed after restart
     updated_state = maybe_persist_state(updated_state, :on_completion)
 
-    broadcast_event(updated_state, {:status_changed, :paused, nil})
+    # The paused state carries the cause the mode attached (nil when it
+    # attached none) — deliver it the way :interrupted delivers interrupt_data.
+    broadcast_event(updated_state, {:status_changed, :paused, paused_state.pause_reason})
     update_presence_status(updated_state, :paused)
 
     # Reset activity timer -- agent is paused, not done

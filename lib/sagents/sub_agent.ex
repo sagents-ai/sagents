@@ -697,6 +697,7 @@ defmodule Sagents.SubAgent do
       # that LangChain modes can return. If the mode pauses, we consider the
       # SubAgent's work done with whatever progress was made.
       {:pause, chain} -> {:ok, chain}
+      {:pause, chain, _reason} -> {:ok, chain}
       {:error, _chain, reason} -> {:error, reason}
     end
   end

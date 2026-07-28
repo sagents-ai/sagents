@@ -31,6 +31,17 @@ defmodule Sagents.Modes.AgentExecution do
   `Sagents.Agent.execute/3` pass the friendlier mutually-exclusive
   `:until_tool` / `:until_tool_success` (each naming the target tool), which are
   collapsed into the pair above via `collapse_until_tool/2`.
+
+  ## Pausing with a cause
+
+  A pipeline step may pause the run with `{:pause, chain, reason}` — the
+  3-tuple sibling of `{:pause, chain}`, carrying why the step paused (a
+  draining node, an unreachable backing store, whatever the step knows). The
+  mode folds the reason into `custom_context.pause_reason` and returns the
+  `{:pause, chain}` shape `LLMChain.run/2` documents, so the result also
+  passes the fallback machinery unchanged; the agent layer reads the reason
+  back onto `State.pause_reason`. A step that pauses with the plain 2-tuple
+  (like `check_pause/2`) keeps a nil reason.
   """
 
   @behaviour LangChain.Chains.LLMChain.Mode
@@ -44,7 +55,10 @@ defmodule Sagents.Modes.AgentExecution do
   def run(%LLMChain{} = chain, opts) do
     chain = ensure_mode_state(chain)
     opts = normalize_until_tool_opts(opts)
-    do_run(chain, opts)
+
+    chain
+    |> do_run(opts)
+    |> normalize_pause()
   end
 
   defp do_run(chain, opts) do

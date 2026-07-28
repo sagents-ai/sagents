@@ -99,6 +99,34 @@ defmodule Sagents.StateTest do
     end
   end
 
+  describe "pause_reason" do
+    test "defaults to nil" do
+      assert State.new!().pause_reason == nil
+    end
+
+    test "merge_states/2 uses right if present, otherwise left" do
+      left = %{State.new!() | pause_reason: {:node_draining, "node-1"}}
+      right = State.new!()
+
+      assert State.merge_states(left, right).pause_reason == {:node_draining, "node-1"}
+
+      newer = %{State.new!() | pause_reason: :rate_limited}
+      assert State.merge_states(left, newer).pause_reason == :rate_limited
+    end
+
+    test "is virtual: dropped on a serialize round-trip, like interrupt_data" do
+      original = %{
+        State.new!(%{messages: [Message.new_user!("hello")]})
+        | pause_reason: {:node_draining, "node-1"}
+      }
+
+      serialized = Sagents.Persistence.StateSerializer.serialize_state(original)
+
+      assert {:ok, %State{} = restored} = State.from_serialized("agent-1", serialized)
+      assert restored.pause_reason == nil
+    end
+  end
+
   describe "add_message/2" do
     test "adds a message to empty state" do
       state = State.new!()

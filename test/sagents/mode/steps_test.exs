@@ -382,6 +382,32 @@ defmodule Sagents.Mode.StepsTest do
     end
   end
 
+  describe "normalize_pause/1" do
+    test "folds {:pause, chain, reason} into custom_context.pause_reason" do
+      chain = chain_with_context()
+      reason = {:node_draining, "node-1"}
+
+      assert {:pause, normalized_chain} = Steps.normalize_pause({:pause, chain, reason})
+      assert normalized_chain.custom_context.pause_reason == reason
+    end
+
+    test "passes {:pause, chain} through unchanged (nil reason)" do
+      chain = chain_with_context()
+
+      assert {:pause, ^chain} = Steps.normalize_pause({:pause, chain})
+    end
+
+    test "passes non-pause results through unchanged" do
+      chain = chain_with_context()
+
+      assert {:ok, ^chain} = Steps.normalize_pause({:ok, chain})
+      assert {:continue, ^chain} = Steps.normalize_pause({:continue, chain})
+
+      error = LangChainError.exception(type: "boom", message: "boom")
+      assert {:error, ^chain, ^error} = Steps.normalize_pause({:error, chain, error})
+    end
+  end
+
   describe "check_until_tool_success/2" do
     defp tool_result(name, opts \\ []) do
       ToolResult.new!(%{
