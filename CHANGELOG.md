@@ -1,5 +1,163 @@
 # Changelog
 
+## v0.10.0
+
+Headlined by a **pending-message queue**: a user can now type while the agent is
+working without their message being lost, and a tool can hand the model
+instructions as a real user turn rather than as tool-result data.
+
+The rest is a correctness pass on sub-agents. Interrupts raised inside a
+sub-agent now behave the way their type says they should: a `:halt` reaches the
+parent as a halt, a tool-raised interrupt fails cleanly instead of crashing the
+caller, and sub-agents no longer receive an `ask_user` tool no one can answer.
+Plus two new hooks for host applications: a middleware callback for shaping
+display messages, and a way for a mode to report *why* it paused.
+
+**No breaking API changes.** No function changed arity or return type, and no
+migration is required. There are four intentional behavior changes worth knowing
+about before you upgrade, described below.
+
+### Upgrading from v0.9.0 to v0.10.0
+
+- **`AgentServer.add_message/2` no longer returns an error while a run is in
+  flight.** It used to reply
+  `{:error, "Cannot execute, server is in state: running"}` and then discard the
+  message anyway; it now queues the message and returns `:ok`. The arity and the
+  `:ok | {:error, term()}` type are unchanged, so the compiler will not flag
+  this. Host code that matched that error tuple to render an "agent is busy"
+  notice should drop the branch and instead subscribe to
+  `{:agent, {:message_queued, %Message{}}}` if it wants to show queued state.
+  [#152](https://github.com/sagents-ai/sagents/pull/152)
+- **Sub-agents no longer inherit `Sagents.Middleware.AskUserQuestion`.** If a
+  sub-agent genuinely needs it, name it in that sub-agent's own `:middleware`
+  list on its `SubAgent.Config`. Explicit configuration still receives it.
+  Inherited `ask_user` calls previously produced an empty approval prompt rather
+  than a visible question, so there is little working behavior to preserve.
+  [#151](https://github.com/sagents-ai/sagents/pull/151)
+- **A sub-agent `:halt` now reaches the parent as `:halt`**, not as
+  `%{type: :subagent_hitl}`. Parent code matching on `:subagent_hitl` to catch
+  halts needs to match `:halt` instead.
+  [#150](https://github.com/sagents-ai/sagents/pull/150)
+- **A failed `until_tool` termination now returns the tool's own error content**
+  as `{:error, content}` instead of a generic extraction failure.
+  [#143](https://github.com/sagents-ai/sagents/pull/143)
+
+### Added
+
+- **Pending-message queue on `AgentServer`.** A single-slot queue on
+  `ServerState` holds a message that arrives mid-run and delivers it as an
+  ordinary `:user` message at the head of a follow-up run, so nothing downstream
+  has to know where it came from. Two doors into it:
+  [#152](https://github.com/sagents-ai/sagents/pull/152)
+  - `add_message/3` (the human door) queues instead of erroring when the server
+    is `:running`. Non-`:user` roles are still rejected. Two messages queued
+    during one run merge their content parts into one turn.
+  - `queue_message_from_tool/3` (the tool door) lets a tool hand the model a
+    playbook or slash-command body as instruction rather than as tool-result
+    data. It is a `cast` so a tool cannot deadlock against a concurrent
+    `:cancel`, and returns `{:error, :no_server}` under a bare `Agent.execute/3`
+    or inside a sub-agent so callers can take a fallback path.
+  - A `:display` option on both doors splits the transcript half from the
+    model-visible half. `:none` is model-visible and transcript-invisible; an
+    explicit `%LangChain.Message{}` supplies both halves, which may differ in
+    role. Resolution happens at queue time, so a user sees their own words
+    immediately rather than a turn later.
+  - Drain policy is explicit per terminal clause: `{:ok, _}` drains and starts a
+    follow-up run, while `{:interrupt, _, _}`, `{:pause, _}` and `{:error, _}`
+    hold. The drained branch deliberately does not broadcast
+    `{:status_changed, :idle, nil}`, so a UI never flickers "done" between the
+    two runs.
+  - A circuit breaker caps the framework at 10 consecutive self-started runs.
+    The counter resets on the human door and never on the tool door. This is
+    distinct from `:max_runs`, which counts LLM calls within one execution and
+    resets on every fresh chain. A tripped breaker still appends the message; it
+    only declines to start another run.
+  - `pending_message` is serialized alongside state and restored at boot, so a
+    node dying mid-run does not lose the user's words. Payloads written before
+    this release simply lack the key and read as "nothing queued".
+  - New events: `{:agent, {:message_queued, %Message{}}}`, plus
+    `{:messages_drained, count}`, `{:pending_message_held, :error}` and
+    `{:auto_execution_limit_reached, limit}` on the debug channel.
+  - Known scope limit: delivery is at the **run** boundary, not the turn
+    boundary. A message typed twenty tool calls into a long job is late, not
+    lost. Turn-boundary delivery is deliberately out of scope.
+- New optional middleware callback `transform_display_message/2`, the outbound
+  mirror of `MessagePreprocessor`. Each middleware gets a chance to annotate
+  `metadata` (or rewrite content) on a message before it is persisted as a
+  display message and broadcast to subscribers. The message in agent state is
+  left untouched, so the LLM never sees the annotation. Passthrough default;
+  composes across the stack. [#139](https://github.com/sagents-ai/sagents/pull/139)
+- Pause cause on the `:paused` status event. A mode step may now return
+  `{:pause, chain, reason}`; `Sagents.Mode.Steps.normalize_pause/1` folds the
+  reason into `custom_context.pause_reason`, the agent reads it onto the new
+  virtual `State.pause_reason` field, and `AgentServer` broadcasts it as the
+  payload of `{:agent, {:status_changed, :paused, pause_reason}}`, which was
+  previously always `nil`. `Agent.execute/3` still returns `{:pause, state}`, and
+  a pause without a reason broadcasts `nil` as before.
+  [#149](https://github.com/sagents-ai/sagents/pull/149)
+
+### Changed
+
+- `AgentServer.add_message/2` returns `:ok` instead of an error when a run is in
+  flight, because the message is now queued rather than rejected. See the
+  Upgrading section. [#152](https://github.com/sagents-ai/sagents/pull/152)
+- `langchain` moves from 0.8.12 to 0.9.4 in `mix.lock`, along with transitive
+  bumps to `ecto`, `finch`, `mint`, `hpax`, `plug`, `plug_crypto` and `req`. The
+  `mix.exs` requirement is unchanged; `>= 0.8.11` already allowed this.
+  [#152](https://github.com/sagents-ai/sagents/pull/152)
+- `Sagents.Middleware.AskUserQuestion` is added to a new
+  `@never_inherited_middleware` list alongside `Sagents.Middleware.SubAgent`, so
+  neither is inherited by a sub-agent from its parent's stack. Explicitly
+  configured `additional_middleware` is unaffected.
+  [#151](https://github.com/sagents-ai/sagents/pull/151)
+- CI workflow dependency bumps: `actions/checkout` 6.0.2 → 7.0.0
+  ([#132](https://github.com/sagents-ai/sagents/pull/132)), `actions/cache` and
+  its `save`/`restore` variants 5.0.5 → 6.1.0
+  ([#136](https://github.com/sagents-ai/sagents/pull/136),
+  [#137](https://github.com/sagents-ai/sagents/pull/137),
+  [#138](https://github.com/sagents-ai/sagents/pull/138)), and `erlef/setup-beam`
+  1.24.0 → 1.24.1 ([#140](https://github.com/sagents-ai/sagents/pull/140)).
+
+### Fixed
+
+- A user message added while the agent was `:running` is no longer silently
+  destroyed. It was written into the rolling server state, then wiped moments
+  later when `handle_execution_result/2` replaced that state wholesale with the
+  canonical state from `Agent.execute/3`, while the caller was told the server
+  was busy. The message is now queued and delivered on the next run.
+  [#152](https://github.com/sagents-ai/sagents/pull/152)
+- A `:halt` raised inside a sub-agent is propagated to the parent as a halt
+  instead of being wrapped as `:subagent_hitl`. Previously the wrapper defeated
+  every guarantee halt makes: the parent resumed and called the LLM again, the
+  interrupt was not restorable across a cold start, and the author's message was
+  never shown, so the user saw an empty approval dialog. The sub-agent process is
+  now stopped, and the propagated halt preserves `:source_tool` and adds
+  `:source_task`. Applies to both the initial run and a post-approval resume.
+  [#150](https://github.com/sagents-ai/sagents/pull/150)
+- `SubAgent.extract_result/1` now reads the matched terminating tool's result on
+  an `until_tool` run. Every `until_tool` termination ends on a tool-result
+  message, which the previous `ChainResult.to_string/1` path could not handle, so
+  extraction failed on success and failure alike and the parent received a
+  generic error. A tool result flagged `is_error` becomes `{:error, content}`;
+  runs ending in assistant prose are unchanged. Fixes
+  [#141](https://github.com/sagents-ai/sagents/issues/141).
+  [#143](https://github.com/sagents-ai/sagents/pull/143)
+- `SubAgent.resume/3` no longer crashes with a `KeyError` when the sub-agent's
+  interrupt was raised from inside a tool body. Such an interrupt carries neither
+  `:action_requests` nor `:hitl_tool_call_ids`, and is not resumable through this
+  path; it now returns `{:error, {:unsupported_interrupt, :tool_raised}}`, which
+  `Middleware.SubAgent.handle_resume/5` already turns into a clean error tool
+  result for the parent. Fixes
+  [#142](https://github.com/sagents-ai/sagents/issues/142).
+  [#144](https://github.com/sagents-ai/sagents/pull/144)
+- Creating a file with empty or whitespace-only content no longer discards it.
+  Ecto's default `:empty_values` treated `""`, `"\n"`, `"   "`, and `"\t"` as
+  absent and replaced them with `nil` while still reporting a successful write.
+  `FileEntry.internal_changeset/2` now passes `empty_values: []` so content is
+  stored verbatim. Only the first write to a path was affected; overwrites bypass
+  the changeset and always worked.
+  [#147](https://github.com/sagents-ai/sagents/pull/147)
+
 ## v0.9.0
 
 Reworks the optional `:horde` distribution backend so cluster membership is
