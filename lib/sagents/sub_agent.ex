@@ -469,7 +469,11 @@ defmodule Sagents.SubAgent do
 
   - `{:ok, completed_subagent}` - Execution completed
   - `{:interrupt, interrupted_subagent}` - Another interrupt (multiple HITL tools)
-  - `{:error, error_subagent}` - Resume failed
+  - `{:error, error_subagent}` - Resume ran but failed; the `SubAgent` carries
+    the reason in its `:error` field
+  - `{:error, {:unsupported_interrupt, :tool_raised}}` - Interrupted on a shape
+    this function cannot apply decisions to (see below)
+  - `{:error, {:invalid_status, status, :expected_interrupted}}` - Not interrupted
 
   ## Supported interrupt shapes
 
