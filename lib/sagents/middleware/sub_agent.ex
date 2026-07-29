@@ -723,7 +723,7 @@ defmodule Sagents.Middleware.SubAgent do
         # in custom_context, and scope under the canonical :scope key. Metadata
         # and runtime are nested in state and copied into the SubAgent's fresh
         # State.
-        {parent_tool_context, parent_metadata, parent_runtime, parent_scope} =
+        {parent_tool_context, parent_metadata, parent_runtime, parent_scope, parent_trace} =
           extract_parent_context(context)
 
         # Create SubAgent struct from pre-configured agent
@@ -743,7 +743,8 @@ defmodule Sagents.Middleware.SubAgent do
                 parent_tool_context: parent_tool_context,
                 parent_metadata: parent_metadata,
                 parent_runtime: parent_runtime,
-                scope: parent_scope
+                scope: parent_scope,
+                parent_trace: parent_trace
               )
 
             agent ->
@@ -758,7 +759,8 @@ defmodule Sagents.Middleware.SubAgent do
                 parent_tool_context: parent_tool_context,
                 parent_metadata: parent_metadata,
                 parent_runtime: parent_runtime,
-                scope: parent_scope
+                scope: parent_scope,
+                parent_trace: parent_trace
               )
           end
 
@@ -852,7 +854,7 @@ defmodule Sagents.Middleware.SubAgent do
 
         # Extract parent's tool_context, metadata, runtime, and scope for SubAgent
         # inheritance.
-        {parent_tool_context, parent_metadata, parent_runtime, parent_scope} =
+        {parent_tool_context, parent_metadata, parent_runtime, parent_scope, parent_trace} =
           extract_parent_context(context)
 
         # Create SubAgent struct with parent context
@@ -865,7 +867,8 @@ defmodule Sagents.Middleware.SubAgent do
             parent_tool_context: parent_tool_context,
             parent_metadata: parent_metadata,
             parent_runtime: parent_runtime,
-            scope: parent_scope
+            scope: parent_scope,
+            parent_trace: parent_trace
           )
 
         # Get supervisor and start SubAgent (same as pre-configured)
@@ -916,7 +919,16 @@ defmodule Sagents.Middleware.SubAgent do
     parent_metadata = get_in(context, [:state, Access.key(:metadata)]) || %{}
     parent_runtime = get_in(context, [:state, Access.key(:runtime)]) || %{}
     parent_scope = Map.get(context, :scope)
-    {parent_tool_context, parent_metadata, parent_runtime, parent_scope}
+
+    # Observability context the parent chain carries. Without this a sub-agent's
+    # spans lose the tenant/user attributes and the conversation grouping that the
+    # parent's spans have, which is precisely when a trace is hardest to read.
+    parent_trace = %{
+      otel_attributes: Map.get(context, :otel_attributes, %{}),
+      conversation_id: Map.get(context, :conversation_id)
+    }
+
+    {parent_tool_context, parent_metadata, parent_runtime, parent_scope, parent_trace}
   end
 
   defp default_general_purpose_prompt() do

@@ -1,18 +1,131 @@
 # Observability & Custom Telemetry
 
-This guide shows how to build custom observability middleware that emits telemetry events, OpenTelemetry spans, or any other instrumentation from your agent's LLM and tool execution lifecycle.
+Two different jobs live in this guide, and picking the right one first will save you a lot of work:
 
-## Why Middleware?
+| You want to... | Use |
+|---|---|
+| See your app's context (tenant, user, feature) on OpenTelemetry traces | **`:otel_attributes`** — one map, no middleware. [Jump there](#opentelemetry-tracing). |
+| Emit your own `:telemetry` events, metrics, logs, or feed a non-OTel backend | **A custom middleware** with `callbacks/1`. [Jump there](#custom-telemetry-with-middleware). |
 
-Sagents provides a `callbacks/1` middleware callback that lets you hook into every LLM event — token usage, tool execution, message processing, errors, and more. Rather than building a one-size-fits-all telemetry integration, Sagents leaves this to you as a custom middleware because:
+If you are reaching for a middleware in order to set span attributes, stop and read the first section. That used to be the only way; it no longer is.
+
+## OpenTelemetry tracing
+
+Sagents creates no spans of its own. LangChain does, and it already produces a full trace for every agent run:
+
+```
+invoke_agent llm_chain
+├── chat claude-sonnet-4-6
+├── execute_tool search_docs
+└── chat claude-sonnet-4-6
+```
+
+Enable it once at startup (see the [LangChain observability guide](https://hexdocs.pm/langchain/observability.html) for exporter setup):
+
+```elixir
+LangChain.OpenTelemetry.setup()
+```
+
+### What you get with no configuration
+
+An agent already reports its own identity and grouping:
+
+| Span attribute | Source | When |
+|---|---|---|
+| `gen_ai.conversation.id` | The AgentServer's `conversation_id` | Started with a `:conversation_id` |
+| `gen_ai.agent.name` | The agent's `:name` | Set on the agent; otherwise falls back to `"llm_chain"` |
+| `gen_ai.agent.id` | The agent's `agent_id` | Always, under an AgentServer |
+| `gen_ai.request.model`, token usage, latency, errors | LangChain | Always |
+
+Naming your agents is worth the two seconds: without `:name`, every agent in your system reports the same `gen_ai.agent.name` and the attribute can't group anything.
+
+### Adding your own context
+
+Set `:otel_attributes` when you build the agent:
+
+```elixir
+{:ok, agent} = Sagents.Agent.new(%{
+  model: model,
+  name: "support_agent",
+  otel_attributes: %{
+    "user.id" => current_user.id,
+    "organization.id" => org.id,
+    "myapp.plan" => org.plan,
+    "myapp.feature" => "support_chat"
+  },
+  middleware: [...]
+})
+```
+
+Those land on **every span the agent produces** — the `invoke_agent` span, each `chat` span, and each `execute_tool` span, including tools running in their own process. So you can filter and group at the span level, not just the trace level.
+
+That is the whole API. No middleware, no callbacks, no OpenTelemetry knowledge.
+
+To add attributes after construction, when a value is only known later:
+
+```elixir
+agent = Sagents.Agent.put_otel_attributes(agent, %{"myapp.workspace" => ws.id})
+```
+
+A few things worth knowing:
+
+- **Namespace your own keys** (`myapp.*`). A `gen_ai.*` key is honoured deliberately, so you can fill a semantic-convention slot LangChain doesn't populate.
+- **Types are preserved.** Strings, numbers, booleans, and homogeneous lists of those stay native, so numeric attributes remain filterable as numbers. Anything else is JSON-encoded; `nil` is dropped.
+- **Keep cardinality sane.** Tenant, user, and conversation ids are fine because backends index on them. Free-text values (titles, user queries) are not.
+- **Your values can't mask real ones.** On a span that derives an attribute itself, the derived value wins — you cannot accidentally overwrite `gen_ai.request.model` on a `chat` span.
+- **This is session state, not conversation data.** Like `:scope`, `:otel_attributes` is never persisted. On restore it comes from whatever starts the agent.
+
+### Sub-agents
+
+Sub-agents inherit the parent's `:otel_attributes` and conversation id automatically, and add their own lineage:
+
+| Span attribute | Value |
+|---|---|
+| `gen_ai.agent.id` | The sub-agent's own id |
+| `sagents.parent_agent_id` | The parent agent's id |
+
+So a multi-agent trace shows which agent produced each span while still carrying the tenant context from the top. A sub-agent's own `:otel_attributes` override the parent's on collision; its identity attributes are set by Sagents and cannot be overridden.
+
+### Enriching a span mid-run
+
+For values you only learn once work is underway, `LangChain.OpenTelemetry.Enrich` targets whichever span is currently open:
+
+```elixir
+# inside a tool function — lands on that tool's execute_tool span
+LangChain.OpenTelemetry.Enrich.set_current_span_attributes(%{
+  "myapp.records_matched" => length(rows)
+})
+```
+
+| Called from | Span it enriches |
+|---|---|
+| A tool's own function body | `execute_tool {tool}` |
+| `:on_tool_pre_execution`, `:on_tool_execution_completed`, `:on_tool_execution_failed` | `execute_tool {tool}` |
+| `:on_message_processed`, `:on_llm_token_usage` | `invoke_agent llm_chain` |
+
+Safe to call unconditionally — it compiles to a no-op when OpenTelemetry isn't installed, so your tools don't need guards or an OTel dependency.
+
+### Crossing process boundaries
+
+An agent run spans three processes, and the attributes above follow it across all of them without configuration. What does *not* follow automatically is the context established by **your caller** — the trace your Plug or LiveView opened. For that, see [Propagating Caller Context](#propagating-caller-context-across-process-boundaries) below.
+
+---
+
+## Custom telemetry with middleware
+
+Everything from here down is for the *other* job: emitting your own `:telemetry` events, driving metrics, logging, or feeding a backend that isn't OpenTelemetry. Sagents leaves this to you as a custom middleware because:
 
 - **Your telemetry metadata is unique** — customer IDs, tenant context, billing tiers, feature flags
-- **Your instrumentation stack is unique** — `:telemetry`, OpenTelemetry, StatsD, Prometheus, Datadog
+- **Your instrumentation stack is unique** — `:telemetry`, StatsD, Prometheus, Datadog
 - **Your event shapes are unique** — what you measure and how you label it depends on your domain
 
 The `callbacks/1` callback gives you direct access to LLM lifecycle events, and your middleware's `init/1` config is the natural place to carry your application-specific context.
 
-## Quick Start
+> #### Not for span attributes {: .info}
+>
+> If your middleware's job is to set OpenTelemetry span attributes, use `:otel_attributes` instead. A middleware that pokes at the current span has to re-derive which span is active, guard against running more than once per execution, and sit in the right position in the stack. The `:otel_attributes` map has none of those failure modes.
+
+### Quick Start
 
 Here's a minimal observability middleware that emits `:telemetry` events for token usage:
 
@@ -53,7 +166,7 @@ Add it to your agent:
 
 That's it. Every LLM call made by this agent will now emit a `[:myapp, :llm, :token_usage]` telemetry event with your service name attached.
 
-## Passing Application-Specific Context
+### Passing Application-Specific Context
 
 The real power of middleware-based observability is that `init/1` receives your application context and `callbacks/1` closes over it. This means every event you emit can carry metadata that is specific to your system — customer IDs, user IDs, billing tiers, or anything else.
 
@@ -147,11 +260,11 @@ When creating the agent, pass the context from your application:
 
 Now every telemetry event carries the customer and user context, so you can slice metrics by customer, track per-user usage for billing, or correlate tool failures with specific accounts.
 
-## Available Callback Keys
+### Available Callback Keys
 
 The `callbacks/1` function returns a map of callback keys to handler functions. Here is the complete list of available keys with their signatures:
 
-### Model-Level Callbacks
+#### Model-Level Callbacks
 
 | Key | Signature | When it fires |
 |-----|-----------|---------------|
@@ -161,7 +274,7 @@ The `callbacks/1` function returns a map of callback keys to handler functions. 
 | `:on_llm_token_usage` | `fn chain, token_usage -> any()` | Token usage for the request |
 | `:on_llm_response_headers` | `fn chain, headers_map -> any()` | Raw HTTP response headers |
 
-### Chain-Level Callbacks
+#### Chain-Level Callbacks
 
 | Key | Signature | When it fires |
 |-----|-----------|---------------|
@@ -180,7 +293,7 @@ All handler return values are discarded. Callbacks are for observation only — 
 
 > **Tip: Extracting the model name.** The `chain` argument is an `LLMChain` struct. You can extract the model name with `%{model: model_name} = chain.llm`. This works regardless of which chat model provider is being used (Anthropic, OpenAI, etc.), since they all have a `:model` field. This is especially useful in token usage callbacks for cost tracking across different models.
 
-## Fan-Out Behavior
+### Fan-Out Behavior
 
 When multiple middleware declare callbacks, all handlers fire for each event. If two middleware both define `on_llm_token_usage`, both handlers execute. This means you can have separate middleware for metrics, logging, and tracing without them interfering with each other.
 
@@ -197,7 +310,7 @@ When multiple middleware declare callbacks, all handlers fire for each event. If
 
 Both `Metrics` and `AuditLog` can declare `callbacks/1` and both will fire.
 
-## Sub-Agent Propagation
+### Sub-agent middleware inheritance
 
 By default, an agent's middleware stack is passed down to any sub-agents it spawns. This means your observability middleware automatically covers the entire agent tree — the parent agent and all of its sub-agents — without any extra configuration.
 
@@ -219,7 +332,7 @@ If your parent agent is configured with:
 
 When this agent spawns sub-agents, those sub-agents inherit the same middleware stack including your observability middleware. Token usage, tool execution, and errors from sub-agents all emit the same telemetry events with the same customer and user context as the parent. You get full visibility across the entire agent interaction without any additional wiring.
 
-## Full Example: Comprehensive Observability
+### Full Example: Comprehensive Observability
 
 Here's a more complete example that covers the most useful events for production observability:
 
@@ -308,7 +421,7 @@ defmodule MyApp.Middleware.Observability do
 end
 ```
 
-### Attaching Telemetry Handlers
+#### Attaching Telemetry Handlers
 
 Wire up the telemetry events in your application startup:
 
@@ -328,7 +441,7 @@ Wire up the telemetry events in your application startup:
 )
 ```
 
-## Testing Your Observability Middleware
+### Testing Your Observability Middleware
 
 Test that your callbacks fire and emit the expected telemetry events:
 
@@ -418,7 +531,7 @@ The propagator pairs are read like English at the call site: `{&OpenTelemetry.ge
 
 For long-lived agents that handle many user messages over time — a conversation-scoped `AgentServer` reused across hours of user interaction, for example — the captured snapshot goes stale. The OTel trace ID, the Sentry context, the active tenant might all be different by the time message #50 arrives.
 
-`update/1` refreshes it. The middleware already has the spec from `init/1`, so the caller only supplies the `agent_id`. Capture functions run in the *caller of* `update/1` against its current process dictionary, then the new snapshot replaces the stored snapshot in the agent's `state.metadata`:
+`update/1` refreshes it. The middleware already has the spec from `init/1`, so the caller only supplies the `agent_id`. Capture functions run in the *caller of* `update/1` against its current process dictionary, then the new snapshot replaces the stored snapshot in the agent's `state.runtime`:
 
 ```elixir
 # In a LiveView handle_event, an Oban worker, a Phoenix controller — anywhere
