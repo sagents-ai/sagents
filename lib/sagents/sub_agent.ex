@@ -318,6 +318,7 @@ defmodule Sagents.SubAgent do
     until_tool = Keyword.get(opts, :until_tool)
     require_tool_success = Keyword.get(opts, :require_tool_success, false)
     max_runs = Keyword.get(opts, :max_runs)
+    parent_trace = Keyword.get(opts, :parent_trace, %{})
 
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
 
@@ -344,7 +345,18 @@ defmodule Sagents.SubAgent do
         # First-class scope channel, same canonical key as Agent.build_chain.
         scope: scope,
         # Direct to the parent agent id.
-        agent_id: parent_agent_id
+        agent_id: parent_agent_id,
+        # Lineage and observability context. `agent_id` above intentionally points
+        # at the parent (tools use it to publish events back through the parent's
+        # AgentServer), so the sub-agent's own identity is carried separately here.
+        # Without these a sub-agent's spans appear in the trace with no indication
+        # of which agent produced them or what tenant they belong to.
+        sub_agent_id: sub_agent_id,
+        parent_agent_id: parent_agent_id,
+        agent_name: agent.name,
+        conversation_id: Map.get(parent_trace, :conversation_id),
+        otel_attributes:
+          subagent_otel_attributes(agent, parent_trace, sub_agent_id, parent_agent_id)
       })
 
     chain =
@@ -368,6 +380,29 @@ defmodule Sagents.SubAgent do
       status: :idle,
       created_at: DateTime.utc_now()
     }
+  end
+
+  # Span attributes for a SubAgent: the parent's context, then the sub-agent's own,
+  # then lineage last so it always describes the real structure.
+  #
+  # Lineage goes through `:otel_attributes` rather than sitting in `custom_context`
+  # alone because LangChain only maps a fixed set of context keys onto spans
+  # (`:agent_name`, `:agent_id`, `:conversation_id`, `:otel_attributes`). Keys placed
+  # anywhere else reach tool functions but are invisible in the trace, which is where
+  # a multi-agent run most needs them.
+  #
+  # `gen_ai.agent.id` is overridden deliberately. `custom_context[:agent_id]` points
+  # at the *parent* so tools can publish events back through its AgentServer, which
+  # would otherwise make every sub-agent's spans claim to be the parent. Caller
+  # attributes lose to this, which is correct: the span's own identity is not
+  # something an application should be able to misreport.
+  defp subagent_otel_attributes(agent, parent_trace, sub_agent_id, parent_agent_id) do
+    (Map.get(parent_trace, :otel_attributes) || %{})
+    |> Map.merge(agent.otel_attributes || %{})
+    |> Map.merge(%{
+      "gen_ai.agent.id" => sub_agent_id,
+      "sagents.parent_agent_id" => parent_agent_id
+    })
   end
 
   ## Execution Functions

@@ -2605,6 +2605,19 @@ defmodule Sagents.AgentServer do
     }
   end
 
+  # Stamp the server's conversation id onto the state handed to Agent.execute/3 and
+  # Agent.resume/4, which forwards it into `LLMChain.custom_context` for tools and
+  # for `gen_ai.conversation.id` on the trace.
+  #
+  # Applied here, per execution, rather than once at init: `ServerState` is the
+  # source of truth, and `State` is replaced wholesale by each `Agent.execute/3`
+  # result (see `handle_execution_result/2`), so a value written once would be
+  # dropped on the first turn. The field is virtual for the same reason — persisting
+  # it would let a restored state disagree with the server that restored it.
+  defp with_conversation_id(%ServerState{state: %State{} = state} = server_state) do
+    %State{state | conversation_id: server_state.conversation_id}
+  end
+
   defp execute_agent(%ServerState{} = server_state, pubsub_callbacks) do
     # Pass only the PubSub broadcasting callbacks. Agent.execute self-collects
     # this agent's middleware callbacks and merges them on top, so collecting
@@ -2612,7 +2625,9 @@ defmodule Sagents.AgentServer do
     callbacks = [pubsub_callbacks]
 
     # Execute agent with callbacks
-    case Agent.execute(server_state.agent, server_state.state, callbacks: callbacks) do
+    case Agent.execute(server_state.agent, with_conversation_id(server_state),
+           callbacks: callbacks
+         ) do
       {:ok, new_state} ->
         # Broadcast state changes
         broadcast_state_changes(server_state, new_state)
@@ -2650,7 +2665,12 @@ defmodule Sagents.AgentServer do
     pubsub_callbacks = build_pubsub_callbacks(server_state)
     callbacks = [pubsub_callbacks]
 
-    case Agent.resume(server_state.agent, server_state.state, resume_data, callbacks: callbacks) do
+    case Agent.resume(
+           server_state.agent,
+           with_conversation_id(server_state),
+           resume_data,
+           callbacks: callbacks
+         ) do
       {:ok, new_state} ->
         broadcast_state_changes(server_state, new_state)
         {:ok, new_state}

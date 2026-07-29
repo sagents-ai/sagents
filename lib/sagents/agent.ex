@@ -67,6 +67,12 @@ defmodule Sagents.Agent do
     field :scope, :any, virtual: true, default: nil
     # Caller-supplied context merged into LLMChain.custom_context for tool functions.
     field :tool_context, :map, default: %{}, virtual: true
+    # Flat map of OpenTelemetry span attributes describing this agent's context
+    # (tenant, user, feature). Forwarded to LLMChain.custom_context under the
+    # `:otel_attributes` key LangChain reserves, which puts them on every span the
+    # agent produces. Not serialized: like `:scope`, this is session state belonging
+    # to the caller that started the agent, not to the persisted conversation.
+    field :otel_attributes, :map, default: %{}, virtual: true
     # Timeout for async tool execution. Integer (ms) or :infinity.
     # Overrides application config when set. See LLMChain docs for details.
     field :async_tool_timeout, :any, virtual: true
@@ -112,6 +118,7 @@ defmodule Sagents.Agent do
     :filesystem_scope,
     :scope,
     :tool_context,
+    :otel_attributes,
     :async_tool_timeout,
     :fallback_models,
     :before_fallback,
@@ -143,6 +150,12 @@ defmodule Sagents.Agent do
     so every tool function receives it as part of its second argument. Internal keys
     (`:state`, `:parent_middleware`, `:parent_tools`, `:scope`) always take precedence on
     collision. (default: `%{}`)
+  - `:otel_attributes` - Flat map of OpenTelemetry span attributes describing this agent's
+    context, e.g. `%{"user.id" => user.id, "organization.id" => org.id}`. Applied to every
+    span the agent produces: the `invoke_agent` chain span, each `chat` span, and each
+    `execute_tool` span, including tools running in their own process. Keys may be strings
+    or atoms; namespace application-specific ones (`myapp.*`). See `put_otel_attributes/2`
+    to add to them after construction. Not serialized. (default: `%{}`)
   - `:async_tool_timeout` - Timeout for parallel tool execution. Integer (milliseconds) or
     `:infinity`. Overrides application-level config. See LLMChain module docs for details.
     (default: uses application config or `:infinity`)
@@ -267,6 +280,30 @@ defmodule Sagents.Agent do
       {:ok, agent} -> agent
       {:error, changeset} -> raise LangChainError, changeset
     end
+  end
+
+  @doc """
+  Merge additional OpenTelemetry span attributes into the agent.
+
+  New values win on key collision. Use this when some of an agent's tracing context
+  is only known after construction — a workspace resolved during setup, a feature
+  flag read after the middleware stack was assembled.
+
+  The attributes reach every span the agent produces (the `invoke_agent` chain span,
+  each `chat` span, and each `execute_tool` span) by way of the `:otel_attributes` key
+  LangChain reserves in `LLMChain.custom_context`.
+
+  ## Examples
+
+      agent = Sagents.Agent.put_otel_attributes(agent, %{"myapp.workspace" => ws.id})
+
+      # Values that are not strings, numbers or booleans are JSON-encoded by
+      # LangChain rather than rejected.
+      agent = Sagents.Agent.put_otel_attributes(agent, %{"myapp.retries" => 3})
+  """
+  @spec put_otel_attributes(t(), map()) :: t()
+  def put_otel_attributes(%Agent{} = agent, attributes) when is_map(attributes) do
+    %Agent{agent | otel_attributes: Map.merge(agent.otel_attributes || %{}, attributes)}
   end
 
   @doc false
@@ -847,7 +884,16 @@ defmodule Sagents.Agent do
             # First-class agent identity channel: tool functions read
             # `context.agent_id` to publish events back through their
             # AgentServer (e.g. `Sagents.AgentServer.publish_event_from/2`).
-            agent_id: state.agent_id
+            agent_id: state.agent_id,
+            # Identity and grouping keys LangChain's OpenTelemetry layer reads to
+            # populate `gen_ai.agent.name` and `gen_ai.conversation.id`. They also
+            # give tools a supported way to know which agent and conversation they
+            # are running in without the caller threading it through tool_context.
+            agent_name: agent.name,
+            conversation_id: state.conversation_id,
+            # Reserved LangChain key: a flat attribute map applied to every span
+            # this agent produces.
+            otel_attributes: agent.otel_attributes || %{}
           }
         )
     }

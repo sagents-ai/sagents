@@ -71,6 +71,16 @@ defmodule Sagents.State do
     # on the paused chain. Any term; nil when the mode paused without one.
     # Virtual like interrupt_data: never persisted.
     field :pause_reason, :any, default: nil, virtual: true
+    # Conversation this agent belongs to, populated by AgentServer from its own
+    # server state at execute time and forwarded to `LLMChain.custom_context` so
+    # tools and observability can reach it.
+    #
+    # Virtual on purpose: the AgentServer is the source of truth and re-supplies it
+    # on every execute, so persisting it only creates a way for a saved state and a
+    # running server to disagree. `:any` rather than `:string` because consumers key
+    # conversations by whatever their storage uses — commonly an integer primary key
+    # — and a typed field would fail to cast those.
+    field :conversation_id, :any, default: nil, virtual: true
   end
 
   @type t :: %State{}
@@ -99,7 +109,8 @@ defmodule Sagents.State do
       :metadata,
       :runtime,
       :interrupt_data,
-      :pause_reason
+      :pause_reason,
+      :conversation_id
     ])
     |> apply_action(:insert)
   end

@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.10.1
+
+Adds `:otel_attributes`, a flat map of your application's context (tenant, user,
+feature) that lands on **every** OpenTelemetry span an agent produces: the
+`invoke_agent` span, each `chat` span, and each `execute_tool` span, including
+tools running in their own process.
+
+```elixir
+{:ok, agent} =
+  Sagents.Agent.new(%{
+    model: model,
+    name: "support_agent",
+    otel_attributes: %{
+      "user.id" => current_user.id,
+      "organization.id" => org.id,
+      "myapp.plan" => org.plan
+    },
+    middleware: [...]
+  })
+```
+
+No middleware, no callbacks, no OpenTelemetry knowledge. Additive only: nothing
+changed arity or return type, and no migration is required. Requires `langchain`
+0.9.5 or later for the attributes to reach spans.
+
+Full details in the
+[Observability guide](https://github.com/sagents-ai/sagents/blob/main/docs/observability.md).
+
+### Added
+
+- `:otel_attributes` on `Sagents.Agent`, plus `Sagents.Agent.put_otel_attributes/2`
+  for values that are only known after the agent is built.
+  [#155](https://github.com/sagents-ai/sagents/pull/155)
+- An `AgentServer` now stamps its `conversation_id` onto the state it executes,
+  so `gen_ai.conversation.id` is set with no configuration. Combined with the
+  agent's `:name`, traces group by conversation and by agent out of the box.
+  Tools can read both from `custom_context`.
+  [#155](https://github.com/sagents-ai/sagents/pull/155)
+- Sub-agents inherit the parent's `:otel_attributes` and conversation id, and add
+  their own lineage: `gen_ai.agent.id` is the sub-agent's id and
+  `sagents.parent_agent_id` is the parent's.
+  [#155](https://github.com/sagents-ai/sagents/pull/155)
+- `Sagents.State.conversation_id`, a virtual field the `AgentServer` supplies on
+  each execution. Not persisted; the server remains the source of truth.
+  [#155](https://github.com/sagents-ai/sagents/pull/155)
+
 ## v0.10.0
 
 Headlined by a **pending-message queue**: a user can now type while the agent is

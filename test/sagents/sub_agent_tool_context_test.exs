@@ -121,8 +121,24 @@ defmodule Sagents.SubAgentToolContextTest do
       # empty map, :scope which defaults to nil when no scope is supplied,
       # and :agent_id which routes back to the parent AgentServer because
       # SubAgents have no subscribers of their own).
+      #
+      # The identity/observability group (:sub_agent_id, :parent_agent_id,
+      # :agent_name, :conversation_id, :otel_attributes) is also internal: it is
+      # what lets a sub-agent's spans report their own lineage and inherit the
+      # parent's trace context. See Sagents.AgentTraceContextTest.
       assert Map.keys(ctx) |> Enum.sort() ==
-               [:agent_id, :parent_middleware, :scope, :state, :tool_context]
+               [
+                 :agent_id,
+                 :agent_name,
+                 :conversation_id,
+                 :otel_attributes,
+                 :parent_agent_id,
+                 :parent_middleware,
+                 :scope,
+                 :state,
+                 :sub_agent_id,
+                 :tool_context
+               ]
 
       assert ctx.tool_context == %{}
       assert ctx.scope == nil
