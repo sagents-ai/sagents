@@ -576,6 +576,22 @@ defmodule Sagents.SubAgentServer do
   # will wrap them as {:agent, {:debug, {:subagent, ...}}} for consistent routing.
   # Reaches only subscribers enrolled on the parent's :debug channel via
   # `Sagents.Publisher`; with zero such subscribers the broadcast is a no-op.
+  #
+  # A sub-agent built with `suppress_debug_events: true` publishes nothing here.
+  # This is the single choke point for every sub-agent event, so the flag covers
+  # all of them — the initial messages at init, every inner LLM message live,
+  # the final chain on failure or cancellation, the result on completion, and
+  # the status transitions. Suppressing only the message-bearing events would
+  # leave the caller guessing which ones those are as new events are added, and
+  # would still announce a run whose whole point is that it is not observable
+  # from outside. The parent still learns the outcome through the sub-agent's
+  # return value; only the observer fan-out is silenced.
+  defp broadcast_subagent_event(
+         %ServerState{subagent: %SubAgent{suppress_debug_events: true}},
+         _event
+       ),
+       do: :ok
+
   defp broadcast_subagent_event(%ServerState{subagent: subagent}, event) do
     parent_id = subagent.parent_agent_id
     subagent_id = subagent.id

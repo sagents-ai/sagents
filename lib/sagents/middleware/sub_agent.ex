@@ -250,6 +250,15 @@ defmodule Sagents.Middleware.SubAgent do
           end)
           |> Map.new()
 
+        # Names of the subagent types whose events must not reach the parent's
+        # :debug channel. A set rather than a map because the setting is one
+        # boolean per task name, and absence means "publish" — the default.
+        suppress_debug_events =
+          for cfg <- subagents,
+              Map.get(cfg, :suppress_debug_events) == true,
+              into: MapSet.new(),
+              do: cfg.name
+
         # Build display_texts map: %{task_name => display_text}.
         # Used by the :on_tool_call_identified callback to re-label the
         # `task` tool call in the UI based on which subagent was picked.
@@ -289,6 +298,7 @@ defmodule Sagents.Middleware.SubAgent do
           model: model,
           block_middleware: block_middleware,
           until_tool_targets: until_tool_targets,
+          suppress_debug_events: suppress_debug_events,
           display_texts_map: display_texts_map,
           use_instructions_map: use_instructions_map,
           include_task_list: include_task_list
@@ -435,6 +445,10 @@ defmodule Sagents.Middleware.SubAgent do
       descriptions: config.descriptions,
       block_middleware: config.block_middleware,
       until_tool_targets: Map.get(config, :until_tool_targets, %{}),
+      # Named here because "my sub-agent publishes no debug events" is a real
+      # question an operator asks of this middleware's configuration.
+      suppress_debug_events:
+        config |> Map.get(:suppress_debug_events, MapSet.new()) |> Enum.sort(),
       has_use_instructions: not Enum.empty?(Map.get(config, :use_instructions_map, %{}))
     }
   end
@@ -717,6 +731,15 @@ defmodule Sagents.Middleware.SubAgent do
         until_tool_targets = Map.get(config, :until_tool_targets, %{})
         {until_tool, require_tool_success} = Map.get(until_tool_targets, task_name, {nil, false})
 
+        # Does this subagent type publish its events on the parent's :debug
+        # channel? Threaded here rather than read inside SubAgentServer because
+        # the server receives only the built struct — the same reason
+        # :until_tool is threaded through this call.
+        suppress_debug_events =
+          config
+          |> Map.get(:suppress_debug_events, MapSet.new())
+          |> MapSet.member?(task_name)
+
         # Extract parent's tool_context, metadata, runtime, and scope so
         # SubAgent tools see the same context as parent tools. Agent.build_chain
         # stores the original tool_context map as an explicit :tool_context key
@@ -740,6 +763,7 @@ defmodule Sagents.Middleware.SubAgent do
                 initial_messages: final_initial,
                 until_tool: until_tool,
                 require_tool_success: require_tool_success,
+                suppress_debug_events: suppress_debug_events,
                 parent_tool_context: parent_tool_context,
                 parent_metadata: parent_metadata,
                 parent_runtime: parent_runtime,
@@ -756,6 +780,7 @@ defmodule Sagents.Middleware.SubAgent do
                 initial_messages: per_call_initial,
                 until_tool: until_tool,
                 require_tool_success: require_tool_success,
+                suppress_debug_events: suppress_debug_events,
                 parent_tool_context: parent_tool_context,
                 parent_metadata: parent_metadata,
                 parent_runtime: parent_runtime,
