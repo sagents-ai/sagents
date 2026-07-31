@@ -120,6 +120,27 @@ defmodule <%= module %> do
     do: Sagents.Session.resume(@config, state, resume_data, request_opts: request_opts)
 
   @doc """
+  Dismiss a terminal `:halt` interrupt, waking the agent first if it has gone
+  to sleep.
+
+  The counterpart to `resume_agent_session/3` for the interrupt type that is
+  acknowledged rather than answered. Use this everywhere you would otherwise
+  call `Sagents.AgentServer.dismiss_interrupt/1` directly: a halt is
+  restorable, so the panel survives a nap, and its only button has to work
+  against a dormant conversation.
+
+  Returns `:ok`, `{:ok, changes}` (merge them: they carry subscription
+  bookkeeping from the wake), or `{:error, reason}`. See
+  `Sagents.Session.dismiss/3`.
+
+      <%= module %>.dismiss_agent_session(socket.assigns,
+        timezone: socket.assigns.timezone
+      )
+  """
+  def dismiss_agent_session(state, request_opts \\ []),
+    do: Sagents.Session.dismiss(@config, state, request_opts: request_opts)
+
+  @doc """
   Stop an agent session for a conversation.
 
   Note: agents automatically stop after inactivity timeout. Only call this

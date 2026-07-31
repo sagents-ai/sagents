@@ -603,6 +603,145 @@ defmodule Sagents.SessionTest do
     end
   end
 
+  describe "dismiss/3" do
+    test "a live agent holding a halt is dismissed in exactly one call" do
+      fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
+      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+
+      test_pid = self()
+
+      stub(AgentServer, :dismiss_interrupt, fn agent_id ->
+        send(test_pid, {:dismiss_called, agent_id})
+        :ok
+      end)
+
+      stub(AgentsDynamicSupervisor, :start_agent_sync, fn _opts ->
+        send(test_pid, :unexpected_start)
+        {:error, :should_not_be_called}
+      end)
+
+      assert :ok = Session.dismiss(base_config(), resume_state())
+
+      assert_received {:dismiss_called, "conversation-1"}
+      refute_received :unexpected_start
+    end
+
+    test "a dormant halt is woken and then dismissed" do
+      # The regression this exists to prevent: a halt is restorable, so the
+      # panel survives the nap, and before this its only button returned
+      # {:error, :agent_not_running} forever.
+      test_pid = self()
+      _fake_pid = stub_supervisor_ok(test_pid)
+
+      Process.put(:dismiss_calls, 0)
+
+      stub(AgentServer, :dismiss_interrupt, fn agent_id ->
+        case Process.get(:dismiss_calls) do
+          0 ->
+            Process.put(:dismiss_calls, 1)
+            {:error, :agent_not_running}
+
+          _after_wake ->
+            send(test_pid, {:dismissed_after_wake, agent_id})
+            :ok
+        end
+      end)
+
+      assert {:ok, changes} = Session.dismiss(base_config(), resume_state())
+
+      assert changes.agent_id == "conversation-1"
+      assert Map.has_key?(changes, :sagents_subs)
+      assert_received {:dismissed_after_wake, "conversation-1"}
+
+      # No :pending_dismiss equivalent rides into the boot; the dismissal is a
+      # second call once the agent is up.
+      assert_receive {:supervisor_config, opts}
+      assert opts[:pending_resume] == nil
+      assert opts[:initial_subscribers] == [{:main, self()}]
+    end
+
+    test "forwards :request_opts on the wake path so the woken agent is configured normally" do
+      test_pid = self()
+      _fake_pid = stub_supervisor_ok(test_pid)
+
+      Process.put(:dismiss_calls, 0)
+
+      stub(AgentServer, :dismiss_interrupt, fn _agent_id ->
+        case Process.get(:dismiss_calls) do
+          0 ->
+            Process.put(:dismiss_calls, 1)
+            {:error, :agent_not_running}
+
+          _after_wake ->
+            :ok
+        end
+      end)
+
+      Session.dismiss(base_config(), resume_state(), request_opts: [timezone: "America/Chicago"])
+
+      assert_received {:router_resolve, :my_scope, 1, [timezone: "America/Chicago"]}
+    end
+
+    test "a live agent in the wrong state errors instead of being woken" do
+      fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
+      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      test_pid = self()
+
+      stub(AgentServer, :dismiss_interrupt, fn _agent_id ->
+        {:error, "Cannot dismiss, server is not interrupted (status: idle)"}
+      end)
+
+      stub(AgentsDynamicSupervisor, :start_agent_sync, fn _opts ->
+        send(test_pid, :unexpected_start)
+        {:error, :should_not_be_called}
+      end)
+
+      assert {:error, "Cannot dismiss, server is not interrupted (status: idle)"} =
+               Session.dismiss(base_config(), resume_state())
+
+      refute_received :unexpected_start
+    end
+
+    test "an interrupt needing an explicit response is not woken and not dismissed" do
+      # AskUserQuestion and HITL interrupts must go through resume/4. Waking to
+      # retry a dismissal they will refuse again is pointless.
+      fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
+      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      test_pid = self()
+
+      stub(AgentServer, :dismiss_interrupt, fn _agent_id ->
+        {:error, "interrupt requires explicit response (use resume)"}
+      end)
+
+      stub(AgentsDynamicSupervisor, :start_agent_sync, fn _opts ->
+        send(test_pid, :unexpected_start)
+        {:error, :should_not_be_called}
+      end)
+
+      assert {:error, "interrupt requires explicit response (use resume)"} =
+               Session.dismiss(base_config(), resume_state())
+
+      refute_received :unexpected_start
+    end
+
+    test "passes a start failure through" do
+      stub(AgentServer, :get_pid, fn _agent_id -> nil end)
+      stub(AgentServer, :dismiss_interrupt, fn _agent_id -> {:error, :agent_not_running} end)
+      Process.put(:spy_router_response, {:error, :no_route})
+
+      assert {:error, :no_route} = Session.dismiss(base_config(), resume_state())
+    end
+
+    test "surfaces a post-wake dismissal failure rather than reporting success" do
+      test_pid = self()
+      _fake_pid = stub_supervisor_ok(test_pid)
+
+      stub(AgentServer, :dismiss_interrupt, fn _agent_id -> {:error, :agent_not_running} end)
+
+      assert {:error, :agent_not_running} = Session.dismiss(base_config(), resume_state())
+    end
+  end
+
   describe "start/3 session_info :started flag" do
     test "true when this call created the process" do
       _fake_pid = stub_supervisor_ok(self())

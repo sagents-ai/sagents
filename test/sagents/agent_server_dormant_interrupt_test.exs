@@ -324,4 +324,52 @@ defmodule Sagents.AgentServerDormantInterruptTest do
       assert_receive {:agent, {:status_changed, :interrupted, ^enriched}}, 500
     end
   end
+
+  # ── Dismissing a halt that was rebuilt at boot ───────────────────
+
+  describe "dismiss_interrupt/1 against a restored halt" do
+    # `Sagents.Session.dismiss/3` wakes a sleeping agent and then immediately
+    # dismisses against whatever `init/1` rebuilt. That only works if a halt
+    # survives the round trip in a shape `dismiss_interrupt/1` still recognizes
+    # as a halt. If it did not, the wake would succeed and the dismissal would
+    # fail, leaving the panel stuck with no signal to the host.
+    defp halt_state(data \\ %{type: :halt, message: "Blocked by policy"}) do
+      interrupted_state([{"call_1", data}])
+    end
+
+    test "a restored halt boots :interrupted and is then dismissible" do
+      agent = create_test_agent(middleware: [Sagents.Middleware.Haltable])
+
+      start_server(agent,
+        initial_state: halt_state(),
+        initial_subscribers: [{:main, self()}]
+      )
+
+      assert_receive {:agent, {:status_changed, :interrupted, %{type: :halt}}}, 500
+
+      assert :ok = AgentServer.dismiss_interrupt(agent.agent_id)
+      assert_receive {:agent, {:status_changed, :idle, nil}}, 500
+      assert AgentServer.get_status(agent.agent_id) == :idle
+    end
+
+    test "a restored question is not dismissible and says so" do
+      # The other half of the contract Session.dismiss/3 relies on: an interrupt
+      # needing a real response must refuse, so dismiss/3 can pass the error
+      # through instead of waking an agent that will refuse again.
+      agent = ask_agent()
+
+      start_server(agent,
+        initial_state: question_state(),
+        initial_subscribers: [{:main, self()}]
+      )
+
+      agent_id = agent.agent_id
+      assert AgentServer.get_status(agent_id) == :interrupted
+
+      assert {:error, "interrupt requires explicit response (use resume)"} =
+               AgentServer.dismiss_interrupt(agent_id)
+
+      assert AgentServer.get_status(agent_id) == :interrupted
+    end
+  end
 end

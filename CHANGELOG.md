@@ -12,6 +12,11 @@ conversation is waiting on, `agent_alive?` is whether a process is backing it
 right now. Answering an interrupt now goes through `Sagents.Session.resume/4`,
 which wakes a sleeping agent and hands it the answer at boot.
 
+The same is true of any other restorable interrupt, including a `:halt` panel,
+whose Dismiss button goes through the matching `Sagents.Session.dismiss/3`. **If
+your app renders a halt panel, read step 6 of the migration guide**, since the
+button has to be routed through the new path to work on a dormant conversation.
+
 **No compile-time breakage**, and upgrading without touching host code is safe:
 everything behaves as v0.10.1 did, bug included. The fix is opt-in, because the
 affected modules were generated into your app. See
@@ -23,6 +28,15 @@ Full write-up in [#159](https://github.com/sagents-ai/sagents/pull/159).
 ### Added
 
 - `Sagents.Session.resume/4` — answer an interrupt, waking the agent if needed.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
+- `Sagents.Session.dismiss/3` — acknowledge a terminal `:halt`, waking the agent
+  if needed. The mirror of `resume/4` for the interrupt type that is dismissed
+  rather than answered. A halt is restorable, so its panel now survives a nap,
+  and `AgentServer.dismiss_interrupt/1` alone cannot clear one on a dormant
+  conversation. An interrupt that needs a real response is passed through as an
+  error rather than woken. The generated Coordinator gains
+  `dismiss_agent_session/2` and the generated `AgentLiveHelpers` gains
+  `handle_halt_dismissal/1`.
   [#159](https://github.com/sagents-ai/sagents/pull/159)
 - `:pending_resume`, a start option applied during boot before the initial status
   broadcast, so a woken agent announces `:running` rather than an `:interrupted`
@@ -46,6 +60,16 @@ Full write-up in [#159](https://github.com/sagents-ai/sagents/pull/159).
   pid has nothing to resync. If you relied on re-subscribing to force a refresh,
   use `Sagents.AgentServer.get_info/1`. This is the only non-opt-in behaviour
   change in the release. [#159](https://github.com/sagents-ai/sagents/pull/159)
+- **A `:halt` panel now survives a shutdown**, for hosts that adopt
+  `AgentUtils.shutdown_session_changes/2`. `Haltable.restorable_interrupt?/1`
+  reports `%{type: :halt}` as restorable and the shutdown helper counts
+  `:pending_halt` as a pending interrupt, so a halt is preserved on exactly the
+  same terms as an open question. Route the panel's Dismiss action through
+  `Session.dismiss/3`: `AgentServer.dismiss_interrupt/1` talks to a live process
+  and returns `{:error, :agent_not_running}` against a dormant one. See step 6 of
+  the migration guide. Previously the generated
+  `handle_agent_shutdown/2` cleared the halt on the way out, so this path was
+  unreachable. [#159](https://github.com/sagents-ai/sagents/pull/159)
 - All three `{:agent_shutdown, _}` emit sites now send the same shape.
   `terminate/2` previously sent only `%{reason:, status:}`, omitting the agent id
   hosts need to correlate the event. Additive for subset map patterns.
@@ -66,6 +90,18 @@ Full write-up in [#159](https://github.com/sagents-ai/sagents/pull/159).
 - The generated interrupt handlers crashed on a duplicate question submission and
   could resume with a fabricated HITL decision on a duplicate approval.
   [#159](https://github.com/sagents-ai/sagents/pull/159)
+- The generated `resume_or_flash/5` built the log line and the user-facing flash
+  from a single `error_prefix`, so an internal error term reached the end user
+  verbatim (`Failed to submit response: "Cannot resume, server is not
+  interrupted"`), in wording that says "agent". It now takes `:log_label` and
+  `:user_message` separately, and only the label is paired with the reason.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
+- The generated `AgentLiveHelpers` exposes a single public `agent_request_opts/1`
+  instead of a private, resume-only `resume_request_opts/1` stub. Every path that
+  can start an agent should read it, including the host's own
+  `ensure_agent_session_running/2` call sites. Two copies of this decision drift
+  silently, and the symptom is an agent configured differently only on the paths
+  that had to wake it. [#159](https://github.com/sagents-ai/sagents/pull/159)
 
 ## v0.10.1
 

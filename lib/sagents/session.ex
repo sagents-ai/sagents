@@ -286,6 +286,99 @@ defmodule Sagents.Session do
   end
 
   @doc """
+  Dismiss a terminal `:halt` interrupt, waking the agent first if it has gone
+  to sleep.
+
+  The mirror of `resume/4` for the one interrupt type that is *acknowledged*
+  rather than answered. Use this everywhere a host would otherwise call
+  `Sagents.AgentServer.dismiss_interrupt/1` directly.
+
+  A halt is restorable, so a dormant conversation keeps its halt panel on
+  screen (see `Sagents.AgentUtils.shutdown_session_changes/2`). The button that
+  clears it therefore has to work whether or not a process is backing the
+  session, exactly like the answer to a dormant question.
+
+  `state` is the host's process-level map, with the same required keys as
+  `ensure_running/3` (`:conversation_id`, `:current_scope`, optionally
+  `:sagents_subs`).
+
+  ## Options
+
+  - `:request_opts` - forwarded verbatim to the router on the wake path. Pass
+    the same per-request data you pass when starting a session; an agent woken
+    to accept a dismissal is configured exactly like one woken any other way.
+
+  ## Returns
+
+  - `:ok` - a live agent dismissed the halt.
+  - `{:ok, changes}` - the agent was asleep. It was woken and then dismissed.
+    Merge `changes` (subscription bookkeeping) into your state map.
+  - `{:error, reason}` - passed through. A live agent that is not interrupted,
+    or one holding an interrupt that needs an explicit response rather than an
+    acknowledgement, returns an error rather than being woken.
+
+  ## Example
+
+      case Session.dismiss(config, socket.assigns, request_opts: opts) do
+        :ok ->
+          assign(socket, AgentUtils.cleared_interrupt_changes())
+
+        {:ok, changes} ->
+          socket |> assign(changes) |> assign(AgentUtils.cleared_interrupt_changes())
+
+        {:error, reason} ->
+          put_flash(socket, :error, "Could not dismiss: \#{inspect(reason)}")
+      end
+
+  """
+  @spec dismiss(config(), state_map :: map(), opts :: keyword()) ::
+          :ok | {:ok, %{sagents_subs: map(), agent_id: String.t()}} | {:error, term()}
+  def dismiss(config, state, opts \\ []) when is_map(state) do
+    conversation_id = Map.fetch!(state, :conversation_id)
+    agent_id = config.agent_id_fun.(conversation_id)
+
+    # Ask the agent, not the host's assigns, for the same reasons as resume/4:
+    # it covers a crash that never broadcast a shutdown, and keeps the common
+    # case (a live agent holding a halt) at exactly one call.
+    case AgentServer.dismiss_interrupt(agent_id) do
+      :ok ->
+        :ok
+
+      {:error, :agent_not_running} ->
+        wake_and_dismiss(config, state, agent_id, opts)
+
+      {:error, _reason} = error ->
+        # A live agent in the wrong state, or an interrupt that needs a real
+        # response. Waking would be a no-op and would hide a real problem.
+        error
+    end
+  end
+
+  # There is deliberately no `:pending_dismiss` start option mirroring
+  # `:pending_resume`. That option exists to stop a woken agent announcing an
+  # `:interrupted` snapshot for a question it is about to leave. Here that
+  # snapshot re-presents a halt panel that is already on screen, since the panel
+  # surviving the nap is the whole point, so subscribers see no visible
+  # transition before the dismissal lands. One extra call after boot is cheaper
+  # than a second boot-time hook.
+  defp wake_and_dismiss(config, state, agent_id, opts) do
+    case do_ensure_running(config, state, opts) do
+      {:ok, changes, _session_info} ->
+        # A restorable halt is rebuilt during boot, and this call is serialized
+        # after `init/1` and `handle_continue/2`, so the retry always has
+        # something to land on. Unlike the resume path, `started: false` needs
+        # no special case: nothing was carried into the boot to be dropped.
+        case AgentServer.dismiss_interrupt(agent_id) do
+          :ok -> {:ok, changes}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
   Stop the agent session for a conversation. No-op if nothing is running.
   """
   @spec stop(config(), conversation_id :: term()) :: {:ok, :stopped | :not_running}

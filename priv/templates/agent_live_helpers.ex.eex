@@ -26,8 +26,11 @@ defmodule <%= module %> do
        `handle_publisher_down/2` and `handle_presence_diff/2` here.
 
     3. For the action path (send_message, wake_agent, etc.), call
-       `<%= coordinator_alias %>.ensure_agent_session_running(socket.assigns)`
-       and apply the returned changes with `assign(socket, changes)`.
+       `<%= coordinator_alias %>.ensure_agent_session_running(socket.assigns,
+       agent_request_opts(socket))` and apply the returned changes with
+       `assign(socket, changes)`. Use `agent_request_opts/1` from this module
+       rather than a second copy: every path that can start an agent must
+       configure it identically.
 
   ## Customization
 
@@ -186,7 +189,7 @@ defmodule <%= module %> do
   defp auto_wake_for_pending_interrupt(socket) do
     case <%= coordinator_alias %>.ensure_agent_session_running(
            socket.assigns,
-           resume_request_opts(socket)
+           agent_request_opts(socket)
          ) do
       {:ok, changes} ->
         socket |> assign(changes) |> assign(:agent_alive?, true)
@@ -460,7 +463,8 @@ defmodule <%= module %> do
           accumulated,
           changes,
           <%= subscriber_session_alias %>.hitl_resume_running_changes(),
-          "Failed to resume agent"
+          log_label: "HITL resume failed",
+          user_message: "That decision could not be submitted. Please try again."
         )
 
       # Intermediate decisions in a multi-tool batch settle nothing, so they
@@ -505,13 +509,54 @@ defmodule <%= module %> do
           resume_data,
           changes,
           <%= subscriber_session_alias %>.question_resume_running_changes(),
-          "Failed to submit response"
+          log_label: "question resume failed",
+          user_message: "That response could not be saved. Please try again."
         )
 
       # Intermediate answers in a multi-question batch need no agent at all,
       # so they deliberately must not wake one. Only the final answer resumes.
       {:more, changes} ->
         assign(socket, changes)
+    end
+  end
+
+  # ===========================================================================
+  # Halt dismissal
+  # ===========================================================================
+
+  @doc """
+  Acknowledge a terminal `:halt` interrupt and clear its panel.
+
+  A halt is restorable, so the panel stays on screen when the agent naps. This
+  routes through `<%= coordinator_alias %>.dismiss_agent_session/2`, which
+  wakes a sleeping agent and dismisses against the halt it rebuilt at boot, so
+  the button works on a dormant conversation.
+  """
+  def handle_halt_dismissal(socket) do
+    if is_nil(socket.assigns[:pending_halt]) do
+      # Nothing pending: a duplicate event for a halt already dismissed. The
+      # dismissal is synchronous, so a fast double click really does deliver a
+      # second event after the first cleared the panel.
+      socket
+    else
+      do_handle_halt_dismissal(socket)
+    end
+  end
+
+  defp do_handle_halt_dismissal(socket) do
+    case <%= coordinator_alias %>.dismiss_agent_session(socket.assigns, agent_request_opts(socket)) do
+      :ok ->
+        assign(socket, Sagents.AgentUtils.cleared_interrupt_changes())
+
+      {:ok, session_changes} ->
+        socket
+        |> assign(session_changes)
+        |> assign(:agent_alive?, true)
+        |> assign(Sagents.AgentUtils.cleared_interrupt_changes())
+
+      {:error, reason} ->
+        Logger.error("halt dismissal failed: #{inspect(reason)}")
+        put_flash(socket, :error, "That could not be dismissed. Please try again.")
     end
   end
 
@@ -524,11 +569,20 @@ defmodule <%= module %> do
   # sleeping one is woken with the answer already in hand. A *live* agent in
   # the wrong state (someone answered from another tab) returns an error
   # rather than being woken, because there is nothing to wake.
-  defp resume_or_flash(socket, resume_data, changes, running_changes, error_prefix) do
+  #
+  # `copy` carries two deliberately separate strings:
+  #
+  #   * `:log_label` - internal vocabulary, paired with the raw reason term.
+  #   * `:user_message` - product copy shown to the person. Never interpolate
+  #     the reason into it. A live-but-wrong-state agent returns "Cannot
+  #     resume, server is not interrupted": an internal string, and one that
+  #     says "agent", a word many products deliberately never put in front of
+  #     a user. This is a slot you are meant to edit and localize.
+  defp resume_or_flash(socket, resume_data, changes, running_changes, copy) do
     case <%= coordinator_alias %>.resume_agent_session(
            socket.assigns,
            resume_data,
-           resume_request_opts(socket)
+           agent_request_opts(socket)
          ) do
       :ok ->
         socket |> assign(changes) |> assign(running_changes)
@@ -540,14 +594,28 @@ defmodule <%= module %> do
         |> assign(running_changes)
 
       {:error, reason} ->
-        Logger.error("#{error_prefix}: #{inspect(reason)}")
-        put_flash(socket, :error, "#{error_prefix}: #{inspect(reason)}")
+        Logger.error("#{Keyword.fetch!(copy, :log_label)}: #{inspect(reason)}")
+        put_flash(socket, :error, Keyword.fetch!(copy, :user_message))
     end
   end
 
-  # Per-request data the FactoryConfig consumes when the agent has to be woken
-  # to take this answer. An agent woken to accept a response must be configured
-  # exactly like one woken any other way, so keep this in sync with whatever
-  # the host passes to `ensure_agent_session_running/2`.
-  defp resume_request_opts(_socket), do: []
+  # ===========================================================================
+  # Per-request agent configuration
+  # ===========================================================================
+
+  @doc """
+  Per-request data the `Sagents.FactoryConfig` consumes, for **every** path
+  that may have to start an agent.
+
+  Fill this in once (timezone, tool context, tenant, whatever your factory
+  reads) and route your own
+  `<%= coordinator_alias %>.ensure_agent_session_running/2` call sites through
+  it as well, rather than computing the same options separately.
+
+  An agent woken to accept an answer must be configured exactly like one woken
+  any other way. A second copy of this decision drifts silently: it compiles,
+  it passes tests, and the symptom is an agent that behaves subtly wrong only
+  on the paths that had to wake it.
+  """
+  def agent_request_opts(_socket), do: []
 end
