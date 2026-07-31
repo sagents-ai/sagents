@@ -41,7 +41,8 @@ defmodule Sagents.SubAgentServerBroadcastTest do
       parent_agent_id: parent_agent_id,
       instructions: instructions,
       agent_config: agent,
-      parent_state: parent_state
+      parent_state: parent_state,
+      suppress_debug_events: Keyword.get(opts, :suppress_debug_events, false)
     )
   end
 
@@ -448,6 +449,104 @@ defmodule Sagents.SubAgentServerBroadcastTest do
 
       assert data.result == "I've written the file test.txt successfully."
       assert is_integer(data.duration_ms)
+    end
+  end
+
+  describe "suppress_debug_events" do
+    # A sub-agent used as a confidentiality boundary: its instructions carry
+    # content the parent's debug subscribers must not see.
+    @secret "PATIENT-SSN-078-05-1120"
+
+    test "publishes nothing across a successful run when suppressed", context do
+      parent_agent = start_parent_agent(context)
+
+      subagent =
+        create_subagent(parent_agent.agent_id,
+          instructions: "Summarize this record: #{@secret}",
+          suppress_debug_events: true
+        )
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
+
+      ChatAnthropic
+      |> stub(:call, fn _model, _messages, _callbacks ->
+        {:ok, [Message.new_assistant!("Record summarized")]}
+      end)
+
+      # The outcome still reaches the caller. Only the observer fan-out is silenced.
+      assert {:ok, "Record summarized"} = SubAgentServer.execute(subagent.id)
+
+      # Nothing from this sub-agent reached the subscribed :debug channel: not the
+      # started metadata, not the status transitions, not the inner messages, not
+      # the completion. Matching the whole `{:subagent, _, _}` family rather than
+      # each event keeps this assertion correct as new events are added.
+      refute_receive {:agent, {:debug, {:subagent, _, _}}}, 200
+    end
+
+    test "publishes the failure chain when not suppressed", context do
+      # The control for the test below: without suppression a failed run
+      # republishes the whole inner chain, secret included. This is the leak
+      # reported in #157, and asserting it here keeps the suppressed case from
+      # passing vacuously.
+      parent_agent = start_parent_agent(context)
+
+      subagent =
+        create_subagent(parent_agent.agent_id,
+          instructions: "Summarize this record: #{@secret}"
+        )
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
+
+      ChatAnthropic
+      |> stub(:call, fn _model, _messages, _callbacks ->
+        {:error, LangChain.LangChainError.exception(message: "validator refused output")}
+      end)
+
+      assert {:error, _reason} = SubAgentServer.execute(subagent.id)
+
+      assert_receive {:agent, {:debug, {:subagent, _, {:subagent_failed_with_context, ctx}}}},
+                     1000
+
+      assert Enum.any?(ctx.final_messages, fn msg ->
+               msg.role == :user and
+                 String.contains?(ContentPart.parts_to_string(msg.content), @secret)
+             end)
+    end
+
+    test "publishes nothing on a failed run when suppressed", context do
+      parent_agent = start_parent_agent(context)
+
+      subagent =
+        create_subagent(parent_agent.agent_id,
+          instructions: "Summarize this record: #{@secret}",
+          suppress_debug_events: true
+        )
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
+
+      ChatAnthropic
+      |> stub(:call, fn _model, _messages, _callbacks ->
+        {:error, LangChain.LangChainError.exception(message: "validator refused output")}
+      end)
+
+      # A rejected result is a failed run, so this is the path that leaked the
+      # refused content in #157.
+      assert {:error, _reason} = SubAgentServer.execute(subagent.id)
+
+      refute_receive {:agent, {:debug, {:subagent, _, _}}}, 200
+    end
+
+    test "publishes normally when suppress_debug_events is explicitly false", context do
+      # Pins the guard to `true` only. A clause that matched any truthy or
+      # non-nil value would silence sub-agents that never asked for it.
+      parent_agent = start_parent_agent(context)
+
+      subagent = create_subagent(parent_agent.agent_id, suppress_debug_events: false)
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
+
+      assert_receive {:agent, {:debug, {:subagent, sub_id, {:subagent_started, _data}}}}, 100
+      assert sub_id == subagent.id
     end
   end
 end

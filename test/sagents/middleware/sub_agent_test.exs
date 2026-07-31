@@ -3,6 +3,7 @@ defmodule Sagents.Middleware.SubAgentTest do
   use Mimic
 
   alias Sagents.Agent
+  alias Sagents.AgentServer
   alias Sagents.Middleware.SubAgent, as: SubAgentMiddleware
   alias Sagents.SubAgent
   alias Sagents.SubAgentServer
@@ -207,6 +208,125 @@ defmodule Sagents.Middleware.SubAgentTest do
       # why the production guard combines both calls.
       assert Code.ensure_loaded?(SubAgentMiddleware)
       assert function_exported?(SubAgentMiddleware, :debug_summary, 1)
+    end
+  end
+
+  describe "init/1 with suppress_debug_events" do
+    # The per-config boolean is collapsed at init into one set of task names,
+    # the same way :until_tool becomes :until_tool_targets.
+    defp init_with_suppression do
+      quiet =
+        SubAgent.Config.new!(%{
+          name: "quiet",
+          description: "Handles sensitive input",
+          system_prompt: "Test agent quiet",
+          tools: [test_tool()],
+          suppress_debug_events: true
+        })
+
+      loud = build_subagent_config("loud", "Ordinary work")
+
+      SubAgentMiddleware.init(
+        agent_id: "parent",
+        model: test_model(),
+        middleware: [],
+        subagents: [quiet, loud]
+      )
+    end
+
+    test "collects only the names of subagents that opted in" do
+      {:ok, config} = init_with_suppression()
+
+      assert MapSet.member?(config.suppress_debug_targets, "quiet")
+      refute MapSet.member?(config.suppress_debug_targets, "loud")
+    end
+
+    test "builds an empty set when no subagent opts in" do
+      {:ok, config} =
+        SubAgentMiddleware.init(
+          agent_id: "parent",
+          model: test_model(),
+          middleware: [],
+          subagents: [build_subagent_config("loud", "Ordinary work")]
+        )
+
+      assert MapSet.size(config.suppress_debug_targets) == 0
+    end
+
+    test "debug_summary reports the suppressed names as a sorted list" do
+      {:ok, config} = init_with_suppression()
+
+      assert %{suppress_debug_targets: ["quiet"]} =
+               SubAgentMiddleware.debug_summary(config)
+    end
+  end
+
+  describe "task tool honours suppress_debug_events" do
+    # Covers the link between the middleware's collapsed set and the SubAgent
+    # struct the server guards on: the `task` tool must look the flag up by task
+    # name and thread it through. Both sub-agents live in one config so the two
+    # tests also prove the lookup is per name rather than global.
+    setup do
+      parent_agent = create_test_agent()
+
+      {:ok, _pid} = AgentServer.start_link(agent: parent_agent)
+      start_supervised({SubAgentsDynamicSupervisor, agent_id: parent_agent.agent_id})
+      {:ok, _server_pid, _ref} = AgentServer.subscribe(parent_agent.agent_id, :debug)
+
+      quiet =
+        SubAgent.Config.new!(%{
+          name: "quiet",
+          description: "Handles sensitive input",
+          system_prompt: "Test agent quiet",
+          tools: [test_tool()],
+          suppress_debug_events: true
+        })
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: parent_agent.agent_id,
+          model: test_model(),
+          middleware: [],
+          subagents: [quiet, build_subagent_config("loud", "Ordinary work")]
+        )
+
+      assistant_message = Message.new_assistant!(%{content: "Done"})
+
+      LLMChain
+      |> stub(:run, fn chain, _opts ->
+        {:ok,
+         chain
+         |> Map.put(:messages, chain.messages ++ [assistant_message])
+         |> Map.put(:last_message, assistant_message)
+         |> Map.put(:needs_response, false)}
+      end)
+
+      [task_tool] = SubAgentMiddleware.tools(middleware_config)
+
+      %{task_tool: task_tool}
+    end
+
+    defp run_task(task_tool, task_name) do
+      task_tool.function.(
+        %{"instructions" => "Do the work", "task_name" => task_name},
+        %{state: State.new!(%{messages: []})}
+      )
+    end
+
+    test "publishes nothing for a sub-agent configured to suppress", %{task_tool: task_tool} do
+      # The result still comes back through the tool -- only the debug fan-out
+      # is silenced.
+      assert {:ok, "Done"} = run_task(task_tool, "quiet")
+
+      refute_receive {:agent, {:debug, {:subagent, _, _}}}, 200
+    end
+
+    test "publishes for a sub-agent in the same config that did not opt in", %{
+      task_tool: task_tool
+    } do
+      assert {:ok, "Done"} = run_task(task_tool, "loud")
+
+      assert_receive {:agent, {:debug, {:subagent, _, {:subagent_started, _}}}}, 1000
     end
   end
 

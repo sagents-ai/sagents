@@ -115,6 +115,34 @@ defmodule Sagents.Middleware.SubAgent do
         block_middleware: [ConversationTitle]  # Only affects general-purpose
       ]}
 
+  ## Suppressing Debug Events
+
+  A sub-agent's events are published on the **parent's** `:debug` channel, and
+  they carry content: the initial messages, every inner LLM message live, and
+  the whole inner chain on failure or cancellation. For a sub-agent that exists
+  as a confidentiality boundary — it reads sensitive data and is meant to return
+  only a narrow result — set `:suppress_debug_events` on its config:
+
+      {SubAgent, [
+        model: model,
+        subagents: [
+          SubAgent.Config.new!(%{
+            name: "pii-extractor",
+            description: "Extract structured fields from a sensitive document",
+            tools: [extract_tool],
+            suppress_debug_events: true
+          })
+        ]
+      ]}
+
+  Nothing about that sub-agent's run reaches the parent's `:debug` channel. The
+  parent still receives the outcome as the `task` tool result; only the observer
+  fan-out is silenced. Defaults to `false`, so existing consumers are unaffected.
+
+  The setting is per sub-agent type and all-or-nothing. It does not apply to the
+  **general-purpose** sub-agent, which is created dynamically rather than
+  declared in `:subagents` and so has no config to carry the flag.
+
   ## Usage Example
 
       # Main agent decides to delegate work
@@ -253,7 +281,9 @@ defmodule Sagents.Middleware.SubAgent do
         # Names of the subagent types whose events must not reach the parent's
         # :debug channel. A set rather than a map because the setting is one
         # boolean per task name, and absence means "publish" — the default.
-        suppress_debug_events =
+        # Named `_targets` like `until_tool_targets` above: the per-config field
+        # is a boolean, this is the collapsed lookup keyed by task name.
+        suppress_debug_targets =
           for cfg <- subagents,
               Map.get(cfg, :suppress_debug_events) == true,
               into: MapSet.new(),
@@ -298,7 +328,7 @@ defmodule Sagents.Middleware.SubAgent do
           model: model,
           block_middleware: block_middleware,
           until_tool_targets: until_tool_targets,
-          suppress_debug_events: suppress_debug_events,
+          suppress_debug_targets: suppress_debug_targets,
           display_texts_map: display_texts_map,
           use_instructions_map: use_instructions_map,
           include_task_list: include_task_list
@@ -447,8 +477,8 @@ defmodule Sagents.Middleware.SubAgent do
       until_tool_targets: Map.get(config, :until_tool_targets, %{}),
       # Named here because "my sub-agent publishes no debug events" is a real
       # question an operator asks of this middleware's configuration.
-      suppress_debug_events:
-        config |> Map.get(:suppress_debug_events, MapSet.new()) |> Enum.sort(),
+      suppress_debug_targets:
+        config |> Map.get(:suppress_debug_targets, MapSet.new()) |> Enum.sort(),
       has_use_instructions: not Enum.empty?(Map.get(config, :use_instructions_map, %{}))
     }
   end
@@ -737,7 +767,7 @@ defmodule Sagents.Middleware.SubAgent do
         # :until_tool is threaded through this call.
         suppress_debug_events =
           config
-          |> Map.get(:suppress_debug_events, MapSet.new())
+          |> Map.get(:suppress_debug_targets, MapSet.new())
           |> MapSet.member?(task_name)
 
         # Extract parent's tool_context, metadata, runtime, and scope so
