@@ -1,5 +1,59 @@
 # Changelog
 
+## v0.11.0
+
+An open `ask_user` question no longer disappears when the agent goes to sleep.
+
+The interrupt was always durable — it is persisted with the state, and a fresh
+boot rebuilds it and comes up `:interrupted`. The loss was in the host UI, which
+treated "the process went away" as a status change and cleared the prompt. This
+release separates the two facts hosts were conflating: `agent_status` is what the
+conversation is waiting on, `agent_alive?` is whether a process is backing it
+right now. Answering an interrupt now goes through `Sagents.Session.resume/4`,
+which wakes a sleeping agent and hands it the answer at boot.
+
+**No compile-time breakage**, and upgrading without touching host code is safe:
+everything behaves as v0.10.1 did, bug included. The fix is opt-in, because the
+affected modules were generated into your app. See
+[MIGRATION_PROMPT_v0.10.1_TO_v0.11.0.md](MIGRATION_PROMPT_v0.10.1_TO_v0.11.0.md)
+— it is written to be handed to a coding agent.
+
+### Added
+
+- `Sagents.Session.resume/4` — answer an interrupt, waking the agent if needed.
+- `:pending_resume`, a start option applied during boot before the initial status
+  broadcast, so a woken agent announces `:running` rather than an `:interrupted`
+  snapshot it is about to leave.
+- `Sagents.AgentUtils.shutdown_session_changes/2` and the `agent_alive?`
+  subscriber-state key.
+- `Sagents.State.interrupt_restorable?/2` is now public — the authoritative
+  predicate for whether an interrupt survives a cold boot.
+- `{:agent_shutdown, _}` payloads carry `:interrupt_restorable`.
+- `Sagents.Session.start/3`'s `session_info` gained `:started`.
+
+### Changed
+
+- **`on_subscribed/3` no longer fires for a pid already subscribed to that
+  channel.** It is a *newly registered* subscriber hook, and an already-registered
+  pid has nothing to resync. If you relied on re-subscribing to force a refresh,
+  use `Sagents.AgentServer.get_info/1`. This is the only non-opt-in behaviour
+  change in the release.
+- All three `{:agent_shutdown, _}` emit sites now send the same shape.
+  `terminate/2` previously sent only `%{reason:, status:}`, omitting the agent id
+  hosts need to correlate the event. Additive for subset map patterns.
+- An empty `:multiple_interrupts` wrapper is no longer treated as restorable.
+
+### Fixed
+
+- A process seeded via `:initial_subscribers` that then called `subscribe/3`
+  received the boot status broadcast twice. This is the exact shape
+  `Sagents.Session.ensure_running/3` produces.
+- The generated `handle_agent_shutdown/2` destroyed the agent subscription rather
+  than letting presence-driven recovery restore it, and cleared `agent_id`,
+  breaking `handle_conversation_title_generated/3`.
+- The generated interrupt handlers crashed on a duplicate question submission and
+  could resume with a fabricated HITL decision on a duplicate approval.
+
 ## v0.10.1
 
 Adds `:otel_attributes`, a flat map of your application's context (tenant, user,

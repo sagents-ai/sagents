@@ -306,6 +306,7 @@ defmodule Sagents.AgentSupervisor do
     message_preprocessor = Keyword.get(config, :message_preprocessor)
     presence_module = Keyword.get(config, :presence_module)
     initial_subscribers = Keyword.get(config, :initial_subscribers, [])
+    pending_resume = Keyword.get(config, :pending_resume)
 
     # Build AgentServer options
     agent_server_opts = [
@@ -362,6 +363,13 @@ defmodule Sagents.AgentSupervisor do
     agent_server_opts =
       if presence_module,
         do: Keyword.put(agent_server_opts, :presence_module, presence_module),
+        else: agent_server_opts
+
+    # Add pending_resume if provided (an interrupt answer submitted while the
+    # agent was asleep, applied at boot before the initial status broadcast)
+    agent_server_opts =
+      if pending_resume,
+        do: Keyword.put(agent_server_opts, :pending_resume, pending_resume),
         else: agent_server_opts
 
     # Build child specifications

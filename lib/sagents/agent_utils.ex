@@ -282,6 +282,96 @@ defmodule Sagents.AgentUtils do
   end
 
   @doc """
+  Changes a host should merge when the agent process goes away.
+
+  Takes the host's state map and the `{:agent_shutdown, shutdown_data}`
+  payload (see `Sagents.AgentServer` for its shape).
+
+  ## Liveness is not status
+
+  `agent_status` describes **what the conversation is waiting on**.
+  `agent_alive?` describes **whether a producer process is backing this
+  session right now**. They are independent facts, and conflating them is
+  what loses an open question when the agent naps: the author still owes an
+  answer, so the conversation is still `:interrupted`, even though nothing
+  is running.
+
+  Hosts should therefore carry both keys:
+
+  - merge `agent_alive?: true` in every `handle_status_*` handler (an
+    inbound agent event is proof of life)
+  - merge `agent_alive?: false` here, and in the `:DOWN` handler
+  - gate "wake the agent" affordances on `agent_alive?`, not on
+    `agent_status == :not_running`
+
+  ## Behaviour
+
+  - The session has a pending interrupt and
+    `shutdown_data.interrupt_restorable` is `true`: keep every `pending_*`
+    key, keep `:interrupt_data`, and keep `agent_status: :interrupted`.
+    Returns only `%{agent_alive?: false, loading: false, streaming_delta:
+    nil}`. The prompt stays on screen; answering it wakes an agent that boots
+    straight back into `:interrupted` (see
+    `Sagents.Session.resume/4`).
+  - Otherwise: today's behaviour, `cleared_interrupt_changes/0` plus
+    `agent_status: :not_running`.
+  - `:interrupt_restorable` **absent** (an agent predating this field): treated
+    as not restorable. A version-skewed pair degrades to the old
+    clear-everything behaviour rather than to a prompt no agent can accept.
+
+  Idempotent: a shutdown delivers this event more than once, and every
+  delivery carries the same fields, so re-merging the result is a no-op.
+
+  ## What this does *not* do
+
+  It does not touch the `Sagents.Subscriber` subs map. Unsubscribing here
+  would delete the entry, and `Sagents.Subscriber.handle_presence_diff/3`
+  only revives entries in the `:pending` state, so the subscription could
+  never come back without a remount. Leave it alone:
+  `handle_publisher_down/3` flips it to `:pending` on the `:DOWN` that is
+  already on its way, and the next presence arrival re-subscribes. That is
+  the designed recovery path and exactly what is wanted after a wake.
+
+  It also does not clear `:agent_id`. That is a pure function of the
+  conversation id, it is what the host needs in order to wake the agent
+  again, and nil-ing it breaks any handler that compares an inbound event's
+  agent id against it.
+
+  ## Example
+
+      def handle_agent_shutdown(state, shutdown_data) do
+        AgentUtils.shutdown_session_changes(state, shutdown_data)
+      end
+
+  """
+  @spec shutdown_session_changes(map(), map()) :: map()
+  def shutdown_session_changes(state, shutdown_data)
+      when is_map(state) and is_map(shutdown_data) do
+    if pending_interrupt?(state) and Map.get(shutdown_data, :interrupt_restorable) == true do
+      # Dormant, but the conversation is still waiting on the author.
+      %{agent_alive?: false, loading: false, streaming_delta: nil}
+    else
+      Map.merge(cleared_interrupt_changes(), %{
+        agent_alive?: false,
+        agent_status: :not_running,
+        loading: false,
+        streaming_delta: nil
+      })
+    end
+  end
+
+  # A host is displaying an interrupt if it has interrupt_data and at least
+  # one derived pending_* key populated. Checking the derived keys (rather
+  # than agent_status alone) makes this correct on a redelivery, where the
+  # first call already collapsed the session to :not_running.
+  defp pending_interrupt?(state) do
+    Map.get(state, :interrupt_data) != nil and
+      (Map.get(state, :pending_question) != nil or
+         Map.get(state, :pending_halt) != nil or
+         (Map.get(state, :pending_tools) || []) != [])
+  end
+
+  @doc """
   Compute the state transition for a single HITL approve/reject decision
   in a host's pending-tool list.
 

@@ -585,15 +585,55 @@ defmodule Sagents.State do
 
   defp maybe_demote(other, _middleware), do: other
 
+  @doc """
+  Whether an `interrupt_data` payload can be rebuilt after the agent process
+  goes away.
+
+  This is the authoritative answer, dispatched through each middleware's
+  `c:Sagents.Middleware.restorable_interrupt?/1` callback. It is the same
+  predicate `clean_stale_interrupts/2` uses to decide which interrupted tool
+  results survive a cold boot, so a caller that consults it can never drift
+  from what the next boot will actually do.
+
+  Rules:
+
+  - `nil` (never persisted, decode failed, or written by older code) is not
+    restorable.
+  - `:multiple_interrupts` is restorable only if **every** sub-interrupt is
+    claimed by some middleware. Sub-agent approvals and `ask_user` questions
+    can mix in the same wrapper, so a partial restore would silently drop
+    some of them. An empty `:interrupts` list is not restorable: there is
+    nothing for a resume to answer. (The wrapper is only ever built from two
+    or more results, so this is a degenerate shape in practice.)
+  - Any other map is restorable if at least one middleware entry claims it.
+  - An empty `middleware_entries` list is never restorable, matching
+    `clean_stale_interrupts/2`.
+
+  Hosts do not normally call this directly. The AgentServer evaluates it once
+  on the way out and reports the answer as `:interrupt_restorable` on the
+  `{:agent_shutdown, _}` event, which is the only moment the question is
+  asked (see `Sagents.AgentUtils.shutdown_session_changes/2`).
+
+  ## Example
+
+      State.interrupt_restorable?(%{type: :ask_user_question}, agent.middleware)
+      # => true
+
+  """
+  @spec interrupt_restorable?(map() | nil, [Sagents.MiddlewareEntry.t()]) :: boolean()
+  def interrupt_restorable?(interrupt_data, middleware_entries)
+
+  def interrupt_restorable?(nil, _middleware), do: false
+
   # `:multiple_interrupts` is restorable if *every* sub-interrupt is
   # claimed by some middleware. Sub-agents and ask_user questions can mix in
   # the same wrapper, so partial restore would silently drop some questions.
-  defp interrupt_restorable?(%{type: :multiple_interrupts, interrupts: subs}, middleware)
-       when is_list(subs) do
-    Enum.all?(subs, &any_middleware_claims?(&1, middleware))
+  def interrupt_restorable?(%{type: :multiple_interrupts, interrupts: subs}, middleware)
+      when is_list(subs) and is_list(middleware) do
+    subs != [] and Enum.all?(subs, &any_middleware_claims?(&1, middleware))
   end
 
-  defp interrupt_restorable?(data, middleware) when is_map(data) do
+  def interrupt_restorable?(data, middleware) when is_map(data) and is_list(middleware) do
     any_middleware_claims?(data, middleware)
   end
 

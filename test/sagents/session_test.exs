@@ -463,4 +463,158 @@ defmodule Sagents.SessionTest do
       assert Session.running?(base_config(), 1)
     end
   end
+
+  # ===========================================================================
+  # resume/4
+  # ===========================================================================
+
+  describe "resume/4" do
+    # The host's process-level state map, as ensure_running/3 expects it.
+    defp resume_state(overrides \\ %{}) do
+      Map.merge(%{conversation_id: 1, current_scope: :my_scope, sagents_subs: %{}}, overrides)
+    end
+
+    test "a live interrupted agent takes the answer in exactly one call" do
+      fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
+      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+
+      test_pid = self()
+
+      stub(AgentServer, :resume, fn agent_id, resume_data ->
+        send(test_pid, {:resume_called, agent_id, resume_data})
+        :ok
+      end)
+
+      # No supervisor start at all on the fast path.
+      stub(AgentsDynamicSupervisor, :start_agent_sync, fn _opts ->
+        send(test_pid, :unexpected_start)
+        {:error, :should_not_be_called}
+      end)
+
+      assert :ok = Session.resume(base_config(), resume_state(), %{type: :answer})
+
+      assert_received {:resume_called, "conversation-1", %{type: :answer}}
+      refute_received :unexpected_start
+    end
+
+    test "a sleeping agent is started with the answer in hand" do
+      test_pid = self()
+      _fake_pid = stub_supervisor_ok(test_pid)
+
+      stub(AgentServer, :resume, fn _agent_id, _resume_data ->
+        {:error, :agent_not_running}
+      end)
+
+      assert {:ok, changes} =
+               Session.resume(base_config(), resume_state(), %{type: :answer, selected: ["yes"]})
+
+      assert changes.agent_id == "conversation-1"
+      assert Map.has_key?(changes, :sagents_subs)
+
+      # The answer rides into the boot rather than being stashed by the host
+      # and replayed against a broadcast.
+      assert_receive {:supervisor_config, opts}
+      assert opts[:pending_resume] == %{type: :answer, selected: ["yes"]}
+      assert opts[:initial_subscribers] == [{:main, self()}]
+    end
+
+    test "forwards :request_opts on the wake path so the woken agent is configured normally" do
+      test_pid = self()
+      _fake_pid = stub_supervisor_ok(test_pid)
+
+      stub(AgentServer, :resume, fn _agent_id, _resume_data -> {:error, :agent_not_running} end)
+
+      Session.resume(base_config(), resume_state(), %{type: :answer},
+        request_opts: [timezone: "America/Chicago"]
+      )
+
+      assert_received {:router_resolve, :my_scope, 1, [timezone: "America/Chicago"]}
+    end
+
+    test "a live agent in the wrong state errors instead of being woken" do
+      # Nothing to wake and nothing to resume. Routing this to the wake path
+      # would be a no-op that hides a real problem (e.g. the question was
+      # already answered from another tab).
+      fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
+      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      test_pid = self()
+
+      stub(AgentServer, :resume, fn _agent_id, _resume_data ->
+        {:error, "Cannot resume, server is not interrupted"}
+      end)
+
+      stub(AgentsDynamicSupervisor, :start_agent_sync, fn _opts ->
+        send(test_pid, :unexpected_start)
+        {:error, :should_not_be_called}
+      end)
+
+      assert {:error, "Cannot resume, server is not interrupted"} =
+               Session.resume(base_config(), resume_state(), %{type: :answer})
+
+      refute_received :unexpected_start
+    end
+
+    test "retries against the process when another caller won the wake race" do
+      # Between our failed resume and the start, another tab (or an admin wake)
+      # booted the agent. `:pending_resume` is a start-time option, so it was
+      # never consumed and the answer would otherwise be silently dropped.
+      test_pid = self()
+      fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
+
+      Process.put(:resume_calls, 0)
+
+      stub(AgentServer, :resume, fn agent_id, resume_data ->
+        case Process.get(:resume_calls) do
+          0 ->
+            Process.put(:resume_calls, 1)
+            {:error, :agent_not_running}
+
+          _already_retried ->
+            send(test_pid, {:retried, agent_id, resume_data})
+            :ok
+        end
+      end)
+
+      # The agent is up by the time Session.start/3 looks, so it returns
+      # started: false without ever reaching the supervisor.
+      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+
+      stub(AgentServer, :subscribe, fn _agent_id, _channel, _pid ->
+        {:ok, fake_pid, make_ref()}
+      end)
+
+      stub(AgentsDynamicSupervisor, :start_agent_sync, fn _opts ->
+        send(test_pid, :unexpected_start)
+        {:error, :should_not_be_called}
+      end)
+
+      assert {:ok, _changes} = Session.resume(base_config(), resume_state(), %{type: :answer})
+
+      assert_received {:retried, "conversation-1", %{type: :answer}}
+      refute_received :unexpected_start
+    end
+
+    test "passes a start failure through" do
+      stub(AgentServer, :get_pid, fn _agent_id -> nil end)
+      stub(AgentServer, :resume, fn _agent_id, _resume_data -> {:error, :agent_not_running} end)
+      Process.put(:spy_router_response, {:error, :no_route})
+
+      assert {:error, :no_route} = Session.resume(base_config(), resume_state(), %{type: :answer})
+    end
+  end
+
+  describe "start/3 session_info :started flag" do
+    test "true when this call created the process" do
+      _fake_pid = stub_supervisor_ok(self())
+
+      assert {:ok, %{started: true}} = Session.start(base_config(), 1, scope: :s)
+    end
+
+    test "false when an agent was already running" do
+      fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
+      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+
+      assert {:ok, %{started: false}} = Session.start(base_config(), 1, scope: :s)
+    end
+  end
 end

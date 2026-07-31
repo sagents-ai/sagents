@@ -68,7 +68,8 @@ defmodule Sagents.Session do
   @type session_info :: %{
           agent_id: String.t(),
           pid: pid(),
-          conversation_id: term()
+          conversation_id: term(),
+          started: boolean()
         }
 
   @doc """
@@ -76,6 +77,12 @@ defmodule Sagents.Session do
 
   Idempotent: if an agent is already running for `conversation_id`, returns
   the existing session info without consulting the router or factory again.
+
+  `session_info.started` distinguishes the two: `true` when this call created
+  the process, `false` when it found one already up. Callers that pass
+  start-time-only options (`:initial_subscribers`, `:pending_resume`) need
+  this, because those options are consumed by `init/1` and are silently
+  ignored on the already-running path.
 
   ## Options
 
@@ -85,6 +92,9 @@ defmodule Sagents.Session do
   - `:initial_subscribers` — list of `{channel, pid}` tuples seeded as
     subscribers before the agent's `init/1` returns. Use to atomically
     start-and-subscribe.
+  - `:pending_resume` — a resume payload applied during boot, before the
+    initial status broadcast. See `resume/4`, which is the supported way to
+    set this.
   """
   @spec start(config(), conversation_id :: term(), opts :: keyword()) ::
           {:ok, session_info()} | {:error, term()}
@@ -102,7 +112,8 @@ defmodule Sagents.Session do
          %{
            agent_id: agent_id,
            pid: pid,
-           conversation_id: conversation_id
+           conversation_id: conversation_id,
+           started: false
          }}
     end
   end
@@ -136,6 +147,16 @@ defmodule Sagents.Session do
   @spec ensure_running(config(), state_map :: map(), opts :: keyword()) ::
           {:ok, %{sagents_subs: map(), agent_id: String.t()}} | {:error, term()}
   def ensure_running(config, state, opts \\ []) when is_map(state) do
+    case do_ensure_running(config, state, opts) do
+      {:ok, changes, _session_info} -> {:ok, changes}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Same as ensure_running/3 but also returns the session_info, so callers that
+  # passed start-time-only options can tell whether their options were consumed
+  # by a fresh boot or dropped because an agent was already up.
+  defp do_ensure_running(config, state, opts) do
     conversation_id = Map.fetch!(state, :conversation_id)
     agent_id = config.agent_id_fun.(conversation_id)
     subs = Map.get(state, :sagents_subs, %{})
@@ -143,18 +164,121 @@ defmodule Sagents.Session do
     start_opts = [
       scope: Map.fetch!(state, :current_scope),
       request_opts: Keyword.get(opts, :request_opts, []),
-      initial_subscribers: [{:main, self()}]
+      initial_subscribers: [{:main, self()}],
+      pending_resume: Keyword.get(opts, :pending_resume)
     ]
 
     case start(config, conversation_id, start_opts) do
-      {:ok, %{pid: pid}} ->
+      {:ok, %{pid: pid} = session_info} ->
         new_subs =
           case Map.get(subs, {:agent, agent_id}) do
             %{state: :subscribed, server_pid: ^pid} -> subs
             _other -> Subscriber.subscribe_to_agent(subs, agent_id)
           end
 
-        {:ok, %{sagents_subs: new_subs, agent_id: agent_id}}
+        {:ok, %{sagents_subs: new_subs, agent_id: agent_id}, session_info}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Answer a pending interrupt, waking the agent first if it has gone to sleep.
+
+  Use this everywhere a host would otherwise call
+  `Sagents.AgentServer.resume/2` directly. Interrupts are durable: the
+  persisted state carries `interrupt_data`, and a fresh boot rebuilds it and
+  comes up `:interrupted`. So "the agent is not running" is not a reason an
+  answer has to fail — it is only a reason to start a process to take it.
+
+  `state` is the host's process-level map, with the same required keys as
+  `ensure_running/3` (`:conversation_id`, `:current_scope`, optionally
+  `:sagents_subs`).
+
+  ## Options
+
+  - `:request_opts` — forwarded verbatim to `ensure_running/3` on the wake
+    path. Pass the same per-request data you pass when starting a session
+    (timezone, tool context, and so on); an agent woken to take an answer is
+    configured exactly like one woken any other way.
+
+  ## Returns
+
+  - `:ok` — the answer was delivered, or the agent was started with the
+    answer in hand.
+  - `{:ok, changes}` — same, plus the state-map changes to merge (currently
+    the subscription bookkeeping from a wake). Callers that ignore the
+    second element still behave correctly, but will re-subscribe on their
+    next `ensure_running/3`.
+  - `{:error, reason}` — passed through. Note a **live** agent that is not
+    interrupted returns an error rather than being woken, because there is
+    nothing to wake and nothing to resume.
+
+  ## Ordering
+
+  On the wake path this does not poll, retry on a timer, or wait for a
+  broadcast. `Sagents.AgentsDynamicSupervisor.start_agent_sync/1` blocks
+  until the agent is registered, the boot status is computed inside
+  `init/1`, and a `GenServer.call` is serialized after `init/1` and
+  `handle_continue/2`. The `:pending_resume` option carries the answer into
+  that boot, so the woken agent applies it before it broadcasts anything:
+  subscribers see a single `{:status_changed, :running, nil}` rather than an
+  `:interrupted` snapshot for a question that is already answered.
+
+  ## Example
+
+      case Session.resume(config, socket.assigns, response, request_opts: opts) do
+        :ok ->
+          assign(socket, answered_changes)
+
+        {:ok, changes} ->
+          socket |> assign(changes) |> assign(answered_changes)
+
+        {:error, reason} ->
+          put_flash(socket, :error, "Could not submit response: \#{inspect(reason)}")
+      end
+
+  """
+  @spec resume(config(), state_map :: map(), resume_data :: term(), opts :: keyword()) ::
+          :ok | {:ok, %{sagents_subs: map(), agent_id: String.t()}} | {:error, term()}
+  def resume(config, state, resume_data, opts \\ []) when is_map(state) do
+    conversation_id = Map.fetch!(state, :conversation_id)
+    agent_id = config.agent_id_fun.(conversation_id)
+
+    # Ask the agent, not the host's assigns. Checking at call time also covers
+    # a crash that never broadcast a shutdown, and keeps the common case (a
+    # live, interrupted agent) at exactly one call.
+    case AgentServer.resume(agent_id, resume_data) do
+      :ok ->
+        :ok
+
+      {:error, :agent_not_running} ->
+        wake_and_resume(config, state, agent_id, resume_data, opts)
+
+      {:error, _reason} = error ->
+        # A live agent in the wrong state, or any other refusal. Waking would
+        # be a no-op and would hide a real problem, so pass it through.
+        error
+    end
+  end
+
+  defp wake_and_resume(config, state, agent_id, resume_data, opts) do
+    start_opts = Keyword.put(opts, :pending_resume, resume_data)
+
+    case do_ensure_running(config, state, start_opts) do
+      {:ok, changes, %{started: true}} ->
+        # We booted the agent; init/1 took the answer with it.
+        {:ok, changes}
+
+      {:ok, changes, %{started: false}} ->
+        # Someone else (another tab, an admin wake) won the race and started
+        # the agent between our failed resume and this call, so `:pending_resume`
+        # was never consumed. The agent is up now, so just ask it.
+        case AgentServer.resume(agent_id, resume_data) do
+          :ok -> {:ok, changes}
+          {:error, reason} -> {:error, reason}
+        end
 
       {:error, reason} ->
         {:error, reason}
@@ -193,6 +317,7 @@ defmodule Sagents.Session do
     scope = Keyword.get(opts, :scope)
     request_opts = Keyword.get(opts, :request_opts, [])
     initial_subscribers = Keyword.get(opts, :initial_subscribers, [])
+    pending_resume = Keyword.get(opts, :pending_resume)
 
     Logger.info("Starting agent session for conversation #{inspect(conversation_id)}")
 
@@ -218,6 +343,7 @@ defmodule Sagents.Session do
           agent,
           state,
           initial_subscribers,
+          pending_resume,
           Keyword.get(session_opts, :supervisor_opts, [])
         )
 
@@ -298,6 +424,7 @@ defmodule Sagents.Session do
          agent,
          state,
          initial_subscribers,
+         pending_resume,
          supervisor_opts
        ) do
     presence_tracking = [
@@ -318,7 +445,8 @@ defmodule Sagents.Session do
       conversation_id: conversation_id,
       agent_persistence: config.agent_persistence,
       display_message_persistence: config.display_message_persistence,
-      initial_subscribers: initial_subscribers
+      initial_subscribers: initial_subscribers,
+      pending_resume: pending_resume
     ]
     # Merge factory-supplied supervisor_opts (e.g. :message_preprocessor) last
     # so factories CAN override base defaults if they have reason to. The
@@ -330,7 +458,8 @@ defmodule Sagents.Session do
     %{
       agent_id: agent_id,
       pid: AgentServer.get_pid(agent_id),
-      conversation_id: conversation_id
+      conversation_id: conversation_id,
+      started: true
     }
   end
 

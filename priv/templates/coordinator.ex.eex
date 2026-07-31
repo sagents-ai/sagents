@@ -101,6 +101,25 @@ defmodule <%= module %> do
     do: Sagents.Session.ensure_running(@config, state, request_opts: request_opts)
 
   @doc """
+  Answer a pending interrupt, waking the agent first if it has gone to sleep.
+
+  Use this everywhere you would otherwise call `Sagents.AgentServer.resume/2`
+  directly. Interrupts are durable, so an agent that napped while the author
+  was composing an answer is only a reason to start a process to take it, not
+  a reason to lose the answer.
+
+  Returns `:ok`, `{:ok, changes}` (merge them: they carry subscription
+  bookkeeping from the wake), or `{:error, reason}`. See
+  `Sagents.Session.resume/4`.
+
+      <%= module %>.resume_agent_session(socket.assigns, response,
+        timezone: socket.assigns.timezone
+      )
+  """
+  def resume_agent_session(state, resume_data, request_opts \\ []),
+    do: Sagents.Session.resume(@config, state, resume_data, request_opts: request_opts)
+
+  @doc """
   Stop an agent session for a conversation.
 
   Note: agents automatically stop after inactivity timeout. Only call this

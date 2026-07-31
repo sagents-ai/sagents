@@ -98,8 +98,23 @@ defmodule Sagents.AgentServer do
 
   ### Shutdown Events
   - `{:agent, {:agent_shutdown, shutdown_data}}` - Agent is shutting down
+
+    A single shutdown delivers this event more than once (the trigger handler
+    fires it, then `terminate/2` fires it again). Every site emits the same
+    map shape, so consumers can handle it with one idempotent clause:
+
     - `shutdown_data.agent_id` - The agent identifier
-    - `shutdown_data.reason` - Shutdown reason (`:inactivity` | `:no_viewers`)
+    - `shutdown_data.reason` - Shutdown reason (`:inactivity` | `:no_viewers`
+      | the `terminate/2` reason term)
+    - `shutdown_data.status` - The server's status at shutdown
+    - `shutdown_data.interrupt_restorable` - `true` when the server is
+      shutting down `:interrupted` **and** the pending interrupt can be
+      rebuilt on the next boot (see `Sagents.State.interrupt_restorable?/2`).
+      A host showing an interrupt prompt can keep it on screen when this is
+      `true`, because answering it will wake an agent that boots straight
+      back into `:interrupted`. `false` whenever there is no interrupt, or
+      the interrupt is process-bound (e.g. a sub-agent approval). See
+      `Sagents.AgentUtils.shutdown_session_changes/2`.
     - `shutdown_data.last_activity_at` - DateTime of last activity
     - `shutdown_data.shutdown_at` - DateTime when shutdown was initiated
 
@@ -314,7 +329,25 @@ defmodule Sagents.AgentServer do
       # written the flag as `true` and not yet cleared it; `false` means
       # the flag is clear (or we have never written it). Used to suppress
       # redundant callback invocations.
-      interrupt_persisted: false
+      interrupt_persisted: false,
+      # A user's answer to a pending interrupt, submitted while this agent was
+      # asleep, waiting to be applied at boot.
+      #
+      # Holds whatever `resume/2` accepts. That term is middleware-owned, so the
+      # shape depends on what asked the question:
+      #
+      #     AskUserQuestion  %{type: :answer, tool_call_id: "call_1", selected: ["pg"]}
+      #                      (a list of those when several questions are pending)
+      #     HumanInTheLoop   [%{type: :approve}, %{type: :reject}]
+      #
+      # Set only by `Sagents.Session.resume/4`, and only after `resume/2` returned
+      # `{:error, :agent_not_running}`. Read exactly once, in
+      # handle_continue(:broadcast_initial_state, _): applied if we booted
+      # `:interrupted`, dropped with a warning otherwise, and nil'd either way. So
+      # no handle_call/handle_info ever sees it set. Consuming it before the first
+      # broadcast is what lets a woken agent announce `:running` rather than an
+      # `:interrupted` snapshot it is about to leave. Never persisted.
+      pending_resume: nil
     ]
 
     @type t :: %__MODULE__{
@@ -347,6 +380,7 @@ defmodule Sagents.AgentServer do
             restored: boolean(),
             interrupt_persisted: boolean(),
             pending_message: LangChain.Message.t() | nil,
+            pending_resume: term() | nil,
             consecutive_auto_executions: non_neg_integer()
           }
   end
@@ -377,6 +411,21 @@ defmodule Sagents.AgentServer do
   - `:conversation_id` - Optional conversation identifier for message persistence (default: nil)
   - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` for state snapshots (default: nil)
   - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` for display messages (default: nil)
+  - `:pending_resume` - A resume payload to apply during boot, for an answer
+    submitted while no process was alive to take it. Applied in
+    `handle_continue/2` **before** the initial status broadcast, so a server
+    that boots `:interrupted` and consumes this announces `:running` once,
+    rather than announcing an `:interrupted` snapshot it is about to leave.
+    Discarded with a warning if the server boots into any other status (the
+    interrupt was demoted as non-restorable, or answered elsewhere first).
+    Prefer `Sagents.Session.resume/4`, which sets this for you and handles
+    the live-agent and already-woken cases. Default: `nil`.
+
+    Note it lives in the child spec, so a supervisor restart re-evaluates it
+    against freshly loaded persisted state. If the resume already completed,
+    that state no longer carries an interrupt and the payload is discarded;
+    if the run died before completing, re-applying it is the correct
+    recovery. The supervisor's restart intensity bounds a pathological loop.
 
   ## Examples
 
@@ -1584,7 +1633,10 @@ defmodule Sagents.AgentServer do
       # A message that was queued when the previous incarnation of this server
       # died. It drains at the next clean run boundary, exactly as if it had
       # been queued a moment ago.
-      pending_message: Keyword.get(opts, :pending_message)
+      pending_message: Keyword.get(opts, :pending_message),
+      # An interrupt response submitted while no process was alive to take it.
+      # Applied in handle_continue/2 before the first broadcast.
+      pending_resume: Keyword.get(opts, :pending_resume)
     }
 
     # Start the inactivity timer
@@ -1629,6 +1681,71 @@ defmodule Sagents.AgentServer do
        do: true
 
   defp live_interrupt?(_other), do: false
+
+  # Transition an :interrupted server into a running resume: bump execution_seq
+  # so callbacks from the prior run can't pollute the rolling state, clear the
+  # interrupt, reset the activity timer, and spawn the resume task.
+  #
+  # Deliberately does NOT broadcast. The two callers disagree on when the status
+  # event should go out: the {:resume, _} handle_call emits it immediately,
+  # while the boot path folds it into the single initial broadcast so a waking
+  # agent never announces an :interrupted status it is about to leave.
+  defp start_resume(%ServerState{status: :interrupted} = server_state, resume_data) do
+    # Capture interrupt_data before clearing -- resume_agent needs it for
+    # display message updates (e.g., marking ask_user tools as completed).
+    resolved_interrupt_data = server_state.interrupt_data
+
+    new_state = %{
+      server_state
+      | status: :running,
+        interrupt_data: nil,
+        execution_seq: server_state.execution_seq + 1
+    }
+
+    new_state = reset_inactivity_timer(new_state)
+
+    # Resume execution async (callbacks are built in resume_agent)
+    task =
+      Task.async(fn ->
+        resume_agent(new_state, resume_data, resolved_interrupt_data)
+      end)
+
+    Map.put(new_state, :task, task)
+  end
+
+  # Consume a resume handed to us at start time by `Sagents.Session.resume/4`.
+  #
+  # The answer was submitted against a conversation whose agent had gone to
+  # sleep. The interrupt itself is durable, so this boot has already rebuilt it
+  # via derive_boot_status/1 and we can take the answer immediately.
+  defp apply_pending_resume(%ServerState{pending_resume: nil} = server_state), do: server_state
+
+  defp apply_pending_resume(
+         %ServerState{pending_resume: resume_data, status: :interrupted} = server_state
+       ) do
+    Logger.info(
+      "Agent #{server_state.agent.agent_id} applying a resume submitted while it was not running"
+    )
+
+    %{server_state | pending_resume: nil}
+    |> start_resume(resume_data)
+  end
+
+  # Booted into some other status: the interrupt was demoted as non-restorable
+  # by clean_stale_interrupts/2, or it was answered elsewhere (another tab, the
+  # admin view) before this boot. Drop the answer and let the honest boot status
+  # go out — the host's ordinary non-interrupted status handler clears the
+  # prompt, which is the correct outcome. Never silently apply it to whatever
+  # the agent is doing now.
+  defp apply_pending_resume(%ServerState{} = server_state) do
+    Logger.warning(
+      "Agent #{server_state.agent.agent_id} was given a pending resume but booted " <>
+        ":#{server_state.status}, not :interrupted. Discarding the resume: the interrupt " <>
+        "was either answered elsewhere or could not be restored."
+    )
+
+    %{server_state | pending_resume: nil}
+  end
 
   # Mirror of LangChain's `extract_interrupt_data/1` — keep these in lockstep
   # so restored and freshly-fired interrupts surface identically.
@@ -1675,6 +1792,15 @@ defmodule Sagents.AgentServer do
     if server_state.restored do
       broadcast_event(server_state, {:node_transferred, %{to_node: node()}})
     end
+
+    # Apply a resume that was submitted while no process was alive to take it,
+    # BEFORE the initial status broadcast. This is deliberately ordered: the
+    # boot broadcast is how every subscriber learns current state, so it must
+    # fire, unconditionally, exactly once — but it should report the status
+    # this server genuinely has once it has consumed everything it was handed.
+    # Broadcasting :interrupted here and :running a microsecond later would
+    # make every subscriber re-present a question that is already answered.
+    server_state = apply_pending_resume(server_state)
 
     # Broadcast initial status so UI knows agent is ready. When restored from
     # persisted state with a surviving (restorable) interrupt, this fires
@@ -1765,32 +1891,12 @@ defmodule Sagents.AgentServer do
         _from,
         %ServerState{status: :interrupted} = server_state
       ) do
-    # Capture interrupt_data before clearing -- resume_agent needs it for
-    # display message updates (e.g., marking ask_user tools as completed).
-    resolved_interrupt_data = server_state.interrupt_data
-
-    # Transition back to running. Bump execution_seq so callbacks from a prior
-    # run can't pollute the rolling state.
-    new_state = %{
-      server_state
-      | status: :running,
-        interrupt_data: nil,
-        execution_seq: server_state.execution_seq + 1
-    }
+    new_state = start_resume(server_state, resume_data)
 
     broadcast_event(new_state, {:status_changed, :running, nil})
     update_presence_status(new_state, :running)
 
-    # Reset inactivity timer on resume
-    new_state = reset_inactivity_timer(new_state)
-
-    # Resume execution async (callbacks are built in resume_agent)
-    task =
-      Task.async(fn ->
-        resume_agent(new_state, resume_data, resolved_interrupt_data)
-      end)
-
-    {:reply, :ok, Map.put(new_state, :task, task)}
+    {:reply, :ok, new_state}
   end
 
   @impl true
@@ -2255,16 +2361,7 @@ defmodule Sagents.AgentServer do
     Logger.info("Agent #{agent_id} shutting down due to inactivity")
 
     # Broadcast shutdown event
-    broadcast_event(
-      server_state,
-      {:agent_shutdown,
-       %{
-         agent_id: agent_id,
-         reason: :inactivity,
-         last_activity_at: server_state.last_activity_at,
-         shutdown_at: DateTime.utc_now()
-       }}
-    )
+    broadcast_event(server_state, {:agent_shutdown, shutdown_payload(server_state, :inactivity)})
 
     {:noreply, stop_supervisor(server_state)}
   end
@@ -2275,16 +2372,7 @@ defmodule Sagents.AgentServer do
     Logger.info("Agent #{agent_id} shutting down - idle with no viewers")
 
     # Broadcast shutdown event
-    broadcast_event(
-      server_state,
-      {:agent_shutdown,
-       %{
-         agent_id: agent_id,
-         reason: :no_viewers,
-         last_activity_at: server_state.last_activity_at,
-         shutdown_at: DateTime.utc_now()
-       }}
-    )
+    broadcast_event(server_state, {:agent_shutdown, shutdown_payload(server_state, :no_viewers)})
 
     {:noreply, stop_supervisor(server_state)}
   end
@@ -2395,10 +2483,7 @@ defmodule Sagents.AgentServer do
     try do
       broadcast_event(server_state, {:node_transferring, %{from_node: node()}})
 
-      broadcast_event(
-        server_state,
-        {:agent_shutdown, %{reason: reason, status: server_state.status}}
-      )
+      broadcast_event(server_state, {:agent_shutdown, shutdown_payload(server_state, reason)})
     rescue
       _error -> :ok
     end
@@ -2409,6 +2494,36 @@ defmodule Sagents.AgentServer do
 
     :ok
   end
+
+  # Build the `{:agent_shutdown, payload}` map. Every emit site (the two
+  # timer-driven handlers and terminate/2) uses this, so a single shutdown
+  # delivers the same shape more than once and consumers need exactly one
+  # idempotent clause.
+  #
+  # `:interrupt_restorable` is the whole reason this is centralized. It is the
+  # only moment the question "can this pending interrupt survive the process
+  # dying?" is worth asking, and it is the only moment when both the
+  # interrupt_data and the agent's middleware are still in scope to answer it.
+  # A host that keeps an interrupt prompt on screen past shutdown must not
+  # guess: a mirrored predicate silently drifts the day the middleware rules
+  # change, and the failure mode is offering the user a prompt no agent can
+  # ever accept.
+  defp shutdown_payload(%ServerState{} = server_state, reason) do
+    %{
+      agent_id: server_state.agent.agent_id,
+      reason: reason,
+      status: server_state.status,
+      interrupt_restorable: interrupt_restorable?(server_state),
+      last_activity_at: server_state.last_activity_at,
+      shutdown_at: DateTime.utc_now()
+    }
+  end
+
+  defp interrupt_restorable?(%ServerState{status: :interrupted} = server_state) do
+    State.interrupt_restorable?(server_state.interrupt_data, server_state.agent.middleware)
+  end
+
+  defp interrupt_restorable?(%ServerState{}), do: false
 
   # Wait for an active Task to complete, with a timeout
   defp wait_for_task_completion(%Task{ref: ref}, max_wait_ms) do

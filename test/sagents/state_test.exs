@@ -661,6 +661,95 @@ defmodule Sagents.StateTest do
     end
   end
 
+  describe "interrupt_restorable?/2" do
+    setup do
+      %{
+        ask: Sagents.Middleware.init_middleware(Sagents.Middleware.AskUserQuestion),
+        hitl: Sagents.Middleware.init_middleware(Sagents.Middleware.HumanInTheLoop),
+        halt: Sagents.Middleware.init_middleware(Sagents.Middleware.Haltable)
+      }
+    end
+
+    test "nil is never restorable", %{ask: ask} do
+      refute State.interrupt_restorable?(nil, [ask])
+    end
+
+    test "an empty middleware list never restores anything" do
+      refute State.interrupt_restorable?(%{type: :ask_user_question}, [])
+    end
+
+    test "a question is restorable when AskUserQuestion is in the stack", %{ask: ask} do
+      assert State.interrupt_restorable?(%{type: :ask_user_question, question: "?"}, [ask])
+    end
+
+    test "a question is not restorable without AskUserQuestion", %{halt: halt} do
+      refute State.interrupt_restorable?(%{type: :ask_user_question, question: "?"}, [halt])
+    end
+
+    test "a halt is restorable when Haltable is in the stack", %{halt: halt} do
+      assert State.interrupt_restorable?(%{type: :halt, message: "done"}, [halt])
+    end
+
+    test "a sub-agent approval is never restorable: its chain dies with the process",
+         %{ask: ask, hitl: hitl, halt: halt} do
+      refute State.interrupt_restorable?(
+               %{type: :subagent_hitl, sub_agent_id: "sa-1"},
+               [ask, hitl, halt]
+             )
+    end
+
+    test ":multiple_interrupts needs every sub-interrupt claimed", %{ask: ask, halt: halt} do
+      all_questions = %{
+        type: :multiple_interrupts,
+        interrupts: [%{type: :ask_user_question}, %{type: :ask_user_question}]
+      }
+
+      mixed = %{
+        type: :multiple_interrupts,
+        interrupts: [%{type: :ask_user_question}, %{type: :subagent_hitl, sub_agent_id: "sa-1"}]
+      }
+
+      assert State.interrupt_restorable?(all_questions, [ask, halt])
+      # Partial restore is a footgun: a resumed agent would dispatch responses
+      # that don't all have valid targets.
+      refute State.interrupt_restorable?(mixed, [ask, halt])
+    end
+
+    test "a question/halt mix is restorable when both middleware are present",
+         %{ask: ask, halt: halt} do
+      data = %{
+        type: :multiple_interrupts,
+        interrupts: [%{type: :ask_user_question}, %{type: :halt, message: "stop"}]
+      }
+
+      assert State.interrupt_restorable?(data, [ask, halt])
+      refute State.interrupt_restorable?(data, [ask])
+    end
+
+    test "an empty :multiple_interrupts wrapper is not restorable", %{ask: ask} do
+      # Degenerate shape (the wrapper is only ever built from 2+ results), but
+      # there would be nothing for a resume to answer.
+      refute State.interrupt_restorable?(%{type: :multiple_interrupts, interrupts: []}, [ask])
+    end
+
+    test "agrees with what clean_stale_interrupts/2 actually does", %{ask: ask} do
+      # The whole point of exposing this: a caller must never be able to decide
+      # "keep the prompt" for an interrupt the next boot will demote.
+      for data <- [
+            %{type: :ask_user_question, question: "?"},
+            %{type: :subagent_hitl, sub_agent_id: "sa-1"},
+            %{type: :multiple_interrupts, interrupts: [%{type: :ask_user_question}]}
+          ] do
+        state = build_interrupt_state(data)
+        [tool_msg] = State.clean_stale_interrupts(state, [ask]).messages
+        [result] = tool_msg.tool_results
+
+        assert result.is_interrupt == State.interrupt_restorable?(data, [ask]),
+               "mismatch for #{inspect(data)}"
+      end
+    end
+  end
+
   describe "cancel_pending_interrupts/1" do
     alias LangChain.Message.ToolResult
 
