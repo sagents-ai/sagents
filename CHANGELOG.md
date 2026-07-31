@@ -15,21 +15,29 @@ which wakes a sleeping agent and hands it the answer at boot.
 **No compile-time breakage**, and upgrading without touching host code is safe:
 everything behaves as v0.10.1 did, bug included. The fix is opt-in, because the
 affected modules were generated into your app. See
-[MIGRATION_PROMPT_v0.10.1_TO_v0.11.0.md](MIGRATION_PROMPT_v0.10.1_TO_v0.11.0.md)
+[MIGRATION_PROMPT_v0.10.x_TO_v0.11.0.md](MIGRATION_PROMPT_v0.10.x_TO_v0.11.0.md)
 — it is written to be handed to a coding agent.
+
+Full write-up in [#159](https://github.com/sagents-ai/sagents/pull/159).
 
 ### Added
 
 - `Sagents.Session.resume/4` — answer an interrupt, waking the agent if needed.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
 - `:pending_resume`, a start option applied during boot before the initial status
   broadcast, so a woken agent announces `:running` rather than an `:interrupted`
   snapshot it is about to leave.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
 - `Sagents.AgentUtils.shutdown_session_changes/2` and the `agent_alive?`
   subscriber-state key.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
 - `Sagents.State.interrupt_restorable?/2` is now public — the authoritative
   predicate for whether an interrupt survives a cold boot.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
 - `{:agent_shutdown, _}` payloads carry `:interrupt_restorable`.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
 - `Sagents.Session.start/3`'s `session_info` gained `:started`.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
 
 ### Changed
 
@@ -37,22 +45,27 @@ affected modules were generated into your app. See
   channel.** It is a *newly registered* subscriber hook, and an already-registered
   pid has nothing to resync. If you relied on re-subscribing to force a refresh,
   use `Sagents.AgentServer.get_info/1`. This is the only non-opt-in behaviour
-  change in the release.
+  change in the release. [#159](https://github.com/sagents-ai/sagents/pull/159)
 - All three `{:agent_shutdown, _}` emit sites now send the same shape.
   `terminate/2` previously sent only `%{reason:, status:}`, omitting the agent id
   hosts need to correlate the event. Additive for subset map patterns.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
 - An empty `:multiple_interrupts` wrapper is no longer treated as restorable.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
 
 ### Fixed
 
 - A process seeded via `:initial_subscribers` that then called `subscribe/3`
   received the boot status broadcast twice. This is the exact shape
   `Sagents.Session.ensure_running/3` produces.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
 - The generated `handle_agent_shutdown/2` destroyed the agent subscription rather
   than letting presence-driven recovery restore it, and cleared `agent_id`,
   breaking `handle_conversation_title_generated/3`.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
 - The generated interrupt handlers crashed on a duplicate question submission and
   could resume with a fabricated HITL decision on a duplicate approval.
+  [#159](https://github.com/sagents-ai/sagents/pull/159)
 
 ## v0.10.1
 
