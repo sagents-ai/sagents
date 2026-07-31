@@ -199,13 +199,47 @@ case Coordinator.resume_agent_session(socket.assigns, resume_data, request_opts)
     socket |> assign(session_changes) |> assign(changes) |> assign(running_changes)
 
   {:error, reason} ->
-    put_flash(socket, :error, "Could not submit response: #{inspect(reason)}")
+    # Log the term. Do not show it. A live agent in the wrong state, meaning
+    # someone answered from a second tab, returns "Cannot resume, server is not
+    # interrupted": an internal string, and one that says "agent", a word many
+    # products deliberately never put in front of a user.
+    Logger.error("resume failed: #{inspect(reason)}")
+    put_flash(socket, :error, "That response could not be saved. Please try again.")
 end
 ```
+
+Keep the log message and the flash message **separate**. It is tempting to build
+both from one `error_prefix`, and the result is a term dump in the user's face.
+The flash is a slot you are meant to write product copy into. The v0.11.0
+`AgentLiveHelpers` template passes these as two named values, `:log_label` and
+`:user_message`, for exactly this reason.
 
 Pass the **same `request_opts`** you pass to `ensure_agent_session_running/2`
 (timezone, tool context, whatever your FactoryConfig consumes). An agent woken to
 accept an answer must be configured exactly like one woken any other way.
+
+The only reliable way to guarantee that is **one function every start path reads**.
+The v0.11.0 `AgentLiveHelpers` template ships it as a public stub:
+
+```elixir
+# Generated. Fill in the body once; the resume funnel and the mount-time
+# auto-wake already read it.
+def agent_request_opts(_socket), do: []
+```
+
+**Route your own `ensure_agent_session_running/2` call sites through it too.**
+
+```
+grep -rn "ensure_agent_session_running" lib/ --include="*.ex"
+```
+
+Any call site computing its own options is a second copy of this decision. It
+compiles, it reads as finished, and it drifts: the two copies disagree about a
+missing assign or a default, and a host then boots agents on the resume and
+auto-wake paths configured *differently* from every other path. Nothing surfaces
+it: not the compiler, not your tests, not the manual check in "Verifying the
+migration". The symptom is an agent that behaves subtly wrong *only* when it was
+woken to take an answer.
 
 **Delete any "agent is no longer running" guard.** It looked like this:
 
@@ -260,9 +294,75 @@ a crash.
 
 ---
 
-### 6. Update the UI
+### 6. If you render a halt panel, make Dismiss wake the agent
 
-**6a. Gate any "wake the agent" affordance on liveness.**
+**Skip this step only if your app never renders `:pending_halt`.** Check first:
+
+```
+grep -rn "pending_halt" lib/ --include="*.ex" --include="*.heex"
+```
+
+A halt panel now **survives a shutdown**. That is intentional and matches a
+question, but it means the panel's Dismiss button must work against a dormant
+conversation, and `Sagents.AgentServer.dismiss_interrupt/1` talks to a live
+process: it returns `{:error, :agent_not_running}` when there is none.
+
+Route the dismissal through `Sagents.Session.dismiss/3`, the mirror of
+`Session.resume/4` for the interrupt that is *acknowledged* rather than answered.
+It tries the live agent first and, failing that, wakes one and dismisses against
+the halt rebuilt at boot.
+
+Add the Coordinator entry point next to `resume_agent_session/3`:
+
+```elixir
+def dismiss_agent_session(state, request_opts \\ []),
+  do: Sagents.Session.dismiss(@config, state, request_opts: request_opts)
+```
+
+Then route the panel's button through it. This is the generated
+`handle_halt_dismissal/1`, and the return has the same three shapes as a resume:
+
+```elixir
+def handle_halt_dismissal(socket) do
+  if is_nil(socket.assigns[:pending_halt]) do
+    # Duplicate event for an already-dismissed halt. Same guard as step 5.
+    socket
+  else
+    case Coordinator.dismiss_agent_session(socket.assigns, agent_request_opts(socket)) do
+      :ok ->
+        assign(socket, AgentUtils.cleared_interrupt_changes())
+
+      {:ok, session_changes} ->
+        socket
+        |> assign(session_changes)
+        |> assign(:agent_alive?, true)
+        |> assign(AgentUtils.cleared_interrupt_changes())
+
+      {:error, reason} ->
+        Logger.error("halt dismissal failed: #{inspect(reason)}")
+        put_flash(socket, :error, "That could not be dismissed. Please try again.")
+    end
+  end
+end
+```
+
+Pass the same `agent_request_opts/1` as every other start path, for the reason
+given in step 4.
+
+Note that an interrupt needing a real response (a question, a HITL batch) returns
+`{:error, "interrupt requires explicit response (use resume)"}` and is
+deliberately **not** woken. Only halts are dismissible.
+
+Do **not** "fix" this by having the host clear `:pending_halt` on shutdown. That
+makes every host re-answer a question `restorable_interrupt?/1` already answers,
+and it is a type-level mirror that drifts the moment a new interrupt type
+appears.
+
+---
+
+### 7. Update the UI
+
+**7a. Gate any "wake the agent" affordance on liveness.**
 
 ```
 grep -rn "agent_status == :not_running" lib/ --include="*.ex" --include="*.heex"
@@ -291,33 +391,45 @@ on the click that caused the wake rather than a round trip later:
 {:ok, changes} -> socket |> assign(changes) |> assign(:agent_alive?, true)
 ```
 
-**6b. Protect typed text, if your question form has free-text input.**
+**7b. Protect unsent user state in the question form.**
 
-Wrap the answer controls in an ignored region keyed on the question's
-`tool_call_id`:
+The rule: **the ignored region must contain every control that holds state the
+user has entered but not yet submitted**: text areas, radios, checkboxes. Wrap
+them in a region keyed on the question's `tool_call_id`:
 
 ```heex
 <div id={"question-body-#{@question.tool_call_id}"} phx-update="ignore">
-  <%!-- radios / checkboxes / textareas / submit --%>
+  <%!-- radios / checkboxes / textareas --%>
 </div>
 ```
 
 Any diff at all makes LiveView patch the container, and morphdom resyncs a
-`TEXTAREA`'s value from the server's HTML for every element that is not
-`document.activeElement`. The server never renders what the user typed, so an
-unrelated assign change wipes it — and this release guarantees one, because the
-shutdown flips `agent_alive?`.
+`TEXTAREA`'s value, and a radio's checked state, from the server's HTML for
+every element that is not `document.activeElement`. The server never renders what
+the user entered, so an unrelated assign change wipes it. This release
+*guarantees* such a change: the shutdown flips `agent_alive?`. This is reachable,
+not theoretical.
 
 Keying the id on `tool_call_id` is what still lets the *next* question in a batch
 render: morphdom replaces an ignored subtree only when its id changes. Ids are
-distinct per question on both the live and restored paths.
+distinct per question on both the live and restored paths, because a batch is
+several parallel `ask_user` calls, not one call carrying several questions.
 
-Keep anything without typed state (a Cancel button) **outside** the region so it
+Keep anything without unsent state (a Cancel button) **outside** the region so it
 can still re-render.
+
+**If your Submit button lives outside the region**, which is a reasonable layout
+because a long option list otherwise pushes Submit below the fold, then wrapping
+only the options band is correct, *but something must re-derive Submit's enabled
+state after the patch*. The footer re-renders with the server's `disabled` attribute
+while the preserved selection sits inside the ignored subtree, so the user picks
+an option, an unrelated assign changes, and Submit silently reverts to disabled
+with a valid selection on screen. A hook with an `updated()` callback that reads
+the current radio/checkbox state and sets `disabled` accordingly closes it.
 
 ---
 
-### 7. Check for re-subscribe-as-resync
+### 8. Check for re-subscribe-as-resync
 
 The one behavioural change in this release that is not opt-in:
 `on_subscribed/3` no longer fires for a pid already subscribed to that channel.
@@ -335,7 +447,7 @@ a crash are all unaffected — each is a genuinely new registration.
 
 ---
 
-### 8. Collapse duplicated shutdown-event handling
+### 9. Collapse duplicated shutdown-event handling
 
 All three `{:agent_shutdown, _}` emit sites now send the same map:
 
@@ -357,16 +469,27 @@ unchanged.
 
 ---
 
-### 9. Fix the tests that now fail
+### 10. Fix the tests that now fail
 
 This is the **only** place you get an automatic signal, and it is a good one.
 
-Any host test asserting the old shutdown behaviour will fail, for example:
+Two distinct failures to expect.
+
+**Shutdown assertions.** Any host test asserting the old behaviour will fail:
 
 ```elixir
 assert changes.agent_id == nil            # no longer true, and that is the fix
 assert changes.agent_status == :not_running   # no longer true for a restorable interrupt
 ```
+
+**Question fixtures missing `tool_call_id`.** If you have component or LiveView
+tests that build a question by hand, the keyed ignore region from step 7b now
+requires that key, and a fixture without it fails at render. Real questions always
+carry it: `Sagents.Middleware.AskUserQuestion` puts the originating tool call's
+id on the interrupt data, and `AgentUtils.interrupt_session_changes/1` passes the
+map through to `:pending_question` untouched. So this is a fixture that was always
+unfaithful and only now has something depending on the difference. Add the key
+rather than dropping it from the template.
 
 Rewrite them against the new contract. Worth adding, since these are pure
 state-map-in / changes-map-out functions needing no agent, DB, or LiveView:
@@ -399,6 +522,12 @@ The compiler cannot confirm this worked. Test it by hand:
 
    with **no** `{:status_changed, :interrupted, _}` between them.
 
+6. **If your app renders a halt panel, nap it too and confirm Dismiss still
+   works.** A halt is restorable, so the panel survives the nap exactly like the
+   question, and its Dismiss button is the one control that needs a live agent.
+   Without step 6 you get a panel that cannot be dismissed, and no other check in
+   this list catches it.
+
 To kill the agent instantly instead of waiting, use the same path the inactivity
 timer uses:
 
@@ -416,7 +545,13 @@ supervisor restarts it as a permanent child.
 If your generated modules are close to stock, the fastest route is to start from
 a clean workspace, re-run `mix sagents.setup` with the same options used
 originally, accept the overwrites, and diff your customizations back in. The
-v0.11.0 templates contain every change in steps 1 through 5.
+v0.11.0 templates contain every change in steps 1 through 6.
+
+Step 6 is covered on the Elixir side only: the templates generate
+`dismiss_agent_session/2` and `handle_halt_dismissal/1`, but no template renders
+a halt panel, so wiring your button's `phx-click` to that handler is still yours
+to do. Steps 7 through 10 are host UI and host tests, which no template covers
+either.
 
 If they have drifted, apply the steps by hand. Step 2 is the one that must not be
 skipped or half-applied.
