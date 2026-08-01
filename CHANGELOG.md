@@ -103,6 +103,47 @@ Full write-up in [#159](https://github.com/sagents-ai/sagents/pull/159).
   silently, and the symptom is an agent configured differently only on the paths
   that had to wake it. [#159](https://github.com/sagents-ai/sagents/pull/159)
 
+## v0.10.2
+
+Adds `:suppress_debug_events` on a sub-agent config. When set, that sub-agent
+type publishes none of its events on the parent's `:debug` channel: not the
+initial messages, not the inner LLM messages as they arrive, and not the full
+inner chain that a failed or cancelled run would otherwise republish.
+
+```elixir
+{Sagents.Middleware.SubAgent, [
+  model: model,
+  subagents: [
+    Sagents.SubAgent.Config.new!(%{
+      name: "pii-extractor",
+      description: "Extract structured fields from a sensitive document",
+      tools: [extract_tool],
+      suppress_debug_events: true
+    })
+  ]
+]}
+```
+
+The parent still receives the run's outcome as the `task` tool result, so only
+the observer fan-out is silenced. The setting is per sub-agent type and
+all-or-nothing. It does not apply to the general-purpose sub-agent, which is
+created dynamically and so has no config to carry the flag.
+
+This covers the `:debug` channel only. If you are reaching for it to keep
+sensitive content out of your observability stack, note that OpenTelemetry
+content capture is configured separately and globally through
+`LangChain.OpenTelemetry.setup/1`, and defaults to off.
+
+Defaults to `false`. Additive only: nothing changed arity or return type, and no
+migration is required.
+
+### Added
+
+- `:suppress_debug_events` on `Sagents.SubAgent.Config` and `Sagents.SubAgent`,
+  silencing every event that sub-agent would publish on the parent's `:debug`
+  channel.
+  [#158](https://github.com/sagents-ai/sagents/pull/158)
+
 ## v0.10.1
 
 Adds `:otel_attributes`, a flat map of your application's context (tenant, user,

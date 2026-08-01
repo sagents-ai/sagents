@@ -1591,6 +1591,73 @@ defmodule Sagents.SubAgentTest do
     end
   end
 
+  describe "suppress_debug_events" do
+    test "Config.new casts suppress_debug_events" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        system_prompt: "You are a test agent",
+        tools: [test_tool()],
+        suppress_debug_events: true
+      }
+
+      assert {:ok, config} = SubAgentConfig.new(attrs)
+      assert config.suppress_debug_events == true
+    end
+
+    test "Config.new defaults suppress_debug_events to false" do
+      attrs = %{
+        name: "test-agent",
+        description: "A test agent",
+        system_prompt: "You are a test agent",
+        tools: [test_tool()]
+      }
+
+      assert {:ok, config} = SubAgentConfig.new(attrs)
+      assert config.suppress_debug_events == false
+    end
+
+    test "new_from_config passes suppress_debug_events to the SubAgent struct" do
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: test_agent(),
+          parent_state: %{messages: []},
+          suppress_debug_events: true
+        )
+
+      assert %SubAgent{suppress_debug_events: true} = subagent
+    end
+
+    test "new_from_compiled passes suppress_debug_events to the SubAgent struct" do
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          compiled_agent: test_agent(),
+          parent_state: %{messages: []},
+          suppress_debug_events: true
+        )
+
+      assert %SubAgent{suppress_debug_events: true} = subagent
+    end
+
+    test "both constructors default suppress_debug_events to false" do
+      opts = [
+        parent_agent_id: "test-parent",
+        instructions: "Do something",
+        parent_state: %{messages: []}
+      ]
+
+      from_config = SubAgent.new_from_config([agent_config: test_agent()] ++ opts)
+      from_compiled = SubAgent.new_from_compiled([compiled_agent: test_agent()] ++ opts)
+
+      assert %SubAgent{suppress_debug_events: false} = from_config
+      assert %SubAgent{suppress_debug_events: false} = from_compiled
+    end
+  end
+
   describe "build_mode_opts/1" do
     test "returns just mode when no HITL and no until_tool" do
       agent_config = test_agent()
