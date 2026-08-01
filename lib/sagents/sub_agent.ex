@@ -162,6 +162,14 @@ defmodule Sagents.SubAgent do
     # (50 for AgentExecution). See Agent :max_runs for details.
     field :max_runs, :integer, virtual: true
 
+    # When true, SubAgentServer publishes none of this sub-agent's events on the
+    # parent's :debug channel. Set it for a sub-agent whose inner work must not
+    # leave the sub-agent — the events carry initial messages, every inner LLM
+    # message live, the final chain on failure or cancellation, and the result.
+    # The parent still receives the run's outcome as the `task` tool result;
+    # only the debug fan-out is silenced. Defaults to false.
+    field :suppress_debug_events, :boolean, default: false, virtual: true
+
     # Metadata
     field :id, :string
     field :parent_agent_id, :string
@@ -176,6 +184,8 @@ defmodule Sagents.SubAgent do
           error: term() | nil,
           until_tool: String.t() | [String.t()] | nil,
           require_tool_success: boolean(),
+          max_runs: integer() | nil,
+          suppress_debug_events: boolean(),
           id: String.t() | nil,
           parent_agent_id: String.t() | nil,
           created_at: DateTime.t() | nil
@@ -212,6 +222,11 @@ defmodule Sagents.SubAgent do
   - `:scope` - Scope struct to inherit from the parent (optional). Propagated to
     the SubAgent's `custom_context.scope` so sub-agent tools and persistence callbacks
     see the same tenant context as the parent. Defaults to `agent_config.scope`.
+  - `:suppress_debug_events` - When true, none of this sub-agent's events are
+    published on the parent's `:debug` channel (optional). Use it for a
+    sub-agent whose inner messages must not leave the sub-agent. The parent
+    still receives the run's outcome through the normal return value; only the
+    debug fan-out is silenced. Defaults to `false`.
 
   ## Examples
 
@@ -261,6 +276,9 @@ defmodule Sagents.SubAgent do
   - `:scope` - Scope struct to inherit from the parent (optional). Propagated to
     the SubAgent's `custom_context.scope` so sub-agent tools and persistence callbacks
     see the same tenant context as the parent. Defaults to `compiled_agent.scope`.
+  - `:suppress_debug_events` - When true, none of this sub-agent's events are
+    published on the parent's `:debug` channel (optional). See
+    `new_from_config/1`. Defaults to `false`.
 
   ## Examples
 
@@ -319,6 +337,7 @@ defmodule Sagents.SubAgent do
     require_tool_success = Keyword.get(opts, :require_tool_success, false)
     max_runs = Keyword.get(opts, :max_runs)
     parent_trace = Keyword.get(opts, :parent_trace, %{})
+    suppress_debug_events = Keyword.get(opts, :suppress_debug_events, false)
 
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
 
@@ -377,6 +396,7 @@ defmodule Sagents.SubAgent do
       until_tool: until_tool,
       require_tool_success: require_tool_success,
       max_runs: max_runs,
+      suppress_debug_events: suppress_debug_events,
       status: :idle,
       created_at: DateTime.utc_now()
     }
@@ -936,6 +956,9 @@ defmodule Sagents.SubAgent do
       # exclusive with :until_tool. Stops only on a successful result.
       field :until_tool_success, :any, virtual: true
       field :max_runs, :integer, virtual: true
+      # See SubAgent.suppress_debug_events. When true, this sub-agent type
+      # publishes none of its events on the parent's :debug channel.
+      field :suppress_debug_events, :boolean, default: false
     end
 
     @type t :: %Config{
@@ -952,7 +975,8 @@ defmodule Sagents.SubAgent do
             interrupt_on: map() | nil,
             until_tool: String.t() | [String.t()] | nil,
             until_tool_success: String.t() | [String.t()] | nil,
-            max_runs: integer() | nil
+            max_runs: integer() | nil,
+            suppress_debug_events: boolean()
           }
 
     def new(attrs) do
@@ -971,7 +995,8 @@ defmodule Sagents.SubAgent do
         :interrupt_on,
         :until_tool,
         :until_tool_success,
-        :max_runs
+        :max_runs,
+        :suppress_debug_events
       ])
       |> validate_required([:name, :description, :tools])
       |> validate_length(:name, min: 1, max: 100)
