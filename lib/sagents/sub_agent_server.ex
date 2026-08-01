@@ -360,7 +360,9 @@ defmodule Sagents.SubAgentServer do
     )
 
     # Broadcast subagent_started via parent AgentServer
-    broadcast_subagent_event(server_state, {:subagent_started, build_started_metadata(subagent)})
+    broadcast_subagent_event(server_state, fn ->
+      {:subagent_started, build_started_metadata(subagent)}
+    end)
 
     {:ok, server_state}
   end
@@ -513,10 +515,9 @@ defmodule Sagents.SubAgentServer do
         new_state = %{server_state | subagent: completed_subagent}
 
         # Broadcast completion event
-        broadcast_subagent_event(
-          new_state,
+        broadcast_subagent_event(new_state, fn ->
           {:subagent_completed, build_completed_metadata(new_state, result)}
-        )
+        end)
 
         reply = if extra, do: {:ok, result, extra}, else: {:ok, result}
         {:reply, reply, new_state}
@@ -591,6 +592,22 @@ defmodule Sagents.SubAgentServer do
          _event
        ),
        do: :ok
+
+  # Lazy payload. Pass a zero-arity function where building the event costs real
+  # work -- the started metadata walks every tool and every tool parameter, and
+  # the completed metadata scans the message list for token usage -- so a
+  # suppressed sub-agent does not pay to build an event the clause above throws
+  # away. Events whose payload is a literal term are passed directly; wrapping
+  # those would allocate a closure to avoid allocating nothing.
+  #
+  # The suppression clause is matched first and never invokes the function.
+  # Ordering is an optimisation, not a correctness constraint: reaching this
+  # clause first would build the payload and then discard it downstream, which
+  # is the behaviour being avoided rather than a wrong result.
+  defp broadcast_subagent_event(%ServerState{} = server_state, build_event)
+       when is_function(build_event, 0) do
+    broadcast_subagent_event(server_state, build_event.())
+  end
 
   defp broadcast_subagent_event(%ServerState{subagent: subagent}, event) do
     parent_id = subagent.parent_agent_id
