@@ -123,6 +123,15 @@ defmodule Sagents.Publisher do
   The callback runs inside the subscribe `handle_call` *after* registration
   but *before* the reply, so the snapshot is guaranteed to arrive at the
   subscriber before any later broadcasts on the same channel.
+
+  It fires only for a **newly registered** pid. A pid that is already
+  subscribed to the channel (e.g. one seeded via
+  `Sagents.Publisher.State.seed/2` as an `:initial_subscribers` entry, which
+  then calls `subscribe/3` for its own bookkeeping) has been receiving every
+  broadcast on that channel since registration, so there is nothing to
+  resync and a second snapshot would be a duplicate event. Hosts that want
+  an on-demand snapshot should expose a pull-based call instead (the
+  AgentServer's equivalent is `Sagents.AgentServer.get_info/1`).
   """
   defmacro __using__(opts) do
     state_field = Keyword.fetch!(opts, :state_field)
@@ -134,9 +143,24 @@ defmodule Sagents.Publisher do
       def handle_call({:__publisher__, channel, :subscribe, subscriber_pid}, _from, state)
           when is_atom(channel) and is_pid(subscriber_pid) do
         pub = Map.fetch!(state, @publisher_state_field)
+
+        # `add/3` is idempotent for registration, but `on_subscribed/3` is a
+        # *new subscriber* hook. A pid that is already registered has been
+        # receiving broadcasts all along, so re-running the snapshot would
+        # deliver a duplicate event, not a resync.
+        already_subscribed? =
+          Sagents.Publisher.State.subscribed?(pub, channel, subscriber_pid)
+
         {ref, new_pub} = Sagents.Publisher.State.add(pub, channel, subscriber_pid)
         new_state = Map.put(state, @publisher_state_field, new_pub)
-        new_state = on_subscribed(channel, subscriber_pid, new_state)
+
+        new_state =
+          if already_subscribed? do
+            new_state
+          else
+            on_subscribed(channel, subscriber_pid, new_state)
+          end
+
         {:reply, {:ok, self(), ref}, new_state}
       end
 

@@ -746,4 +746,208 @@ defmodule Sagents.AgentUtilsTest do
                [%{on_message_processed: :supplied}]
     end
   end
+
+  describe "shutdown_session_changes/2" do
+    defp shutdown(overrides \\ %{}) do
+      Map.merge(
+        %{
+          agent_id: "conversation-1",
+          reason: :inactivity,
+          status: :idle,
+          interrupt_restorable: false,
+          last_activity_at: nil,
+          shutdown_at: ~U[2026-01-01 00:00:00Z]
+        },
+        overrides
+      )
+    end
+
+    defp question_session do
+      %{
+        agent_id: "conversation-1",
+        agent_status: :interrupted,
+        agent_alive?: true,
+        loading: false,
+        streaming_delta: nil,
+        interrupt_data: %{type: :ask_user_question, tool_call_id: "call-1"},
+        pending_question: %{tool_call_id: "call-1", question: "Which one?"},
+        remaining_questions: [],
+        question_responses: [],
+        pending_tools: [],
+        pending_halt: nil,
+        hitl_decisions: [],
+        sagents_subs: %{{:agent, "conversation-1"} => %{state: :subscribed}}
+      }
+    end
+
+    test "keeps a restorable question on screen, changing only liveness" do
+      changes =
+        AgentUtils.shutdown_session_changes(
+          question_session(),
+          shutdown(%{status: :interrupted, interrupt_restorable: true})
+        )
+
+      # The author still owes an answer. Nothing about the prompt changes.
+      assert changes == %{agent_alive?: false, loading: false, streaming_delta: nil}
+    end
+
+    test "keeps a restorable pending HITL tool batch" do
+      state = %{
+        question_session()
+        | pending_question: nil,
+          pending_tools: [%{tool_call_id: "call-1", tool_name: "write_file"}],
+          interrupt_data: %{action_requests: [%{tool_call_id: "call-1"}]}
+      }
+
+      changes =
+        AgentUtils.shutdown_session_changes(
+          state,
+          shutdown(%{status: :interrupted, interrupt_restorable: true})
+        )
+
+      assert changes == %{agent_alive?: false, loading: false, streaming_delta: nil}
+    end
+
+    test "keeps a restorable halt panel" do
+      state = %{
+        question_session()
+        | pending_question: nil,
+          pending_halt: %{message: "stopping", source_tool: "halt", tool_call_id: "call-1"},
+          interrupt_data: %{type: :halt, tool_call_id: "call-1"}
+      }
+
+      changes =
+        AgentUtils.shutdown_session_changes(
+          state,
+          shutdown(%{status: :interrupted, interrupt_restorable: true})
+        )
+
+      assert changes == %{agent_alive?: false, loading: false, streaming_delta: nil}
+    end
+
+    test "clears a non-restorable interrupt" do
+      state = %{
+        question_session()
+        | pending_question: nil,
+          pending_tools: [%{tool_call_id: "call-1"}],
+          interrupt_data: %{type: :subagent_hitl}
+      }
+
+      changes =
+        AgentUtils.shutdown_session_changes(
+          state,
+          shutdown(%{status: :interrupted, interrupt_restorable: false})
+        )
+
+      assert changes.agent_status == :not_running
+      assert changes.agent_alive? == false
+      assert changes.pending_tools == []
+      assert changes.pending_question == nil
+      assert changes.pending_halt == nil
+      assert changes.interrupt_data == nil
+    end
+
+    test "treats a missing :interrupt_restorable key as not restorable" do
+      # An agent predating the field. Degrade to the old clear-everything
+      # behaviour rather than to a prompt no agent can accept.
+      changes =
+        AgentUtils.shutdown_session_changes(
+          question_session(),
+          %{agent_id: "conversation-1", reason: :inactivity, status: :interrupted}
+        )
+
+      assert changes.agent_status == :not_running
+      assert changes.pending_question == nil
+    end
+
+    test "a non-interrupted session collapses to :not_running" do
+      state = %{
+        agent_id: "conversation-1",
+        agent_status: :idle,
+        agent_alive?: true,
+        loading: true,
+        streaming_delta: %{},
+        interrupt_data: nil
+      }
+
+      changes = AgentUtils.shutdown_session_changes(state, shutdown())
+
+      assert changes.agent_status == :not_running
+      assert changes.agent_alive? == false
+      assert changes.loading == false
+      assert changes.streaming_delta == nil
+    end
+
+    test "ignores a restorable flag when the host has no prompt showing" do
+      # Defensive: interrupt_data present but every derived key empty. There is
+      # nothing on screen to preserve, so collapse.
+      state = %{
+        agent_id: "conversation-1",
+        agent_status: :interrupted,
+        interrupt_data: %{type: :ask_user_question},
+        pending_question: nil,
+        pending_tools: [],
+        pending_halt: nil
+      }
+
+      changes =
+        AgentUtils.shutdown_session_changes(
+          state,
+          shutdown(%{status: :interrupted, interrupt_restorable: true})
+        )
+
+      assert changes.agent_status == :not_running
+    end
+
+    test "never clears agent_id or touches the subs map" do
+      for restorable <- [true, false] do
+        changes =
+          AgentUtils.shutdown_session_changes(
+            question_session(),
+            shutdown(%{status: :interrupted, interrupt_restorable: restorable})
+          )
+
+        refute Map.has_key?(changes, :agent_id)
+        refute Map.has_key?(changes, :sagents_subs)
+      end
+    end
+
+    test "is idempotent across the repeated deliveries one shutdown sends" do
+      for payload <- [
+            shutdown(%{status: :interrupted, interrupt_restorable: true}),
+            shutdown(%{status: :interrupted, interrupt_restorable: false}),
+            shutdown()
+          ] do
+        first = AgentUtils.shutdown_session_changes(question_session(), payload)
+        after_first = Map.merge(question_session(), first)
+        second = AgentUtils.shutdown_session_changes(after_first, payload)
+
+        assert Map.merge(after_first, second) == after_first,
+               "not idempotent for #{inspect(payload.interrupt_restorable)}"
+      end
+    end
+
+    test "preserves a half-answered question batch so it can finish after the wake" do
+      state = %{
+        question_session()
+        | pending_question: %{tool_call_id: "call-2", question: "second?"},
+          remaining_questions: [%{tool_call_id: "call-3", question: "third?"}],
+          question_responses: [%{tool_call_id: "call-1", type: :answer}]
+      }
+
+      merged =
+        Map.merge(
+          state,
+          AgentUtils.shutdown_session_changes(
+            state,
+            shutdown(%{status: :interrupted, interrupt_restorable: true})
+          )
+        )
+
+      assert merged.question_responses == [%{tool_call_id: "call-1", type: :answer}]
+      assert merged.remaining_questions == [%{tool_call_id: "call-3", question: "third?"}]
+      assert merged.pending_question.tool_call_id == "call-2"
+      assert merged.agent_status == :interrupted
+    end
+  end
 end

@@ -6,7 +6,7 @@ defmodule <%= module %> do
   function on `<%= subscriber_session_alias %>`, and applies the resulting
   changes via `assign/2`. LiveView-specific concerns — streams (`stream/3`,
   `stream_insert/3`), flash messages, `connected?` gates, and orchestrating
-  `AgentServer.resume/2` calls with their flash side effects — live here.
+  resume calls with their flash side effects — live here.
 
   Non-LiveView consumers (a GraphQL bridge GenServer, etc.) should bypass
   this module and call `<%= subscriber_session_alias %>` directly.
@@ -26,8 +26,11 @@ defmodule <%= module %> do
        `handle_publisher_down/2` and `handle_presence_diff/2` here.
 
     3. For the action path (send_message, wake_agent, etc.), call
-       `<%= coordinator_alias %>.ensure_agent_session_running(socket.assigns)`
-       and apply the returned changes with `assign(socket, changes)`.
+       `<%= coordinator_alias %>.ensure_agent_session_running(socket.assigns,
+       agent_request_opts(socket))` and apply the returned changes with
+       `assign(socket, changes)`. Use `agent_request_opts/1` from this module
+       rather than a second copy: every path that can start an agent must
+       configure it identically.
 
   ## Customization
 
@@ -149,6 +152,7 @@ defmodule <%= module %> do
         |> assign(:agent_id, agent_id)
         |> assign(:todos, saved_todos)
         |> assign(:agent_status, agent_status)
+        |> assign(:agent_alive?, agent_status != :not_running)
         |> stream(:messages, display_messages, reset: true)
         |> assign(:has_messages, has_messages)
 
@@ -183,9 +187,12 @@ defmodule <%= module %> do
   # `:interrupted` status from sagents' derive_boot_status) reaches us via
   # handle_info and surfaces the interrupt UI without polling.
   defp auto_wake_for_pending_interrupt(socket) do
-    case <%= coordinator_alias %>.ensure_agent_session_running(socket.assigns) do
+    case <%= coordinator_alias %>.ensure_agent_session_running(
+           socket.assigns,
+           agent_request_opts(socket)
+         ) do
       {:ok, changes} ->
-        assign(socket, changes)
+        socket |> assign(changes) |> assign(:agent_alive?, true)
 
       {:error, reason} ->
         Logger.warning(
@@ -399,7 +406,13 @@ defmodule <%= module %> do
     )
   end
 
-  @doc "Agent shutdown event — clear agent_id and unsubscribe locally."
+  @doc """
+  Agent shutdown event.
+
+  A restorable interrupt prompt stays on screen (see
+  `Sagents.AgentUtils.shutdown_session_changes/2`); answering it wakes the
+  agent. Everything else collapses to `:not_running`.
+  """
   def handle_agent_shutdown(socket, shutdown_data) do
     Logger.info("Agent #{socket.assigns[:agent_id]} shutting down: #{shutdown_data.reason}")
     assign(socket, <%= subscriber_session_alias %>.handle_agent_shutdown(socket.assigns, shutdown_data))
@@ -410,51 +423,54 @@ defmodule <%= module %> do
   # ===========================================================================
 
   @doc """
-  Handle a single HITL approve/reject decision. Orchestrates the
-  `AgentServer.resume/2` call (when the last pending tool is decided) and
-  flash messages on top of the state changes from
-  `<%= subscriber_session_alias %>.handle_hitl_decision/3`.
+  Handle a single HITL approve/reject decision. Orchestrates the resume call
+  (when the last pending tool is decided) and flash messages on top of the
+  state changes from `<%= subscriber_session_alias %>.handle_hitl_decision/3`.
+
+  The resume goes through `<%= coordinator_alias %>.resume_agent_session/3`,
+  which wakes a sleeping agent and hands it the decision at boot. There is no
+  "the agent went away, start over" failure: the interrupt is durable, so the
+  worst case is a slower round trip.
   """
   def handle_hitl_decision(socket, index, decision_type) do
-    agent_id = socket.assigns[:agent_id]
-
-    if is_nil(agent_id) do
-      Logger.error("Cannot process HITL decision: agent_id is nil (agent may have shut down)")
-
-      put_flash(
-        socket,
-        :error,
-        "Agent is no longer running. Please send a new message to continue."
-      )
+    if (socket.assigns[:pending_tools] || []) == [] do
+      # Nothing pending: a duplicate event for a batch that is already settled.
+      # Falling through would hand `advance_hitl_decisions/3` an empty list, and
+      # it would happily report the batch complete and resume with a fabricated
+      # decision.
+      socket
     else
-      decision_label = if decision_type == :approve, do: "approved", else: "rejected"
+      do_handle_hitl_decision(socket, index, decision_type)
+    end
+  end
 
-      <%= subscriber_session_alias %>.persist_hitl_decision(
-        socket.assigns,
-        socket.assigns.pending_tools,
-        index,
-        decision_label
-      )
+  defp do_handle_hitl_decision(socket, index, decision_type) do
+    decision_label = if decision_type == :approve, do: "approved", else: "rejected"
 
-      Logger.info("#{String.capitalize(decision_label)} tool at index #{index}")
+    <%= subscriber_session_alias %>.persist_hitl_decision(
+      socket.assigns,
+      socket.assigns.pending_tools,
+      index,
+      decision_label
+    )
 
-      case <%= subscriber_session_alias %>.handle_hitl_decision(socket.assigns, index, decision_type) do
-        {:resume, accumulated, changes} ->
-          case AgentServer.resume(agent_id, accumulated) do
-            :ok ->
-              socket
-              |> assign(changes)
-              |> assign(<%= subscriber_session_alias %>.hitl_resume_running_changes())
-              |> put_flash(:info, "Agent resuming")
+    Logger.info("#{String.capitalize(decision_label)} tool at index #{index}")
 
-            {:error, reason} ->
-              Logger.error("Failed to resume agent: #{inspect(reason)}")
-              put_flash(socket, :error, "Failed to resume agent: #{inspect(reason)}")
-          end
+    case <%= subscriber_session_alias %>.handle_hitl_decision(socket.assigns, index, decision_type) do
+      {:resume, accumulated, changes} ->
+        resume_or_flash(
+          socket,
+          accumulated,
+          changes,
+          <%= subscriber_session_alias %>.hitl_resume_running_changes(),
+          log_label: "HITL resume failed",
+          user_message: "That decision could not be submitted. Please try again."
+        )
 
-        {:more, changes} ->
-          assign(socket, changes)
-      end
+      # Intermediate decisions in a multi-tool batch settle nothing, so they
+      # need no agent at all. Deliberately must not wake one.
+      {:more, changes} ->
+        assign(socket, changes)
     end
   end
 
@@ -464,38 +480,142 @@ defmodule <%= module %> do
 
   @doc """
   Handle a single answer to a pending AskUserQuestion interrupt. Orchestrates
-  the `AgentServer.resume/2` call (when the last pending question is
-  answered) on top of the state changes from
+  the resume call (when the last pending question is answered) on top of the
+  state changes from
   `<%= subscriber_session_alias %>.handle_question_response/2`.
+
+  The resume goes through `<%= coordinator_alias %>.resume_agent_session/3`,
+  so an answer composed while the agent was asleep still lands: the agent is
+  woken with the answer in hand.
   """
   def handle_question_response(socket, response) do
-    agent_id = socket.assigns[:agent_id]
-
-    if is_nil(agent_id) do
-      Logger.error("Cannot process question response: agent_id is nil (agent may have shut down)")
-
-      put_flash(
-        socket,
-        :error,
-        "Agent is no longer running. Please send a new message to restart."
-      )
+    if is_nil(socket.assigns[:pending_question]) do
+      # A second submission for a question that is already answered. The
+      # click-to-select variant has no submit button to disable, so a fast
+      # double click really does send two events, and the resume is synchronous
+      # so the second one arrives after `pending_question` has been cleared.
+      # Falling through would crash on the missing question.
+      socket
     else
-      case <%= subscriber_session_alias %>.handle_question_response(socket.assigns, response) do
-        {:resume, resume_data, changes} ->
-          case AgentServer.resume(agent_id, resume_data) do
-            :ok ->
-              socket
-              |> assign(changes)
-              |> assign(<%= subscriber_session_alias %>.question_resume_running_changes())
-
-            {:error, reason} ->
-              Logger.error("Failed to resume agent with question response: #{inspect(reason)}")
-              put_flash(socket, :error, "Failed to submit response: #{inspect(reason)}")
-          end
-
-        {:more, changes} ->
-          assign(socket, changes)
-      end
+      do_handle_question_response(socket, response)
     end
   end
+
+  defp do_handle_question_response(socket, response) do
+    case <%= subscriber_session_alias %>.handle_question_response(socket.assigns, response) do
+      {:resume, resume_data, changes} ->
+        resume_or_flash(
+          socket,
+          resume_data,
+          changes,
+          <%= subscriber_session_alias %>.question_resume_running_changes(),
+          log_label: "question resume failed",
+          user_message: "That response could not be saved. Please try again."
+        )
+
+      # Intermediate answers in a multi-question batch need no agent at all,
+      # so they deliberately must not wake one. Only the final answer resumes.
+      {:more, changes} ->
+        assign(socket, changes)
+    end
+  end
+
+  # ===========================================================================
+  # Halt dismissal
+  # ===========================================================================
+
+  @doc """
+  Acknowledge a terminal `:halt` interrupt and clear its panel.
+
+  A halt is restorable, so the panel stays on screen when the agent naps. This
+  routes through `<%= coordinator_alias %>.dismiss_agent_session/2`, which
+  wakes a sleeping agent and dismisses against the halt it rebuilt at boot, so
+  the button works on a dormant conversation.
+  """
+  def handle_halt_dismissal(socket) do
+    if is_nil(socket.assigns[:pending_halt]) do
+      # Nothing pending: a duplicate event for a halt already dismissed. The
+      # dismissal is synchronous, so a fast double click really does deliver a
+      # second event after the first cleared the panel.
+      socket
+    else
+      do_handle_halt_dismissal(socket)
+    end
+  end
+
+  defp do_handle_halt_dismissal(socket) do
+    case <%= coordinator_alias %>.dismiss_agent_session(socket.assigns, agent_request_opts(socket)) do
+      :ok ->
+        assign(socket, Sagents.AgentUtils.cleared_interrupt_changes())
+
+      {:ok, session_changes} ->
+        socket
+        |> assign(session_changes)
+        |> assign(:agent_alive?, true)
+        |> assign(Sagents.AgentUtils.cleared_interrupt_changes())
+
+      {:error, reason} ->
+        Logger.error("halt dismissal failed: #{inspect(reason)}")
+        put_flash(socket, :error, "That could not be dismissed. Please try again.")
+    end
+  end
+
+  # ===========================================================================
+  # Shared resume orchestration
+  # ===========================================================================
+
+  # Single funnel for every interrupt response. Asks the agent rather than the
+  # assigns: a live, interrupted agent takes the answer in one call, and a
+  # sleeping one is woken with the answer already in hand. A *live* agent in
+  # the wrong state (someone answered from another tab) returns an error
+  # rather than being woken, because there is nothing to wake.
+  #
+  # `copy` carries two deliberately separate strings:
+  #
+  #   * `:log_label` - internal vocabulary, paired with the raw reason term.
+  #   * `:user_message` - product copy shown to the person. Never interpolate
+  #     the reason into it. A live-but-wrong-state agent returns "Cannot
+  #     resume, server is not interrupted": an internal string, and one that
+  #     says "agent", a word many products deliberately never put in front of
+  #     a user. This is a slot you are meant to edit and localize.
+  defp resume_or_flash(socket, resume_data, changes, running_changes, copy) do
+    case <%= coordinator_alias %>.resume_agent_session(
+           socket.assigns,
+           resume_data,
+           agent_request_opts(socket)
+         ) do
+      :ok ->
+        socket |> assign(changes) |> assign(running_changes)
+
+      {:ok, session_changes} ->
+        socket
+        |> assign(session_changes)
+        |> assign(changes)
+        |> assign(running_changes)
+
+      {:error, reason} ->
+        Logger.error("#{Keyword.fetch!(copy, :log_label)}: #{inspect(reason)}")
+        put_flash(socket, :error, Keyword.fetch!(copy, :user_message))
+    end
+  end
+
+  # ===========================================================================
+  # Per-request agent configuration
+  # ===========================================================================
+
+  @doc """
+  Per-request data the `Sagents.FactoryConfig` consumes, for **every** path
+  that may have to start an agent.
+
+  Fill this in once (timezone, tool context, tenant, whatever your factory
+  reads) and route your own
+  `<%= coordinator_alias %>.ensure_agent_session_running/2` call sites through
+  it as well, rather than computing the same options separately.
+
+  An agent woken to accept an answer must be configured exactly like one woken
+  any other way. A second copy of this decision drifts silently: it compiles,
+  it passes tests, and the symptom is an agent that behaves subtly wrong only
+  on the paths that had to wake it.
+  """
+  def agent_request_opts(_socket), do: []
 end

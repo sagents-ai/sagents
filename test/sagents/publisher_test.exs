@@ -197,4 +197,108 @@ defmodule Sagents.PublisherTest do
       assert PubState.count(seeded) == 1
     end
   end
+
+  # A producer that overrides on_subscribed/3 to send a snapshot, and counts
+  # how many times the hook actually fired.
+  defmodule SnapshotProducer do
+    use GenServer
+    use Sagents.Publisher, state_field: :publisher
+
+    defstruct publisher: nil, snapshots: 0
+
+    def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, opts)
+
+    def snapshot_count(server), do: GenServer.call(server, :snapshot_count)
+
+    @impl true
+    def init(opts) do
+      pub =
+        PubState.new([:main, :debug])
+        |> PubState.seed(Keyword.get(opts, :initial_subscribers, []))
+
+      {:ok, %__MODULE__{publisher: pub}}
+    end
+
+    def on_subscribed(:main, subscriber_pid, state) do
+      send(subscriber_pid, {:snapshot, :main})
+      %{state | snapshots: state.snapshots + 1}
+    end
+
+    def on_subscribed(_channel, _pid, state), do: state
+
+    @impl true
+    def handle_call(:snapshot_count, _from, state), do: {:reply, state.snapshots, state}
+
+    @impl true
+    def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
+      case Publisher.handle_down(state.publisher, ref, pid) do
+        {:matched, new_pub} -> {:noreply, %{state | publisher: new_pub}}
+        :no_match -> {:noreply, state}
+      end
+    end
+  end
+
+  describe "on_subscribed/3 hook" do
+    test "fires for a newly registered subscriber" do
+      {:ok, pid} = SnapshotProducer.start_link()
+
+      {:ok, ^pid, _ref} = Publisher.subscribe(pid)
+
+      assert_receive {:snapshot, :main}, 100
+      assert SnapshotProducer.snapshot_count(pid) == 1
+    end
+
+    test "does not re-fire for a pid that is already subscribed" do
+      {:ok, pid} = SnapshotProducer.start_link()
+
+      {:ok, ^pid, ref1} = Publisher.subscribe(pid)
+      assert_receive {:snapshot, :main}, 100
+
+      # Subscribing again is idempotent for registration, and must be
+      # idempotent for the snapshot too: this pid has been receiving every
+      # broadcast since the first call, so there is nothing to resync.
+      {:ok, ^pid, ref2} = Publisher.subscribe(pid)
+
+      assert ref1 == ref2
+      refute_receive {:snapshot, :main}, 50
+      assert SnapshotProducer.snapshot_count(pid) == 1
+    end
+
+    test "does not fire for a pid seeded as an initial subscriber" do
+      # This is the shape Session.ensure_running/3 produces: the caller is
+      # enrolled before init/1 returns (so it catches the boot broadcast), and
+      # then calls subscribe/3 for its own bookkeeping. Without the guard the
+      # caller receives the boot status twice.
+      {:ok, pid} = SnapshotProducer.start_link(initial_subscribers: [{:main, self()}])
+
+      {:ok, ^pid, _ref} = Publisher.subscribe(pid)
+
+      refute_receive {:snapshot, :main}, 50
+      assert SnapshotProducer.snapshot_count(pid) == 0
+    end
+
+    test "still fires per-channel for the same pid" do
+      {:ok, pid} = SnapshotProducer.start_link(initial_subscribers: [{:debug, self()}])
+
+      # Registered on :debug, but never on :main — this is a new registration
+      # on the :main channel and must snapshot.
+      {:ok, ^pid, _ref} = Publisher.subscribe(pid, :main)
+
+      assert_receive {:snapshot, :main}, 100
+      assert SnapshotProducer.snapshot_count(pid) == 1
+    end
+
+    test "fires again after an explicit unsubscribe and re-subscribe" do
+      {:ok, pid} = SnapshotProducer.start_link()
+
+      {:ok, ^pid, _ref} = Publisher.subscribe(pid)
+      assert_receive {:snapshot, :main}, 100
+
+      :ok = Publisher.unsubscribe(pid)
+      {:ok, ^pid, _ref} = Publisher.subscribe(pid)
+
+      assert_receive {:snapshot, :main}, 100
+      assert SnapshotProducer.snapshot_count(pid) == 2
+    end
+  end
 end
