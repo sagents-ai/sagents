@@ -1,12 +1,15 @@
 defmodule Sagents.Middleware.SummarizationTest do
   use Sagents.BaseCase, async: true
+  use Mimic
 
   alias Sagents.Middleware.Summarization
   alias Sagents.State
   alias LangChain.Message
+  alias LangChain.Message.ContentPart
   alias LangChain.Message.ToolCall
   alias LangChain.Message.ToolResult
   alias LangChain.ChatModels.ChatOpenAI
+  alias LangChain.LangChainError
 
   setup do
     %{agent_id: generate_test_agent_id()}
@@ -263,6 +266,60 @@ defmodule Sagents.Middleware.SummarizationTest do
     end
   end
 
+  describe "summarization execution" do
+    test "replaces older messages with an LLM summary when over threshold", %{agent_id: agent_id} do
+      stub(ChatOpenAI, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Summary of the earlier conversation")]}
+      end)
+
+      {:ok, config} =
+        Summarization.init(
+          model: ChatOpenAI.new!(%{model: "gpt-4", stream: false}),
+          messages_to_keep: 2,
+          max_tokens_before_summary: 100,
+          token_counter: fn _msgs -> 1_000 end
+        )
+
+      messages = over_threshold_conversation()
+      state = State.new!(%{agent_id: agent_id, messages: messages})
+
+      assert {:ok, %State{messages: updated}} = Summarization.before_model(state, config)
+
+      # [system | summary user/assistant pair | the messages_to_keep tail]
+      assert [
+               %Message{role: :system} = system,
+               %Message{role: :user},
+               %Message{role: :assistant} = summary,
+               %Message{role: :user} = kept_user,
+               %Message{role: :assistant} = kept_assistant
+             ] = updated
+
+      assert system == List.first(messages)
+      assert ContentPart.parts_to_string(summary.content) == "Summary of the earlier conversation"
+      assert kept_user == Enum.at(messages, 5)
+      assert kept_assistant == Enum.at(messages, 6)
+    end
+
+    test "keeps every message when the summarizing LLM fails", %{agent_id: agent_id} do
+      stub(ChatOpenAI, :call, fn _model, _messages, _tools ->
+        {:error, LangChainError.exception(type: "api_error", message: "summarizer unavailable")}
+      end)
+
+      {:ok, config} =
+        Summarization.init(
+          model: ChatOpenAI.new!(%{model: "gpt-4", stream: false}),
+          messages_to_keep: 2,
+          max_tokens_before_summary: 100,
+          token_counter: fn _msgs -> 1_000 end
+        )
+
+      messages = over_threshold_conversation()
+      state = State.new!(%{agent_id: agent_id, messages: messages})
+
+      assert {:ok, %State{messages: ^messages}} = Summarization.before_model(state, config)
+    end
+  end
+
   describe "configuration validation" do
     test "accepts valid messages_to_keep values" do
       assert {:ok, config} = Summarization.init(messages_to_keep: 0)
@@ -332,5 +389,20 @@ defmodule Sagents.Middleware.SummarizationTest do
       # Should count substantial tokens for long text
       assert tokens > 1000
     end
+  end
+
+  # Seven messages with an all-text tail so `find_safe_cutoff` (with
+  # messages_to_keep: 2) lands cleanly: the first four get summarized, the last
+  # two are preserved.
+  defp over_threshold_conversation do
+    [
+      Message.new_system!("You are helpful"),
+      Message.new_user!("First question"),
+      Message.new_assistant!("First answer"),
+      Message.new_user!("Second question"),
+      Message.new_assistant!("Second answer"),
+      Message.new_user!("Third question"),
+      Message.new_assistant!("Third answer")
+    ]
   end
 end

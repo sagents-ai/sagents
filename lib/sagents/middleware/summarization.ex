@@ -321,12 +321,14 @@ defmodule Sagents.Middleware.Summarization do
     model = config.model || get_model_from_state(state)
 
     if model do
-      # Create summarizer chain
+      # Create summarizer chain. `run/2` summarizes the pre-partitioned text we
+      # hand it and never reads the partitioning counts, but LangChain validates
+      # `threshold_count >= 2` — anything lower makes `new!/1` raise.
       summarizer =
         SummarizeConversationChain.new!(%{
           llm: model,
           keep_count: 0,
-          threshold_count: 0,
+          threshold_count: 2,
           override_system_prompt: config.summary_prompt
         })
 
