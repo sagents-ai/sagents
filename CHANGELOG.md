@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.11.1
+
+A bug fix release. `Sagents.Middleware.Summarization` crashed at the one moment
+it was supposed to work: when a conversation crossed the token threshold and the
+middleware tried to summarize. It built its `SummarizeConversationChain` with
+`threshold_count: 0`, but LangChain validates `threshold_count >= 2`, so
+`new!/1` raised on every summarization attempt. If you have the Summarization
+middleware in your stack, upgrade.
+
+Also adds a guide for driving Sagents from a React front end, covering the
+"subscription bridge" pattern: a long-lived GenServer that holds the
+subscription and session state a LiveView would otherwise hold in `assigns`, and
+republishes serialized events onto a transport the browser can consume.
+
+No breaking changes and no migration required.
+
+### Added
+
+- [Using Sagents with a React Front End](https://github.com/sagents-ai/sagents/blob/main/docs/using_with_a_react_front_end.md)
+  guide. Examples use Absinthe GraphQL subscriptions, but the bridge pattern is
+  transport agnostic and the guide covers the alternatives.
+  [#163](https://github.com/sagents-ai/sagents/pull/163)
+
+### Fixed
+
+- `Sagents.Middleware.Summarization` no longer raises when it actually
+  summarizes. The `threshold_count` passed to the summarizer chain is now `2`,
+  LangChain's minimum. The value is behaviorally irrelevant here since Sagents
+  partitions the messages itself and only uses the chain to summarize
+  pre-partitioned text, but it has to satisfy validation. Test coverage now
+  exercises a full summarization run and the summarizer-failure fallback.
+  [#164](https://github.com/sagents-ai/sagents/pull/164)
+
 ## v0.11.0
 
 An open `ask_user` question no longer disappears when the agent goes to sleep.
