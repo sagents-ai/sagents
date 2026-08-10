@@ -173,6 +173,7 @@ defmodule Sagents.MixProject do
       "docs/conversations_architecture.md",
       "docs/lifecycle.md",
       "docs/subscriptions_and_presence.md",
+      "docs/using_with_a_react_front_end.md",
       "docs/middleware.md",
       "docs/middleware_messaging.md",
       "docs/observability.md",
