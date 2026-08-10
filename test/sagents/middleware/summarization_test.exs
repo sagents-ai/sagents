@@ -318,6 +318,118 @@ defmodule Sagents.Middleware.SummarizationTest do
 
       assert {:ok, %State{messages: ^messages}} = Summarization.before_model(state, config)
     end
+
+    test "keeps an assistant tool call with its result instead of orphaning the result", %{
+      agent_id: agent_id
+    } do
+      stub(ChatOpenAI, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Summary of the earlier conversation")]}
+      end)
+
+      {:ok, config} =
+        Summarization.init(
+          model: ChatOpenAI.new!(%{model: "gpt-4", stream: false}),
+          messages_to_keep: 2,
+          max_tokens_before_summary: 100,
+          token_counter: fn _msgs -> 1_000 end
+        )
+
+      tool_call = ToolCall.new!(%{call_id: "call_1", name: "search", arguments: %{"q" => "test"}})
+
+      # The target cutoff (count - messages_to_keep) lands exactly between the
+      # assistant's tool call and its result. Cutting there orphans the kept
+      # result — providers reject tool outputs with no matching call, so the
+      # cut must move back to keep the pair together.
+      messages = [
+        Message.new_system!("You are helpful"),
+        Message.new_user!("First question"),
+        Message.new_assistant!("First answer"),
+        Message.new_user!("Search for something"),
+        Message.new_assistant!(%{tool_calls: [tool_call]}),
+        Message.new_tool_result!(%{
+          tool_results: [
+            ToolResult.new!(%{tool_call_id: "call_1", name: "search", content: "Results"})
+          ]
+        }),
+        Message.new_user!("What did you find?")
+      ]
+
+      state = State.new!(%{agent_id: agent_id, messages: messages})
+
+      assert {:ok, %State{messages: updated}} = Summarization.before_model(state, config)
+
+      assert [
+               %Message{role: :system},
+               %Message{role: :user},
+               %Message{role: :assistant},
+               %Message{role: :assistant, tool_calls: [%ToolCall{call_id: "call_1"}]},
+               %Message{role: :tool} = kept_result,
+               %Message{role: :user}
+             ] = updated
+
+      assert [%ToolResult{tool_call_id: "call_1"}] = kept_result.tool_results
+    end
+
+    test "never cuts between consecutive tool results from parallel tool calls", %{
+      agent_id: agent_id
+    } do
+      stub(ChatOpenAI, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!("Summary of the earlier conversation")]}
+      end)
+
+      {:ok, config} =
+        Summarization.init(
+          model: ChatOpenAI.new!(%{model: "gpt-4", stream: false}),
+          messages_to_keep: 3,
+          max_tokens_before_summary: 100,
+          token_counter: fn _msgs -> 1_000 end
+        )
+
+      call_a = ToolCall.new!(%{call_id: "call_a", name: "search", arguments: %{"q" => "a"}})
+      call_b = ToolCall.new!(%{call_id: "call_b", name: "search", arguments: %{"q" => "b"}})
+
+      # The target cutoff lands between the two tool results. The message
+      # before the cut is a tool result (not an assistant), so the pre-fix
+      # algorithm called this cut safe — orphaning the second result.
+      messages = [
+        Message.new_system!("You are helpful"),
+        Message.new_user!("Search two things"),
+        Message.new_assistant!(%{tool_calls: [call_a, call_b]}),
+        Message.new_tool_result!(%{
+          tool_results: [
+            ToolResult.new!(%{tool_call_id: "call_a", name: "search", content: "A results"})
+          ]
+        }),
+        Message.new_tool_result!(%{
+          tool_results: [
+            ToolResult.new!(%{tool_call_id: "call_b", name: "search", content: "B results"})
+          ]
+        }),
+        Message.new_user!("Now compare them"),
+        Message.new_assistant!("Comparison")
+      ]
+
+      state = State.new!(%{agent_id: agent_id, messages: messages})
+
+      assert {:ok, %State{messages: updated}} = Summarization.before_model(state, config)
+
+      assert [
+               %Message{role: :system},
+               %Message{role: :user},
+               %Message{role: :assistant},
+               %Message{
+                 role: :assistant,
+                 tool_calls: [%ToolCall{call_id: "call_a"}, %ToolCall{call_id: "call_b"}]
+               },
+               %Message{role: :tool} = result_a,
+               %Message{role: :tool} = result_b,
+               %Message{role: :user},
+               %Message{role: :assistant}
+             ] = updated
+
+      assert [%ToolResult{tool_call_id: "call_a"}] = result_a.tool_results
+      assert [%ToolResult{tool_call_id: "call_b"}] = result_b.tool_results
+    end
   end
 
   describe "configuration validation" do
