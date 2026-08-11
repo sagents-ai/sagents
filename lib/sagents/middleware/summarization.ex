@@ -100,8 +100,10 @@ defmodule Sagents.Middleware.Summarization do
   1. Calculate target cutoff: `message_count - messages_to_keep`
   2. Search backwards from target to find safe cutoff point
   3. A point is safe if:
-     - It's not an assistant message with tool_calls
-     - The next message isn't a tool result for this assistant
+     - The first message being kept is not a tool result (its originating
+       assistant tool call must not be summarized away)
+     - The last message being summarized is not an assistant with tool calls
+       whose results follow on the kept side
   4. If no safe point found, summarize nothing (keeps all messages)
 
   ## Error Handling
@@ -285,23 +287,35 @@ defmodule Sagents.Middleware.Summarization do
     if index <= 0 or index >= length(messages) do
       true
     else
-      # Get the message at the cutoff point (last message to include in summary)
-      message_at_cutoff = Enum.at(messages, index - 1)
+      # The first message being kept (index) and the last message being
+      # summarized (index - 1) straddle the cut.
+      first_kept = Enum.at(messages, index)
+      last_summarized = Enum.at(messages, index - 1)
 
-      # Check if this is an assistant message with tool calls
-      case message_at_cutoff do
-        %Message{role: :assistant, tool_calls: tool_calls}
-        when is_list(tool_calls) and tool_calls != [] ->
-          # This is an assistant with tool calls
-          # Check if the next few messages contain tool results
-          has_pending_tool_results?(messages, index, @search_range_for_tool_pairs)
+      cond do
+        # Keeping a tool result whose originating assistant tool call was
+        # summarized away orphans it — providers reject tool outputs that have
+        # no matching call in the input (e.g. OpenAI: "No tool call found for
+        # function call output"). This also covers cuts landing between
+        # consecutive tool results from parallel tool calls.
+        match?(%Message{role: :tool}, first_kept) ->
+          false
 
-        _other ->
-          # Not an assistant with tool calls, safe to cut here
+        # Summarizing away an assistant that issued tool calls while its
+        # results remain on the kept side orphans those results the same way.
+        assistant_with_tool_calls?(last_summarized) ->
+          not has_pending_tool_results?(messages, index, @search_range_for_tool_pairs)
+
+        true ->
           true
       end
     end
   end
+
+  defp assistant_with_tool_calls?(%Message{role: :assistant, tool_calls: tool_calls}),
+    do: is_list(tool_calls) and tool_calls != []
+
+  defp assistant_with_tool_calls?(_message), do: false
 
   defp has_pending_tool_results?(messages, start_index, search_range) do
     # Check if any of the next N messages are tool results
