@@ -101,6 +101,18 @@ defmodule Sagents.MixProject do
       groups_for_extras: [
         Docs: Path.wildcard("docs/*.md")
       ],
+      # Internals of Elixir's Registry and of Horde that our docs name because
+      # the explanations are not checkable without them. All carry
+      # `@moduledoc false`, so ExDoc cannot link them and warns on every
+      # mention. Listing them here renders the reference as plain code and
+      # drops the warning, rather than making the prose vaguer to stay quiet.
+      skip_code_autolink_to: [
+        "Horde.RegistryImpl",
+        "Registry.Partition",
+        "Registry.Supervisor",
+        "Registry.Supervisor.init/1",
+        "Registry.key_info!/1"
+      ],
       groups_for_modules: [
         "Core Agent": [
           Sagents.Agent,

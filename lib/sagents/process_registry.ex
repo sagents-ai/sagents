@@ -66,7 +66,15 @@ defmodule Sagents.ProcessRegistry do
   def child_spec(_opts) do
     case distribution_type() do
       :local ->
-        {Registry, keys: :unique, name: @registry_name}
+        # Sagents.LocalRegistry wraps Registry.start_link/1 to survive a restart
+        # that races the outgoing registry's partition process, which traps
+        # exits and holds its registered name for a few milliseconds after the
+        # registry itself is gone. See `Sagents.LocalRegistry`.
+        %{
+          id: @registry_name,
+          start: {Sagents.LocalRegistry, :start_link, [[keys: :unique, name: @registry_name]]},
+          type: :supervisor
+        }
 
       :horde ->
         assert_horde_available!()

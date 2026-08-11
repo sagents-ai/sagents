@@ -26,7 +26,7 @@ defmodule Sagents.RegistryWatcher do
   `Horde.Registry.start_link/3` starts a supervisor, and the process registered
   under the name is its child. When that child crashes, Horde's own supervisor
   restarts it with fresh, empty ETS tables, so `Sagents.Supervisor` sees no
-  failed child of its own. Elixir's `Registry` is shaped the same way.
+  failed child of its own.
 
   This watcher monitors the process registered as `Sagents.Registry` directly
   and stops when it dies. Listed immediately after the registry in
@@ -34,6 +34,18 @@ defmodule Sagents.RegistryWatcher do
   does act on, taking the agent and filesystem supervisors down with it. Agents
   stop, and the next request re-creates them from persisted state with fresh
   registrations.
+
+  ## The `:local` backend is shaped differently
+
+  Elixir's `Registry` is *not* shaped like Horde's. `Registry.start_link/1`
+  registers its `Registry.Supervisor` under the given name, so `Sagents.Registry`
+  is a direct child of `Sagents.Supervisor` there and its death is already a
+  child failure the `:rest_for_one` strategy sees. The watcher is redundant in
+  that mode rather than load-bearing; it stops as well, which costs one extra
+  restart and changes nothing else.
+
+  What the `:local` backend needs instead is `Sagents.LocalRegistry`, because
+  its restart races the outgoing registry's partition process.
 
   ## The trade being made
 

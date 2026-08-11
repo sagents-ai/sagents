@@ -18,6 +18,14 @@ defmodule Sagents.Horde.NodeTransferTest do
   # Timeout for waiting for Horde to redistribute processes after node departure
   @redistribution_timeout 15_000
 
+  # Timeout for waiting for Horde's CRDTs to replicate an agent to another node.
+  # The sync interval is 300ms, so this is generous.
+  @replication_timeout 10_000
+
+  # Additional settle for the part of Horde's convergence that is not observable
+  # from outside. See wait_for_replication/4.
+  @convergence_settle 2_000
+
   setup_all do
     LocalCluster.start()
 
@@ -116,6 +124,77 @@ defmodule Sagents.Horde.NodeTransferTest do
     end
   end
 
+  # An agent can only be handed to a survivor that already knows about it, so
+  # every one of these tests has to let Horde converge before it takes a node
+  # away. Two parts, because one is observable and one is not:
+  #
+  #   1. `replicated?/3` asserts the observable preconditions — the registry
+  #      entry, the child spec, and an `:alive` member entry for the departing
+  #      node — and normally passes within ~100ms.
+  #
+  #   2. `@convergence_settle` covers Horde's remaining internal convergence,
+  #      which is not observable from outside its GenServer state. Removing a
+  #      node before it completes strands the agent instead of moving it: the
+  #      child spec is dropped from the process CRDT and never re-added, and
+  #      nothing restarts it. On the observable preconditions alone, roughly one
+  #      departure in four strands.
+  #
+  # A stranded agent is recoverable, not lost: the registry and the process CRDT
+  # are left clean, so the next `Session.ensure_running/3` starts it again from
+  # persisted state. Redistribution is an optimization, so the settle belongs
+  # here rather than being something the library should guarantee away.
+  defp wait_for_replication(node, departing_node, agent_ids, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    result = do_wait_for_replication(node, departing_node, agent_ids, deadline)
+    if result == :ok, do: Process.sleep(@convergence_settle)
+    result
+  end
+
+  defp do_wait_for_replication(node, departing_node, agent_ids, deadline) do
+    if replicated?(node, departing_node, agent_ids) do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) < deadline do
+        Process.sleep(50)
+        do_wait_for_replication(node, departing_node, agent_ids, deadline)
+      else
+        {:error, :timeout}
+      end
+    end
+  end
+
+  defp replicated?(node, departing_node, agent_ids) do
+    # The registry CRDT: every agent resolves from this node.
+    registrations_replicated? =
+      Enum.all?(agent_ids, fn agent_id ->
+        match?(
+          {:ok, pid} when is_pid(pid),
+          :rpc.call(node, Sagents.AgentSupervisor, :get_pid, [agent_id])
+        )
+      end)
+
+    # The supervisor CRDT: this node knows the child specs it would have to
+    # restart. count_children/1 reports the cluster-wide view, not the local one.
+    specs_replicated? =
+      case :rpc.call(node, Horde.DynamicSupervisor, :count_children, [
+             Sagents.AgentsDynamicSupervisor
+           ]) do
+        %{specs: specs} -> specs >= length(agent_ids)
+        _other -> false
+      end
+
+    # Horde's member bookkeeping: this node must already see the departing node
+    # as an :alive member, because handing its processes over means marking that
+    # entry :dead, and an entry that was never there cannot be marked.
+    member_converged? =
+      :rpc.call(node, Sagents.ClusterTestHelper, :member_alive?, [
+        Sagents.AgentsDynamicSupervisor,
+        departing_node
+      ]) == true
+
+    registrations_replicated? and specs_replicated? and member_converged?
+  end
+
   defp wait_for_node_down(node, timeout) do
     deadline = System.monotonic_time(:millisecond) + timeout
     do_wait_for_node_down(node, deadline)
@@ -146,9 +225,8 @@ defmodule Sagents.Horde.NodeTransferTest do
 
       assert is_pid(original_pid)
 
-      # Wait for CRDT to sync the process entry to the surviving node.
-      # Without this, the surviving node may not know the process exists.
-      Process.sleep(2_000)
+      assert :ok =
+               wait_for_replication(surviving_node, agent_node, [agent_id], @replication_timeout)
 
       # Stop the node that has the agent
       LocalCluster.stop(cluster, agent_node)
@@ -171,6 +249,13 @@ defmodule Sagents.Horde.NodeTransferTest do
 
       agent_node = node(original_pid)
       surviving_node = if agent_node == node1, do: node2, else: node1
+
+      # The surviving node can only take the agent over once Horde has
+      # replicated it there. Without this wait the node departs before the
+      # replica lands and the agent is lost rather than moved — which has
+      # nothing to do with the shutdown being graceful.
+      assert :ok =
+               wait_for_replication(surviving_node, agent_node, [agent_id], @replication_timeout)
 
       # Graceful shutdown: call :init.stop on the node (like System.stop/0)
       :rpc.cast(agent_node, :init, :stop, [])
@@ -207,7 +292,8 @@ defmodule Sagents.Horde.NodeTransferTest do
       agents_on_node2 = Enum.filter(agents, fn {_id, _pid, n} -> n == node2 end)
 
       # Wait for CRDT to sync process entries to both nodes
-      Process.sleep(2_000)
+      all_ids = Enum.map(agents, fn {id, _pid, _node} -> id end)
+      assert :ok = wait_for_replication(node2, node1, all_ids, @replication_timeout)
 
       # Stop node1
       LocalCluster.stop(cluster, node1)

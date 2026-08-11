@@ -677,11 +677,18 @@ config :sagents, :distribution, :horde
 
 When Horde is enabled, `Sagents.ProcessRegistry` and `Sagents.ProcessSupervisor` automatically switch to `Horde.Registry` and `Horde.DynamicSupervisor`, giving you:
 
-- **Automatic agent redistribution** across cluster nodes
+- **Agent redistribution** across cluster nodes when a node leaves
 - **State migration** when nodes join or leave the cluster
 - **Node transfer events** broadcast during redistribution so your UI can react
 
 Agents broadcast `{:agent, {:node_transferring, data}}` and `{:agent, {:node_transferred, data}}` events during Horde redistribution, allowing connected clients to follow their agent to a new node.
+
+> Redistribution is best-effort, not a guarantee: a node that leaves before the
+> cluster has converged on its departure takes its agents with it rather than
+> handing them over. Nothing is corrupted or duplicated, and the next
+> `Sagents.Session.ensure_running/3` re-creates the agent from persisted state —
+> but design against the request, not against an agent you assume is still
+> alive. See [Clustering](docs/clustering.md#taking-a-node-out-of-the-cluster).
 
 #### Controlling membership
 

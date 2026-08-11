@@ -58,7 +58,16 @@ defmodule Sagents.ProcessRegistryTest do
   describe "child_spec/1" do
     test "returns a valid child spec for default registry" do
       spec = ProcessRegistry.child_spec([])
-      assert {Registry, [keys: :unique, name: Sagents.Registry]} = spec
+
+      # Started through Sagents.LocalRegistry rather than Registry directly, so
+      # a restart that races the outgoing registry's terminating partition
+      # retries instead of taking Sagents.Supervisor down with it.
+      assert %{
+               id: Sagents.Registry,
+               start:
+                 {Sagents.LocalRegistry, :start_link, [[keys: :unique, name: Sagents.Registry]]},
+               type: :supervisor
+             } = spec
     end
   end
 end
