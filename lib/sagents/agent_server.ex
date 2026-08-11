@@ -4130,7 +4130,8 @@ defmodule Sagents.AgentServer do
     GenServer.call(get_name(agent_id), request, timeout)
   end
 
+  # Every call!/3 request is either a bare atom or a tagged tuple, so these two
+  # clauses are exhaustive. No catch-all: dialyzer proves it unreachable.
   defp elem_name(request) when is_atom(request), do: request
   defp elem_name(request) when is_tuple(request), do: elem(request, 0)
-  defp elem_name(_request), do: :call
 end
