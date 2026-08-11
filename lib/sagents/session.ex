@@ -101,11 +101,11 @@ defmodule Sagents.Session do
   def start(config, conversation_id, opts \\ []) do
     agent_id = config.agent_id_fun.(conversation_id)
 
-    case AgentServer.get_pid(agent_id) do
-      nil ->
+    case AgentServer.fetch_pid(agent_id) do
+      {:error, :not_running} ->
         do_start(config, conversation_id, agent_id, opts)
 
-      pid ->
+      {:ok, pid} ->
         Logger.debug("Agent session already running for conversation #{inspect(conversation_id)}")
 
         {:ok,
@@ -115,6 +115,17 @@ defmodule Sagents.Session do
            conversation_id: conversation_id,
            started: false
          }}
+
+      {:error, :registry_unavailable} = error ->
+        # This node cannot answer whether an agent is running, so it must not
+        # guess. Starting one anyway is how a conversation ends up with two
+        # AgentServers. Report it and let the caller retry elsewhere.
+        Logger.warning(
+          "Refusing to start agent session for conversation " <>
+            "#{inspect(conversation_id)}: registry unavailable on this node"
+        )
+
+        error
     end
   end
 
@@ -381,25 +392,47 @@ defmodule Sagents.Session do
   @doc """
   Stop the agent session for a conversation. No-op if nothing is running.
   """
-  @spec stop(config(), conversation_id :: term()) :: {:ok, :stopped | :not_running}
+  @spec stop(config(), conversation_id :: term()) ::
+          {:ok, :stopped | :not_running} | {:error, :registry_unavailable}
   def stop(config, conversation_id) do
     agent_id = config.agent_id_fun.(conversation_id)
 
-    case AgentServer.get_pid(agent_id) do
-      nil ->
+    case AgentServer.fetch_pid(agent_id) do
+      {:error, :not_running} ->
         {:ok, :not_running}
 
-      _pid ->
+      {:ok, _pid} ->
         AgentServer.stop(agent_id)
         {:ok, :stopped}
+
+      {:error, :registry_unavailable} = error ->
+        error
     end
   end
 
-  @doc "Whether an agent session is currently running for `conversation_id`."
+  @doc """
+  Whether an agent session is currently running for `conversation_id`.
+
+  Raises `Sagents.RegistryUnavailableError` when this node's registry cannot
+  answer. A boolean has no room for "cannot tell", and `false` would be read as
+  "nothing is running", which callers respond to by starting a duplicate agent.
+  Guard with `Sagents.ready?/0`, or use `ensure_running/3`, which reports the
+  condition as a value.
+  """
   @spec running?(config(), conversation_id :: term()) :: boolean()
   def running?(config, conversation_id) do
     agent_id = config.agent_id_fun.(conversation_id)
-    AgentServer.get_pid(agent_id) != nil
+
+    case AgentServer.fetch_pid(agent_id) do
+      {:ok, _pid} ->
+        true
+
+      {:error, :not_running} ->
+        false
+
+      {:error, :registry_unavailable} ->
+        raise Sagents.RegistryUnavailableError, operation: :"Session.running?/2"
+    end
   end
 
   # ===========================================================================
@@ -442,7 +475,7 @@ defmodule Sagents.Session do
 
       case AgentsDynamicSupervisor.start_agent_sync(supervisor_config) do
         {:ok, _supervisor_pid} ->
-          {:ok, session_info(agent_id, conversation_id)}
+          session_info(agent_id, conversation_id)
 
         {:error, reason} ->
           Logger.error("Failed to start agent session: #{inspect(reason)}")
@@ -547,13 +580,24 @@ defmodule Sagents.Session do
     |> Keyword.merge(supervisor_opts)
   end
 
+  # `start_agent_sync/1` only returns `:ok` once the AgentServer is registered,
+  # so this lookup normally succeeds. It can still fail if the node began
+  # shutting down in between, in which case the error is passed on rather than
+  # reporting `pid: nil` for an agent that was just confirmed running.
   defp session_info(agent_id, conversation_id) do
-    %{
-      agent_id: agent_id,
-      pid: AgentServer.get_pid(agent_id),
-      conversation_id: conversation_id,
-      started: true
-    }
+    case AgentServer.fetch_pid(agent_id) do
+      {:ok, pid} ->
+        {:ok,
+         %{
+           agent_id: agent_id,
+           pid: pid,
+           conversation_id: conversation_id,
+           started: true
+         }}
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   defp presence_topic(conversation_id), do: "conversation:#{conversation_id}"

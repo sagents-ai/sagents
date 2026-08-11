@@ -97,16 +97,22 @@ defmodule Sagents.AgentSupervisor do
   @doc """
   Get the PID of an AgentSupervisor by agent_id.
 
+  `{:error, :registry_unavailable}` means this node's registry could not answer,
+  not that nothing is running. It is deliberately distinct from `:not_found`:
+  treating it as "not found" makes callers start a second AgentSupervisor for an
+  agent that already has one. See `docs/deployment.md`.
+
   ## Examples
 
       {:ok, pid} = AgentSupervisor.get_pid("my-agent-1")
       {:error, :not_found} = AgentSupervisor.get_pid("non-existent")
   """
-  @spec get_pid(String.t()) :: {:ok, pid()} | {:error, :not_found}
+  @spec get_pid(String.t()) :: {:ok, pid()} | {:error, :not_found | :registry_unavailable}
   def get_pid(agent_id) when is_binary(agent_id) do
-    case ProcessRegistry.lookup({:agent_supervisor, agent_id}) do
-      [{pid, _value}] -> {:ok, pid}
-      [] -> {:error, :not_found}
+    case ProcessRegistry.fetch({:agent_supervisor, agent_id}) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, :not_registered} -> {:error, :not_found}
+      {:error, :registry_unavailable} = error -> error
     end
   end
 
@@ -448,8 +454,8 @@ defmodule Sagents.AgentSupervisor do
   end
 
   defp do_wait_for_agent_ready(agent_id, deadline, retry_delay_ms, attempt) do
-    case AgentServer.get_pid(agent_id) do
-      nil ->
+    case AgentServer.fetch_pid(agent_id) do
+      {:error, :not_running} ->
         now = System.monotonic_time(:millisecond)
         time_left = deadline - now
 
@@ -473,8 +479,14 @@ defmodule Sagents.AgentSupervisor do
           do_wait_for_agent_ready(agent_id, deadline, next_delay, attempt + 1)
         end
 
-      pid when is_pid(pid) ->
+      {:ok, pid} when is_pid(pid) ->
         :ok
+
+      {:error, :registry_unavailable} = error ->
+        # This node is starting down while an agent is starting up. Retrying
+        # cannot succeed here, so surface the condition instead of spending the
+        # whole timeout on it.
+        error
     end
   end
 end

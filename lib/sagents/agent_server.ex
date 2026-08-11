@@ -511,16 +511,62 @@ defmodule Sagents.AgentServer do
   @doc """
   Get the pid of the AgentServer process for a specific agent.
 
+  Returns `nil` when no AgentServer is registered for `agent_id`.
+
+  Raises `Sagents.RegistryUnavailableError` when this node's registry cannot
+  answer at all, which happens while the node is starting and while it drains
+  during a rolling deploy. Returning `nil` there would be indistinguishable from
+  "not running", and callers act on that by starting a duplicate agent. Use
+  `fetch_pid/1` on request paths, where the condition is a value rather than a
+  raise.
+
   ## Examples
 
-      pid = AgentServer.get_pit("my-agent-1")
+      pid = AgentServer.get_pid("my-agent-1")
       send(pid, message)
   """
-  @spec get_pid(String.t()) :: pid() | {atom(), node()} | nil
+  @spec get_pid(String.t()) :: pid() | nil
   def get_pid(agent_id) when is_binary(agent_id) do
-    agent_id
-    |> get_name()
-    |> GenServer.whereis()
+    case fetch_pid(agent_id) do
+      {:ok, pid} ->
+        pid
+
+      {:error, :not_running} ->
+        nil
+
+      {:error, :registry_unavailable} ->
+        raise Sagents.RegistryUnavailableError, operation: :"AgentServer.get_pid/1"
+    end
+  end
+
+  @doc """
+  Get the pid of the AgentServer for `agent_id`, without raising.
+
+  The three outcomes are kept distinct on purpose:
+
+  - `{:ok, pid}` - an AgentServer is running
+  - `{:error, :not_running}` - the registry answered, no AgentServer is registered
+  - `{:error, :registry_unavailable}` - this node's registry could not answer
+
+  Prefer this over `get_pid/1` anywhere a web request can reach, and map
+  `:registry_unavailable` to a retryable response (503) rather than a 500. The
+  cluster can serve the request, just not on this node. See `docs/deployment.md`.
+
+  ## Examples
+
+      case AgentServer.fetch_pid("my-agent-1") do
+        {:ok, pid} -> send(pid, message)
+        {:error, :not_running} -> start_it()
+        {:error, :registry_unavailable} -> {:error, :draining}
+      end
+  """
+  @spec fetch_pid(String.t()) :: {:ok, pid()} | {:error, :not_running | :registry_unavailable}
+  def fetch_pid(agent_id) when is_binary(agent_id) do
+    case ProcessRegistry.fetch({:agent_server, agent_id}) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, :not_registered} -> {:error, :not_running}
+      {:error, :registry_unavailable} = error -> error
+    end
   end
 
   @doc """
@@ -936,7 +982,7 @@ defmodule Sagents.AgentServer do
   @doc false
   @spec get_state(String.t()) :: State.t()
   def get_state(agent_id) do
-    GenServer.call(get_name(agent_id), :get_state)
+    call!(agent_id, :get_state)
   end
 
   @doc """
@@ -958,7 +1004,7 @@ defmodule Sagents.AgentServer do
   @spec get_status(String.t()) :: status() | :not_running
   def get_status(agent_id) do
     try do
-      GenServer.call(get_name(agent_id), :get_status)
+      call!(agent_id, :get_status)
     catch
       :exit, _reason ->
         :not_running
@@ -980,7 +1026,7 @@ defmodule Sagents.AgentServer do
   """
   @spec get_info(String.t()) :: map()
   def get_info(agent_id) do
-    GenServer.call(get_name(agent_id), :get_info)
+    call!(agent_id, :get_info)
   end
 
   @doc """
@@ -1208,13 +1254,13 @@ defmodule Sagents.AgentServer do
       when is_binary(agent_id) and is_list(opts) do
     # Cheap, non-blocking guard. Mirrors TodoList.save_todo_snapshot/2 so unit
     # tests and serverless Agent.execute/3 degrade to a reportable no-op rather
-    # than raising out of a tool body.
-    case GenServer.whereis(get_name(agent_id)) do
-      nil ->
-        {:error, :no_server}
-
-      _pid ->
-        GenServer.cast(get_name(agent_id), {:queue_message, message, opts})
+    # than raising out of a tool body. A draining node folds into the same
+    # no-server answer: this runs inside tool code, which has no better move
+    # than its fallback path, and raising out of a tool body is exactly what
+    # the guard exists to prevent.
+    case fetch_pid(agent_id) do
+      {:ok, pid} -> GenServer.cast(pid, {:queue_message, message, opts})
+      {:error, _reason} -> {:error, :no_server}
     end
   end
 
@@ -1271,7 +1317,7 @@ defmodule Sagents.AgentServer do
   """
   @spec get_inactivity_status(String.t()) :: map()
   def get_inactivity_status(agent_id) do
-    GenServer.call(get_name(agent_id), :get_inactivity_status)
+    call!(agent_id, :get_inactivity_status)
   end
 
   @doc """
@@ -1311,6 +1357,7 @@ defmodule Sagents.AgentServer do
   """
   @spec stop(String.t()) :: :ok
   def stop(agent_id) do
+    ProcessRegistry.ensure_available!(:"AgentServer.stop/1")
     GenServer.stop(get_name(agent_id))
   end
 
@@ -1341,7 +1388,7 @@ defmodule Sagents.AgentServer do
   """
   @spec export_state(String.t()) :: map()
   def export_state(agent_id) do
-    GenServer.call(get_name(agent_id), :export_state)
+    call!(agent_id, :export_state)
   end
 
   @doc """
@@ -1363,7 +1410,7 @@ defmodule Sagents.AgentServer do
   """
   @spec restore_state(String.t(), map()) :: :ok | {:error, term()}
   def restore_state(agent_id, persisted_state) when is_map(persisted_state) do
-    GenServer.call(get_name(agent_id), {:restore_state, persisted_state})
+    call!(agent_id, {:restore_state, persisted_state})
   end
 
   @doc """
@@ -1395,7 +1442,7 @@ defmodule Sagents.AgentServer do
   - `{:error, reason}` - If agent server is not running or update fails
   """
   def update_agent_and_state(agent_id, agent, state) do
-    GenServer.call(get_name(agent_id), {:update_agent_and_state, agent, state})
+    call!(agent_id, {:update_agent_and_state, agent, state})
   end
 
   @doc """
@@ -4048,18 +4095,43 @@ defmodule Sagents.AgentServer do
     Sagents.Presence.untrack(presence_mod, @agent_presence_topic, agent_id)
   end
 
-  # Wrap GenServer.call against an agent's via-tuple name with try/catch so
-  # callers get a clear {:error, :agent_not_running} tuple when the
-  # AgentServer has shut down (inactivity timeout, supervisor restart, Horde
-  # migration in flight) instead of a raw `(EXIT) no process` signal.
+  # Wrap GenServer.call against an agent with try/catch so callers get a clear
+  # {:error, :agent_not_running} tuple when the AgentServer has shut down
+  # (inactivity timeout, supervisor restart, Horde migration in flight) instead
+  # of a raw `(EXIT) no process` signal.
   #
   # Same intent as the existing pattern in `get_metadata/1` and `get_agent/1`,
-  # but routed through the via-tuple registry name so a single helper covers
-  # every lifecycle-action callsite (execute/1, cancel/1, resume/2,
-  # add_message/2, reset/1).
+  # but routed through the registry so a single helper covers every
+  # lifecycle-action callsite (execute/1, cancel/1, resume/2, add_message/2,
+  # reset/1).
+  #
+  # Resolves the pid through fetch_pid/1 rather than handing GenServer.call a
+  # via-tuple. GenServer.call resolves a via name itself, and that resolution
+  # raises out of :ets while this node's registry is unavailable, which covers
+  # the whole drain window of a rolling deploy. fetch_pid/1 makes it a value the
+  # caller can act on, so this helper is the single guard point for the
+  # lifecycle API.
   defp safe_call(agent_id, request, timeout \\ 5000) do
-    GenServer.call(get_name(agent_id), request, timeout)
+    case fetch_pid(agent_id) do
+      {:ok, pid} -> GenServer.call(pid, request, timeout)
+      {:error, :not_running} -> {:error, :agent_not_running}
+      {:error, :registry_unavailable} = error -> error
+    end
   catch
     :exit, _reason -> {:error, :agent_not_running}
   end
+
+  # For calls whose return shape has no room for an error tuple. Raises a named
+  # Sagents.RegistryUnavailableError when the registry cannot answer, so the
+  # condition is diagnosable and is never reported as a plausible-looking
+  # default value.
+  defp call!(agent_id, request, timeout \\ 5000) do
+    ProcessRegistry.ensure_available!(:"AgentServer.#{elem_name(request)}")
+    GenServer.call(get_name(agent_id), request, timeout)
+  end
+
+  # Every call!/3 request is either a bare atom or a tagged tuple, so these two
+  # clauses are exhaustive. No catch-all: dialyzer proves it unreachable.
+  defp elem_name(request) when is_atom(request), do: request
+  defp elem_name(request) when is_tuple(request), do: elem(request, 0)
 end
