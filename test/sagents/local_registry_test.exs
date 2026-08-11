@@ -12,13 +12,16 @@ defmodule Sagents.LocalRegistryTest do
   """
   use ExUnit.Case, async: false
 
+  # These tests need no cleanup callback. `start_link/1` links the registry to
+  # the test process, so ExUnit's exit already tears it down, and each test uses
+  # a name of its own. An `on_exit` that stops the registry itself races that
+  # teardown: the supervisor is mid-shutdown by the time the callback runs, so
+  # `Process.alive?/1` still says true and `Supervisor.stop/1` exits `:shutdown`.
   describe "start_link/1" do
     test "starts a registry normally" do
       name = unique_name()
       assert {:ok, pid} = Sagents.LocalRegistry.start_link(keys: :unique, name: name)
       assert Process.whereis(name) == pid
-
-      on_exit(fn -> if Process.alive?(pid), do: Supervisor.stop(pid) end)
     end
 
     test "retries past a partition name still held by the previous registry" do
@@ -49,8 +52,6 @@ defmodule Sagents.LocalRegistryTest do
       assert {:ok, _owner} = Registry.register(name, :some_key, :value)
       assert [{self_pid, :value}] = Registry.lookup(name, :some_key)
       assert self_pid == self()
-
-      on_exit(fn -> if Process.alive?(second), do: Supervisor.stop(second) end)
     end
   end
 
