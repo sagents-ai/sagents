@@ -73,6 +73,33 @@ defmodule Sagents.ClusterTestHelper do
   end
 
   @doc """
+  Whether `horde` on this node currently sees `other_node` as an `:alive` member.
+
+  Horde only hands a departed node's processes to a survivor when the survivor's
+  `members_info` entry for that node says `status: :dead`, and `mark_dead/2` can
+  only mark an entry that is already there. A node removed before its member
+  entry has converged on the survivor therefore takes its processes with it
+  instead of handing them over.
+
+  Reads Horde's internal GenServer state, so this is a test-only probe.
+  """
+  def member_alive?(horde, other_node) do
+    case :sys.get_state(horde) do
+      %{members_info: members_info} ->
+        Enum.any?(members_info, fn {{_name, member_node}, member} ->
+          member_node == other_node and member.status == :alive
+        end)
+
+      _other ->
+        false
+    end
+  rescue
+    _error -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  @doc """
   The `node()`s in `horde`'s member set as seen from this node.
   """
   def member_nodes(horde) do

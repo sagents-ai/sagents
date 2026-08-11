@@ -355,47 +355,145 @@ found; restored state always wins.
 
 ## Registry and Discovery
 
-Agents register with a named `Registry`:
+Every agent process registers itself in `Sagents.Registry` at start, through the
+`Sagents.ProcessRegistry` abstraction. That module hides which backend is in
+play:
+
+- `:local` — Elixir's `Registry` (single node, no extra dependency)
+- `:horde` — `Horde.Registry` (cluster-wide, requires the `:horde` dependency)
 
 ```elixir
-# Registration happens in AgentServer.start_link
-Registry.register(Sagents.Registry, agent_id, %{})
+config :sagents, :distribution, :local   # default
+config :sagents, :distribution, :horde
+```
 
-# Discovery
+Registration is by keyed `:via` tuple rather than by bare agent id, so a
+supervisor and the server inside it are separate entries:
+
+```elixir
+Sagents.ProcessRegistry.via_tuple({:agent_server, "conversation-1"})
+Sagents.ProcessRegistry.via_tuple({:agent_supervisor, "conversation-1"})
+```
+
+Discovery:
+
+```elixir
 AgentServer.list_running_agents()
 # => ["conversation-1", "conversation-2"]
 
-AgentServer.whereis("conversation-1")
-# => #PID<0.1234.0>
+AgentServer.fetch_pid("conversation-1")
+# => {:ok, #PID<0.1234.0>}
 ```
+
+### A lookup has three outcomes
+
+A registry read can only be answered while the registry process on *this* node
+is alive. It is not alive while the node is still starting `Sagents.Supervisor`,
+and it is not alive after that supervisor has shut down while the BEAM drains
+during a rolling deploy — a window that lasts as long as the platform's grace
+period, and during which a load balancer may still be routing requests here.
+
+So the API keeps three answers distinct:
+
+```elixir
+case AgentServer.fetch_pid(agent_id) do
+  {:ok, pid} -> ...                        # running
+  {:error, :not_running} -> ...            # the registry answered: nothing there
+  {:error, :registry_unavailable} -> ...   # this node cannot answer at all
+end
+```
+
+**`:registry_unavailable` must never collapse into "not running".** A caller
+that reads "nothing is running" responds by starting an agent, so collapsing the
+two lets a draining node start a second AgentServer for a conversation that
+already has one elsewhere. Both would hold and persist state for it, with
+nothing reporting the conflict.
+
+Functions whose return shape cannot carry the condition raise
+`Sagents.RegistryUnavailableError` instead of answering `nil`, `false`, `[]` or
+`0` — `AgentServer.get_pid/1`, `AgentServer.list_running_agents/0` and
+`Sagents.Session.running?/2` among them. Prefer the tuple-returning forms
+(`AgentServer.fetch_pid/1`, `Sagents.Session.ensure_running/3`) anywhere a web
+request can reach, and map `:registry_unavailable` to a retryable 503 rather
+than a 500: the cluster can serve the request, just not on this node.
+
+`Sagents.ready?/0` exposes the same signal for a readiness endpoint. See
+[Deployments, draining, and readiness](deployment.md).
 
 ## Supervision Tree
 
 ```
-Application Supervisor
+Application Supervisor (your app)
 │
+├── MyApp.Repo
 ├── Phoenix.PubSub (:my_pubsub)
 │
-├── Sagents.Registry
+├── Sagents.Supervisor                          # strategy: :rest_for_one
+│   │
+│   ├── Sagents.Registry                        # Registry | Horde.Registry
+│   ├── Sagents.RegistryWatcher
+│   │
+│   ├── Sagents.AgentsDynamicSupervisor
+│   │   ├── AgentSupervisor ("conversation-1")
+│   │   │   ├── AgentServer
+│   │   │   └── SubAgentsDynamicSupervisor
+│   │   │       ├── SubAgentServer
+│   │   │       └── SubAgentServer
+│   │   │
+│   │   └── AgentSupervisor ("conversation-2")
+│   │       └── ...
+│   │
+│   └── Sagents.FileSystem.FileSystemSupervisor
+│       ├── FileSystemServer ({:user, 1})       # Scoped independently
+│       ├── FileSystemServer ({:user, 2})
+│       └── FileSystemServer ({:project, 42})   # Can be shared across agents
 │
-├── Sagents.FileSystemSupervisor (DynamicSupervisor)
-│   ├── FileSystemServer ({:user, 1})      # Scoped independently
-│   ├── FileSystemServer ({:user, 2})
-│   └── FileSystemServer ({:project, 42})  # Can be shared across agents
-│
-└── Sagents.AgentsDynamicSupervisor (DynamicSupervisor)
-    │
-    ├── AgentSupervisor ("conversation-1")
-    │   ├── AgentServer
-    │   └── SubAgentsDynamicSupervisor
-    │       ├── SubAgentServer
-    │       └── SubAgentServer
-    │
-    ├── AgentSupervisor ("conversation-2")
-    │   └── ...
-    │
-    └── ...
+└── MyAppWeb.Endpoint                           # after Sagents.Supervisor, on purpose
 ```
+
+### Why `:rest_for_one`
+
+An AgentSupervisor and an AgentServer register their `:via` names once, at
+start, and nothing re-registers them afterwards. A registry that came back empty
+underneath them would leave them running but invisible to every lookup — so the
+next request reads "nothing is running" and starts a *second* AgentServer for a
+conversation that already has one, with both persisting state.
+
+`:rest_for_one` expresses that dependency: a registry failure takes the dynamic
+supervisors down with it, agents stop, and the next request re-creates them from
+persisted state. That looks heavy-handed and is the point. Agent state is
+durable, so a restart is recoverable; a silent duplicate is not.
+
+`Sagents.RegistryWatcher` is listed immediately after the registry because on
+both backends the process that owns the registry's ETS tables sits one level
+below the child `Sagents.Supervisor` supervises, and both backends restart that
+process internally with fresh, empty tables. The registry ends up empty while
+this supervisor never sees a failed child.
+
+Which process that is differs by backend. Under `:horde` it is
+`Horde.RegistryImpl`, which is itself registered as `Sagents.Registry`. Under
+`:local` it is a `Registry.Partition`, a child of the `Registry.Supervisor` that
+holds the name, so watching the name would miss the failure entirely.
+`Sagents.ProcessRegistry.watched_name/0` resolves the difference, and the
+watcher monitors whatever it returns, stopping when that process dies. That is
+what puts the restart into the `:rest_for_one` chain.
+
+A `:local` registry has a second failure mode, `Registry.Supervisor` itself
+dying, which *is* a failed child and reaches the chain unaided. Watching the
+partition covers it too, since the partition dies whenever its supervisor does.
+
+### Why the Endpoint comes last
+
+OTP shuts children down in reverse start order. Listed **after**
+`Sagents.Supervisor`, the Endpoint stops accepting requests first and the
+registry is still alive to serve whatever is in flight. Listed **before**, it
+keeps serving requests after the registry is gone, and every one of them fails
+until the BEAM exits.
+
+Correct ordering narrows that window but does not close it, because the node
+stays reachable for the platform's whole drain period. Wiring `Sagents.ready?/0`
+into a readiness check is what closes it. See
+[Deployments, draining, and readiness](deployment.md).
 
 **Flexible Scoping**: FileSystemServer lives outside the AgentSupervisor tree, allowing different scoping strategies. For example:
 - User-scoped filesystem: All of a user's conversations share the same files
@@ -424,6 +522,73 @@ AgentServer.start_link(
   ]
 )
 ```
+
+### Registry Failure
+
+A registry process crashing is rare, but it has a defined outcome: the
+`:rest_for_one` chain restarts the dynamic supervisors below it, agents on that
+node stop, and the next request re-creates them from persisted state.
+
+Two internal pieces make that restart land correctly, and you call neither:
+
+- `Sagents.RegistryWatcher` connects the failure to the restart chain, because
+  both backends restart the process that owns the registry's tables internally,
+  leaving the registry empty without failing a child of `Sagents.Supervisor`.
+- `Sagents.LocalRegistry` covers the `:local` backend, where the restart races
+  the outgoing registry's partition process. That partition traps exits, because
+  it links to every registered process, so it does not die with the registry: it
+  terminates asynchronously and holds its registered name for a few milliseconds
+  longer. A start landing inside that window fails with
+  `{:already_started, pid}`, and a supervisor does not retry its way out of a
+  failed restart — it would give up and take the whole tree with it.
+  `Sagents.LocalRegistry` monitors the straggler, waits for it to exit, and
+  retries.
+
+Under `:horde` this deliberately over-reacts. A surviving peer repairs a
+restarted registry from the CRDT within a few hundred milliseconds, pointing at
+the processes that were still running, so on a healthy cluster a registry crash
+would have cost nothing. The agents are restarted anyway, because no node can
+tell in time whether that repair is coming: a single-node deployment has no
+peer, and a partitioned cluster is indistinguishable from a healthy one from the
+inside. Over-reacting costs a restart from durable state. Under-reacting leaves
+agents running but unregistered, which is the silent duplicate above.
+
+A registry failure is not part of draining. The watcher sits after the registry
+and OTP stops children in reverse order, so it is gone before the registry is on
+an orderly shutdown.
+
+### A Draining or Starting Node
+
+The node's registry cannot answer lookups before `Sagents.Supervisor` has
+started and after it has shut down. The second window is every rolling deploy,
+and it lasts for the platform's whole grace period while the node is still
+reachable.
+
+Lookups report this as `{:error, :registry_unavailable}` or raise
+`Sagents.RegistryUnavailableError` rather than answering with a plausible
+default — see [A lookup has three outcomes](#a-lookup-has-three-outcomes-not-two).
+It is not a race to retry through: on the affected node *every* call fails
+identically until the BEAM exits, so recovery has to come from the request
+landing on a different node.
+
+### Node Departure in a Cluster (`:horde`)
+
+Horde hands a departed node's processes to a survivor only once that survivor
+has converged on the departure and marked the node's member entry dead. An agent
+placed immediately before its node leaves is dropped rather than handed over;
+one that has been running for a couple of seconds or more is redistributed
+reliably. Whether the departure is graceful makes no difference.
+
+A dropped agent is dropped **cleanly**: the registry and Horde's process CRDT
+are both left with no entry for it, so there is no orphan and no duplicate, and
+the next `Sagents.Session.ensure_running/3` starts it again from persisted
+state. That is the same recovery path an inactivity shutdown uses.
+
+The rule to design to: **treat redistribution as an optimization and the next
+request as the guarantee.** Work that must happen should be driven by a request,
+a job, or a supervisor you control, never by assuming Horde kept an agent alive
+somewhere. See
+[Taking a node out of the cluster](clustering.md#taking-a-node-out-of-the-cluster).
 
 ### LLM Errors
 

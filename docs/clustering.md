@@ -196,11 +196,47 @@ Sagents.ready?()
 
 ## Taking a node out of the cluster
 
-Membership handles a node *leaving*. It does not handle the window where the
-node has stopped its Sagents supervision tree but is still receiving HTTP
-traffic, which is every rolling deploy. Requests arriving in that window cannot
-be served on that node no matter how healthy the rest of the cluster is.
+Membership prunes a departed node automatically. Two things it does **not** do
+are worth being explicit about, because both are easy to assume.
+
+### It does not stop traffic reaching a draining node
+
+Membership says nothing about the window where a node has stopped its Sagents
+supervision tree but is still receiving HTTP traffic, which is every rolling
+deploy. Requests arriving in that window cannot be served on that node no matter
+how healthy the rest of the cluster is.
 
 See [Deployments, draining, and readiness](deployment.md) for the readiness
 signal (`Sagents.ready?/0`), the required shutdown sequence, and platform
 examples.
+
+### It does not guarantee the departed node's agents are handed over
+
+Pruning membership and handing over processes are separate mechanisms. Horde
+takes over a departed node's processes only after the surviving node has
+converged on the departure and marked that member dead. A node that leaves
+before that convergence completes takes its agents with it.
+
+In practice this affects agents placed shortly before the departure. An agent
+that has been running for a couple of seconds or more is redistributed
+reliably; one placed immediately before the node leaves is dropped in roughly
+one departure in four. Whether the node leaves gracefully (`:init.stop`) or
+abruptly makes no difference.
+
+A dropped agent is dropped **cleanly**. Both the registry and the supervisor's
+process CRDT are left with no entry for it, so there is no orphan and no
+duplicate, and the next `Sagents.Session.ensure_running/3` starts it again from
+persisted state. This is the same recovery path an inactivity shutdown uses,
+which is why it is a bounded cost rather than data loss.
+
+The rule to design to: **treat redistribution as an optimization and the next
+request as the guarantee.** Work that must happen should be driven by a request,
+a job, or a supervisor you control — never by assuming Horde kept an agent alive
+somewhere on your behalf.
+
+If you want to observe this directly, the coverage is in
+`test/sagents/horde/node_transfer_test.exs`:
+
+```bash
+mix test test/sagents/horde/node_transfer_test.exs --include cluster
+```

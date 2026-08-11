@@ -503,7 +503,7 @@ defmodule Sagents.Session do
                       # ...
                     end
 
-                See PLAN-RefactoringTheAgentAPI-FactoriesAndConfig.md.
+                See `Sagents.Factory` for the full contract.
                 """,
                 __STACKTRACE__
       else

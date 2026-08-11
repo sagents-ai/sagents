@@ -226,10 +226,10 @@ default. On request paths, prefer the tuple-returning forms
 Agent state is durable, which is what makes all of this recoverable.
 
 - **Graceful shutdown.** Agents terminate, persist their state, and broadcast a
-  shutdown event. Under `:horde`, surviving members pick up the work when a
-  request next asks for it.
-- **A node vanishing abruptly.** Horde detects the departure and redistributes.
-  The new process starts from persisted state.
+  shutdown event.
+- **A node vanishing abruptly.** Under `:horde`, surviving members usually
+  restart the departed node's agents on their own. Treat this as an
+  optimization, not a guarantee — see the warning below.
 - **The next request either way.** `Sagents.Session.ensure_running/3` starts the
   agent from persisted state on whichever node handles it. A conversation that
   was mid-run resumes as a fresh run rather than continuing the interrupted one.
@@ -237,6 +237,91 @@ Agent state is durable, which is what makes all of this recoverable.
 So a deploy costs you in-flight LLM turns, not conversations. Sizing your drain
 window is a question of how long you are willing to wait for those turns, not of
 whether state survives.
+
+> #### Redistribution is best-effort; the next request is the guarantee {: .warning}
+>
+> Horde only hands a departed node's processes to a survivor once that survivor
+> has converged on the departure — its member entry for the node has to be
+> marked dead before the takeover clause fires. A node that leaves *before* that
+> convergence completes takes its agents with it instead of handing them over.
+>
+> An agent that has been running for a couple of seconds or more is
+> redistributed reliably. One placed immediately before the node departs is
+> dropped in roughly one departure in four. Both `:init.stop` and an abrupt node
+> loss behave identically here — being graceful does not help.
+>
+> When an agent is dropped it is **dropped cleanly, not corrupted**: the
+> registry and Horde's process CRDT are both left empty for that agent, so
+> nothing is left behind and no duplicate is possible. The next
+> `Sagents.Session.ensure_running/3` starts it again from persisted state,
+> exactly as it would after an inactivity shutdown.
+>
+> The practical consequences:
+>
+> - **Do not treat redistribution as a correctness property.** Anything that
+>   must happen must be driven by a request, a job, or a supervisor you control,
+>   not by an agent that you assume Horde kept alive somewhere.
+> - **The drain sequence above is what protects you.** Steps 1 to 4 stop new
+>   agents being placed on a node that is about to leave, which is exactly the
+>   case that loses them.
+
+### If the registry itself fails
+
+A node's registry process crashing is rare, but it has a defined outcome on both
+backends, and it is deliberately a noisy one.
+
+`Sagents.Supervisor` supervises its children `:rest_for_one` with the registry
+first, so a registry failure restarts the agent and filesystem supervisors too.
+Running agents on that node stop and are re-created from persisted state on the
+next request.
+
+That looks heavy-handed and is the point. An `AgentSupervisor` and an
+`AgentServer` register their `:via` names once, at start, and nothing
+re-registers them. A registry that comes back empty underneath them leaves them
+running but invisible to every lookup — so the next request reads "nothing is
+running" and starts a *second* AgentServer for a conversation that already has
+one, with both persisting state and nothing reporting the conflict. Restarting
+them is recoverable; a silent duplicate is not.
+
+Two internal pieces make that restart reach the right processes, and you do not
+interact with either:
+
+- `Sagents.RegistryWatcher`. On both backends the process owning the registry's
+  ETS tables runs under a supervisor of the backend's own, which restarts it
+  with empty tables without failing a child of `Sagents.Supervisor`. Under
+  `:horde` that process is the one registered as `Sagents.Registry`; under
+  `:local` it is a `Registry.Partition` one level below the name. The watcher
+  monitors it and fails in its place.
+- `Sagents.LocalRegistry`. Under `:local` the restart races the outgoing
+  registry's partition process, which traps exits and holds its registered name
+  for a few milliseconds after the registry is gone. A start landing inside that
+  window fails with `{:already_started, pid}`, and a supervisor does not recover
+  from a failed restart. `Sagents.LocalRegistry` waits for the straggler to exit
+  and retries.
+
+None of this is part of draining. The watcher is listed after the registry, and
+OTP stops children in reverse order, so it is already gone by the time the
+registry stops on a normal shutdown. A draining node never looks like a registry
+failure.
+
+> #### On a cluster this deliberately over-reacts {: .info}
+>
+> Under `:horde`, registrations replicate through the same CRDT as membership,
+> so a surviving peer repairs a restarted registry within a few hundred
+> milliseconds, pointing at the very processes that were still running. Left
+> alone, a registry crash on a healthy multi-node cluster would cost nothing.
+>
+> Sagents restarts the node's agents anyway. Nothing on the affected node can
+> tell in time whether a repair is coming: a single-node deployment has no peer,
+> and a partitioned or lagging cluster looks identical from the inside until the
+> window has passed. Guessing wrong leaves agents running but unregistered,
+> which is what produces two AgentServers persisting one conversation with
+> nothing reporting it.
+>
+> So the failure is bounded to a restart from durable state rather than left to
+> become silent corruption. What it means for you: a registry crash costs the
+> in-flight LLM turns on that node, the same as a deploy does, and conversations
+> resume on the next request.
 
 ## Verifying it
 

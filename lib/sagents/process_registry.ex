@@ -66,7 +66,15 @@ defmodule Sagents.ProcessRegistry do
   def child_spec(_opts) do
     case distribution_type() do
       :local ->
-        {Registry, keys: :unique, name: @registry_name}
+        # Sagents.LocalRegistry wraps Registry.start_link/1 to survive a restart
+        # that races the outgoing registry's partition process, which traps
+        # exits and holds its registered name for a few milliseconds after the
+        # registry itself is gone. See `Sagents.LocalRegistry`.
+        %{
+          id: @registry_name,
+          start: {Sagents.LocalRegistry, :start_link, [[keys: :unique, name: @registry_name]]},
+          type: :supervisor
+        }
 
       :horde ->
         assert_horde_available!()
@@ -248,6 +256,35 @@ defmodule Sagents.ProcessRegistry do
   Returns the registry name atom (`Sagents.Registry`).
   """
   def registry_name, do: @registry_name
+
+  @doc """
+  The name of the process whose death empties this node's registry.
+
+  This is not always `registry_name/0`, and the difference is what
+  `Sagents.RegistryWatcher` has to monitor.
+
+  Under `:horde` the two are the same: `Horde.RegistryImpl` is registered as
+  `Sagents.Registry` and owns its own ETS tables.
+
+  Under `:local` they differ. `Registry.start_link/1` registers a
+  `Registry.Supervisor` under the given name, but the tables that hold
+  registrations belong to its `Registry.Partition` child. That partition can be
+  restarted with empty tables while the supervisor keeps running and keeps its
+  registered name, so watching the name would miss the failure entirely.
+  Watching the partition catches both: it also dies whenever its supervisor
+  does.
+
+  The single-partition name is safe because `child_spec/1` starts the registry
+  without a `:partitions` option. Changing that would need this to return every
+  partition.
+  """
+  @spec watched_name() :: atom()
+  def watched_name do
+    case distribution_type() do
+      :local -> Module.concat(@registry_name, "PIDPartition0")
+      :horde -> @registry_name
+    end
+  end
 
   # ---------------------------------------------------------------------------
   # Internal
