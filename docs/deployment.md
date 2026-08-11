@@ -286,15 +286,42 @@ them is recoverable; a silent duplicate is not.
 Two internal pieces make that restart reach the right processes, and you do not
 interact with either:
 
-- `Sagents.RegistryWatcher`. Under `:horde` the registry is restarted by Horde's
-  own supervisor, so `Sagents.Supervisor` never sees a failed child of its own.
-  The watcher monitors the registered process and fails in its place.
+- `Sagents.RegistryWatcher`. On both backends the process owning the registry's
+  ETS tables runs under a supervisor of the backend's own, which restarts it
+  with empty tables without failing a child of `Sagents.Supervisor`. Under
+  `:horde` that process is the one registered as `Sagents.Registry`; under
+  `:local` it is a `Registry.Partition` one level below the name. The watcher
+  monitors it and fails in its place.
 - `Sagents.LocalRegistry`. Under `:local` the restart races the outgoing
   registry's partition process, which traps exits and holds its registered name
   for a few milliseconds after the registry is gone. A start landing inside that
   window fails with `{:already_started, pid}`, and a supervisor does not recover
   from a failed restart. `Sagents.LocalRegistry` waits for the straggler to exit
   and retries.
+
+None of this is part of draining. The watcher is listed after the registry, and
+OTP stops children in reverse order, so it is already gone by the time the
+registry stops on a normal shutdown. A draining node never looks like a registry
+failure.
+
+> #### On a cluster this deliberately over-reacts {: .info}
+>
+> Under `:horde`, registrations replicate through the same CRDT as membership,
+> so a surviving peer repairs a restarted registry within a few hundred
+> milliseconds, pointing at the very processes that were still running. Left
+> alone, a registry crash on a healthy multi-node cluster would cost nothing.
+>
+> Sagents restarts the node's agents anyway. Nothing on the affected node can
+> tell in time whether a repair is coming: a single-node deployment has no peer,
+> and a partitioned or lagging cluster looks identical from the inside until the
+> window has passed. Guessing wrong leaves agents running but unregistered,
+> which is what produces two AgentServers persisting one conversation with
+> nothing reporting it.
+>
+> So the failure is bounded to a restart from durable state rather than left to
+> become silent corruption. What it means for you: a registry crash costs the
+> in-flight LLM turns on that node, the same as a deploy does, and conversations
+> resume on the next request.
 
 ## Verifying it
 

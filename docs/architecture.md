@@ -464,12 +464,23 @@ supervisors down with it, agents stop, and the next request re-creates them from
 persisted state. That looks heavy-handed and is the point. Agent state is
 durable, so a restart is recoverable; a silent duplicate is not.
 
-`Sagents.RegistryWatcher` is listed immediately after the registry because
-neither backend lets a registry failure reach `Sagents.Supervisor` on its own.
-Both run the registered process under a supervisor of their own and restart it
-internally with fresh, empty tables, so this supervisor never sees a failed
-child. The watcher monitors the registered process directly and stops when it
-dies, which is what puts the restart into the `:rest_for_one` chain.
+`Sagents.RegistryWatcher` is listed immediately after the registry because on
+both backends the process that owns the registry's ETS tables sits one level
+below the child `Sagents.Supervisor` supervises, and both backends restart that
+process internally with fresh, empty tables. The registry ends up empty while
+this supervisor never sees a failed child.
+
+Which process that is differs by backend. Under `:horde` it is
+`Horde.RegistryImpl`, which is itself registered as `Sagents.Registry`. Under
+`:local` it is a `Registry.Partition`, a child of the `Registry.Supervisor` that
+holds the name, so watching the name would miss the failure entirely.
+`Sagents.ProcessRegistry.watched_name/0` resolves the difference, and the
+watcher monitors whatever it returns, stopping when that process dies. That is
+what puts the restart into the `:rest_for_one` chain.
+
+A `:local` registry has a second failure mode, `Registry.Supervisor` itself
+dying, which *is* a failed child and reaches the chain unaided. Watching the
+partition covers it too, since the partition dies whenever its supervisor does.
 
 ### Why the Endpoint comes last
 
@@ -521,7 +532,8 @@ node stop, and the next request re-creates them from persisted state.
 Two internal pieces make that restart land correctly, and you call neither:
 
 - `Sagents.RegistryWatcher` connects the failure to the restart chain, because
-  both backends restart the registered process internally.
+  both backends restart the process that owns the registry's tables internally,
+  leaving the registry empty without failing a child of `Sagents.Supervisor`.
 - `Sagents.LocalRegistry` covers the `:local` backend, where the restart races
   the outgoing registry's partition process. That partition traps exits, because
   it links to every registered process, so it does not die with the registry: it
@@ -531,6 +543,19 @@ Two internal pieces make that restart land correctly, and you call neither:
   failed restart — it would give up and take the whole tree with it.
   `Sagents.LocalRegistry` monitors the straggler, waits for it to exit, and
   retries.
+
+Under `:horde` this deliberately over-reacts. A surviving peer repairs a
+restarted registry from the CRDT within a few hundred milliseconds, pointing at
+the processes that were still running, so on a healthy cluster a registry crash
+would have cost nothing. The agents are restarted anyway, because no node can
+tell in time whether that repair is coming: a single-node deployment has no
+peer, and a partitioned cluster is indistinguishable from a healthy one from the
+inside. Over-reacting costs a restart from durable state. Under-reacting leaves
+agents running but unregistered, which is the silent duplicate above.
+
+A registry failure is not part of draining. The watcher sits after the registry
+and OTP stops children in reverse order, so it is gone before the registry is on
+an orderly shutdown.
 
 ### A Draining or Starting Node
 

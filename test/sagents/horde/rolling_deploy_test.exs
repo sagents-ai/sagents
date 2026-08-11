@@ -280,7 +280,7 @@ defmodule Sagents.Horde.RollingDeployTest do
   # 3. Registry crash: heals from a peer, restarts without one
   # ===========================================================================
 
-  describe "registry crash under Sagents.Supervisor's :one_for_one strategy" do
+  describe "registry crash under Sagents.Supervisor's :rest_for_one strategy" do
     test "a peer repairs both membership and registrations after a registry crash" do
       {cluster, [node1, node2]} = start_cluster(2)
       start_supervisor_on([node1, node2])
@@ -302,25 +302,92 @@ defmodule Sagents.Horde.RollingDeployTest do
       {:ok, before_pid} = rpc(node1, :probe_once, [agent_id])
       assert is_pid(before_pid)
 
-      assert {:ok, _dead_pid} = rpc(node1, :kill_registry, [])
+      # Horde places an agent by hashing its id, so which node hosts it varies
+      # from run to run. Crash the registry on the node that does *not* host it.
+      # This test is about the CRDT repairing a restarted registry from a peer;
+      # crashing the host's registry also takes the agent down through the
+      # :rest_for_one chain, which is the separate property covered below.
+      agent_node = node(before_pid)
+      crash_node = if agent_node == node1, do: node2, else: node1
 
-      assert wait_until(fn -> rpc(node1, :registered?, [Sagents.Registry]) end),
+      assert {:ok, _dead_pid} = rpc(crash_node, :kill_registry, [])
+
+      assert wait_until(fn -> rpc(crash_node, :registered?, [Sagents.Registry]) end),
              "registry was not restarted by Sagents.Supervisor"
 
       # `ClusterConfig.resolve_members/1` seeds the restarted registry with a
       # self-only member set, and MembershipManager only re-applies members on a
       # :pg join or leave, neither of which happened. Membership is nonetheless
       # restored, because Horde replicates the member set through the same CRDT
-      # as registrations and node2 still lists node1 as a neighbour.
-      assert wait_until(fn -> member_nodes(node1, Sagents.Registry) == both end),
+      # as registrations and the peer still lists this node as a neighbour.
+      assert wait_until(fn -> member_nodes(crash_node, Sagents.Registry) == both end),
              "membership did not heal from the peer: " <>
-               inspect(member_nodes(node1, Sagents.Registry))
+               inspect(member_nodes(crash_node, Sagents.Registry))
 
       # The registration comes back for the same reason, pointing at the same
-      # still-running process. No agent was lost.
-      assert wait_until(fn -> rpc(node1, :probe_once, [agent_id]) == {:ok, before_pid} end),
+      # still-running process on the untouched node.
+      assert wait_until(fn -> rpc(crash_node, :probe_once, [agent_id]) == {:ok, before_pid} end),
              "registration did not heal from the peer: " <>
-               inspect(rpc(node1, :probe_once, [agent_id]))
+               inspect(rpc(crash_node, :probe_once, [agent_id]))
+
+      assert :rpc.call(agent_node, Process, :alive?, [before_pid]),
+             "the agent on the untouched node should not have been disturbed"
+
+      LocalCluster.stop(cluster)
+    end
+
+    test "an agent on the crashed node comes down even though a peer could heal it" do
+      # The deliberate trade, pinned. The previous test shows a peer repairs a
+      # restarted registry within a few hundred milliseconds, pointing at the
+      # still-running processes. For an agent on the node that crashed, the
+      # watcher pre-empts that repair and takes it down anyway.
+      #
+      # That is strictly more disruptive than waiting would have been *when the
+      # heal arrives*. It is chosen regardless, because nothing on this node can
+      # tell in time whether a heal is coming: a single-node deployment has no
+      # peer, and a partitioned or lagging cluster looks identical from here
+      # until it is too late. Guessing wrong leaves agents alive and
+      # unregistered, which is what produces two AgentServers persisting one
+      # conversation. A restart is recoverable from durable state; a duplicate
+      # is not.
+      {cluster, [node1, node2]} = start_cluster(2)
+      start_supervisor_on([node1, node2])
+
+      both = Enum.sort([node1, node2])
+
+      assert wait_until(fn -> member_nodes(node1, Sagents.Registry) == both end),
+             "registry membership did not converge"
+
+      agent_id = "conversation-crash-host-#{System.unique_integer([:positive])}"
+      {:ok, sup_pid} = rpc(node1, :start_agent, [agent_id])
+
+      assert wait_until(fn ->
+               match?({:ok, pid} when is_pid(pid), rpc(node2, :probe_once, [agent_id]))
+             end),
+             "registration did not replicate"
+
+      # Crash the registry on whichever node actually hosts the agent.
+      agent_node = node(sup_pid)
+      other_node = if agent_node == node1, do: node2, else: node1
+
+      assert {:ok, _dead_pid} = rpc(agent_node, :kill_registry, [])
+
+      assert wait_until(fn -> not :rpc.call(agent_node, Process, :alive?, [sup_pid]) end),
+             "the AgentSupervisor should have come down with the :rest_for_one chain"
+
+      assert wait_until(fn -> rpc(agent_node, :registered?, [Sagents.Registry]) end),
+             "registry was not restarted"
+
+      # Settle, then confirm the cluster never holds two AgentSupervisors for
+      # this conversation. Whether it settles at one (Horde re-placed the child
+      # spec from its CRDT) or none (the next request re-creates it) is not the
+      # property being pinned; "never two" is.
+      Process.sleep(3_000)
+
+      count = :rpc.call(other_node, Sagents.AgentsDynamicSupervisor, :count_agents, [])
+
+      assert count in [0, 1],
+             "expected at most one AgentSupervisor for #{agent_id}, found #{inspect(count)}"
 
       LocalCluster.stop(cluster)
     end

@@ -76,10 +76,12 @@ defmodule Sagents.Supervisor do
   not.
 
   `Sagents.RegistryWatcher` sits between the registry and its dependents to
-  connect a registry failure to that chain. Both backends run the registered
-  process under a supervisor of their own and restart it internally, so the
-  failure is never a failed child of *this* supervisor. The watcher monitors the
-  registered process directly and fails in its place.
+  connect a registry failure to that chain. On both backends the process that
+  owns the registry's ETS tables runs under a supervisor of the backend's own,
+  which can replace it with a fresh, empty one without ever failing a child of
+  *this* supervisor. The watcher monitors that table-owning process and fails in
+  its place. See `Sagents.ProcessRegistry.watched_name/0` for why it is not
+  always the process registered as `Sagents.Registry`.
   """
 
   use Supervisor
@@ -98,11 +100,12 @@ defmodule Sagents.Supervisor do
       [
         Sagents.ProcessRegistry.child_spec([]),
         # Sits between the registry and its dependents on purpose. Both Horde
-        # and Elixir's Registry run the registered process under their own
-        # supervisor, so a crash there is restarted internally and
-        # Sagents.Supervisor never sees a child fail. The watcher observes the
-        # registered process directly and fails in its place, which is what
-        # puts the restart below into the :rest_for_one chain.
+        # and Elixir's Registry own their ETS tables in a process one level
+        # below the child listed above, and both restart that process
+        # internally with empty tables, so Sagents.Supervisor never sees a
+        # child fail. The watcher observes the table-owning process and fails
+        # in its place, which is what puts the restart below into the
+        # :rest_for_one chain.
         Sagents.RegistryWatcher,
         Sagents.ProcessSupervisor.agents_supervisor_child_spec([]),
         Sagents.ProcessSupervisor.filesystem_supervisor_child_spec([])
