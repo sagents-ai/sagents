@@ -97,4 +97,37 @@ defmodule Sagents do
   See `Sagents.Agent` for agent creation and execution, and `Sagents.State` for
   state management functions.
   """
+
+  @doc """
+  Whether this node can currently host and route agent sessions.
+
+  Wire this into your application's **readiness** check (not its liveness
+  check). It reports `false` in exactly two situations, both normal:
+
+  - the node has not finished starting `Sagents.Supervisor`, and
+  - `Sagents.Supervisor` has shut down while the BEAM is still draining, which
+    is every rolling deploy.
+
+  In that second window the node is still reachable and will still accept HTTP
+  connections, but every agent lookup on it fails. A readiness check that
+  ignores this keeps the load balancer routing requests to a node that cannot
+  serve them. See `docs/deployment.md` for the full sequence and a Fly.io
+  example.
+
+  ## Examples
+
+      # Phoenix router
+      get "/ready", MyAppWeb.HealthController, :ready
+
+      # Controller
+      def ready(conn, _params) do
+        if Sagents.ready?() do
+          send_resp(conn, 200, "ok")
+        else
+          send_resp(conn, 503, "draining")
+        end
+      end
+  """
+  @spec ready?() :: boolean()
+  def ready?, do: Sagents.ProcessRegistry.available?()
 end

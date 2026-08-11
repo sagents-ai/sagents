@@ -188,4 +188,19 @@ Horde.Cluster.members(Sagents.FileSystem.FileSystemSupervisor)
 
 # Total registered entries cluster-wide:
 Sagents.ProcessRegistry.count()
+
+# Can THIS node answer lookups at all? False while starting, and after
+# Sagents.Supervisor has shut down while the BEAM drains.
+Sagents.ready?()
 ```
+
+## Taking a node out of the cluster
+
+Membership handles a node *leaving*. It does not handle the window where the
+node has stopped its Sagents supervision tree but is still receiving HTTP
+traffic, which is every rolling deploy. Requests arriving in that window cannot
+be served on that node no matter how healthy the rest of the cluster is.
+
+See [Deployments, draining, and readiness](deployment.md) for the readiness
+signal (`Sagents.ready?/0`), the required shutdown sequence, and platform
+examples.

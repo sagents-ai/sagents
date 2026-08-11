@@ -244,7 +244,8 @@ defmodule Sagents.AgentsDynamicSupervisor do
       :ok = AgentsDynamicSupervisor.stop_agent("conversation-123")
       :ok = AgentsDynamicSupervisor.stop_agent("conversation-123", reason: :shutdown, timeout: 5000)
   """
-  @spec stop_agent(String.t(), keyword()) :: :ok | {:error, :not_found}
+  @spec stop_agent(String.t(), keyword()) ::
+          :ok | {:error, :not_found | :registry_unavailable}
   def stop_agent(agent_id, opts \\ []) when is_binary(agent_id) do
     supervisor = Keyword.get(opts, :supervisor, __MODULE__)
 
@@ -254,7 +255,7 @@ defmodule Sagents.AgentsDynamicSupervisor do
         Logger.debug("Stopped AgentSupervisor for agent_id=#{agent_id}")
         :ok
 
-      {:error, :not_found} = error ->
+      {:error, _reason} = error ->
         error
     end
   end
@@ -350,6 +351,11 @@ defmodule Sagents.AgentsDynamicSupervisor do
         else
           {:error, :timeout_waiting_for_agent}
         end
+
+      {:error, :registry_unavailable} = error ->
+        # The node started shutting down mid-start. Polling cannot succeed
+        # again on this node, so fail fast instead of burning the timeout.
+        error
     end
   end
 end

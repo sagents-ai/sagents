@@ -160,7 +160,7 @@ defmodule Sagents.SessionTest do
     fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
     monitor_ref = make_ref()
 
-    stub(AgentServer, :get_pid, fn _agent_id -> nil end)
+    stub(AgentServer, :fetch_pid, fn _agent_id -> {:error, :not_running} end)
 
     # Subscriber.subscribe_to_agent calls AgentServer.subscribe to set up the
     # producer-side monitor. We don't have a live AgentServer in these tests,
@@ -173,7 +173,7 @@ defmodule Sagents.SessionTest do
     stub(AgentsDynamicSupervisor, :start_agent_sync, fn opts ->
       send(captured_ref, {:supervisor_config, opts})
       # After the start, simulate the agent being registered.
-      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
       {:ok, fake_pid}
     end)
 
@@ -245,7 +245,7 @@ defmodule Sagents.SessionTest do
     end
 
     test "propagates {:error, _} from the factory" do
-      stub(AgentServer, :get_pid, fn _agent_id -> nil end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:error, :not_running} end)
 
       Process.put(:spy_factory_module, ErrorFactory)
       config = base_config()
@@ -254,7 +254,7 @@ defmodule Sagents.SessionTest do
     end
 
     test "propagates {:error, _} from the router" do
-      stub(AgentServer, :get_pid, fn _agent_id -> nil end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:error, :not_running} end)
 
       Process.put(:spy_router_response, {:error, :no_route})
       config = base_config()
@@ -324,7 +324,7 @@ defmodule Sagents.SessionTest do
 
     test "is idempotent — returns existing session without re-consulting router" do
       fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
-      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
 
       config = base_config()
 
@@ -437,14 +437,14 @@ defmodule Sagents.SessionTest do
 
   describe "stop/2" do
     test "returns {:ok, :not_running} when no agent is running" do
-      stub(AgentServer, :get_pid, fn _agent_id -> nil end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:error, :not_running} end)
 
       assert {:ok, :not_running} = Session.stop(base_config(), 1)
     end
 
     test "stops the running agent and returns {:ok, :stopped}" do
       fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
-      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
       stub(AgentServer, :stop, fn _agent_id -> :ok end)
 
       assert {:ok, :stopped} = Session.stop(base_config(), 1)
@@ -453,13 +453,13 @@ defmodule Sagents.SessionTest do
 
   describe "running?/2" do
     test "false when no agent is registered" do
-      stub(AgentServer, :get_pid, fn _agent_id -> nil end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:error, :not_running} end)
       refute Session.running?(base_config(), 1)
     end
 
     test "true when an agent is registered" do
       fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
-      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
       assert Session.running?(base_config(), 1)
     end
   end
@@ -476,7 +476,7 @@ defmodule Sagents.SessionTest do
 
     test "a live interrupted agent takes the answer in exactly one call" do
       fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
-      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
 
       test_pid = self()
 
@@ -536,7 +536,7 @@ defmodule Sagents.SessionTest do
       # would be a no-op that hides a real problem (e.g. the question was
       # already answered from another tab).
       fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
-      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
       test_pid = self()
 
       stub(AgentServer, :resume, fn _agent_id, _resume_data ->
@@ -577,7 +577,7 @@ defmodule Sagents.SessionTest do
 
       # The agent is up by the time Session.start/3 looks, so it returns
       # started: false without ever reaching the supervisor.
-      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
 
       stub(AgentServer, :subscribe, fn _agent_id, _channel, _pid ->
         {:ok, fake_pid, make_ref()}
@@ -595,7 +595,7 @@ defmodule Sagents.SessionTest do
     end
 
     test "passes a start failure through" do
-      stub(AgentServer, :get_pid, fn _agent_id -> nil end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:error, :not_running} end)
       stub(AgentServer, :resume, fn _agent_id, _resume_data -> {:error, :agent_not_running} end)
       Process.put(:spy_router_response, {:error, :no_route})
 
@@ -606,7 +606,7 @@ defmodule Sagents.SessionTest do
   describe "dismiss/3" do
     test "a live agent holding a halt is dismissed in exactly one call" do
       fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
-      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
 
       test_pid = self()
 
@@ -684,7 +684,7 @@ defmodule Sagents.SessionTest do
 
     test "a live agent in the wrong state errors instead of being woken" do
       fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
-      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
       test_pid = self()
 
       stub(AgentServer, :dismiss_interrupt, fn _agent_id ->
@@ -706,7 +706,7 @@ defmodule Sagents.SessionTest do
       # AskUserQuestion and HITL interrupts must go through resume/4. Waking to
       # retry a dismissal they will refuse again is pointless.
       fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
-      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
       test_pid = self()
 
       stub(AgentServer, :dismiss_interrupt, fn _agent_id ->
@@ -725,7 +725,7 @@ defmodule Sagents.SessionTest do
     end
 
     test "passes a start failure through" do
-      stub(AgentServer, :get_pid, fn _agent_id -> nil end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:error, :not_running} end)
       stub(AgentServer, :dismiss_interrupt, fn _agent_id -> {:error, :agent_not_running} end)
       Process.put(:spy_router_response, {:error, :no_route})
 
@@ -751,7 +751,7 @@ defmodule Sagents.SessionTest do
 
     test "false when an agent was already running" do
       fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
-      stub(AgentServer, :get_pid, fn _agent_id -> fake_pid end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
 
       assert {:ok, %{started: false}} = Session.start(base_config(), 1, scope: :s)
     end

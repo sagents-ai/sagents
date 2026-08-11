@@ -179,7 +179,8 @@ defmodule Sagents.MixProject do
       "docs/observability.md",
       "docs/persistence.md",
       "docs/filesystem_setup.md",
-      "docs/clustering.md"
+      "docs/clustering.md",
+      "docs/deployment.md"
     ]
   end
 
