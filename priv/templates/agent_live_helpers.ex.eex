@@ -53,6 +53,11 @@ defmodule <%= module %> do
 
   require Logger
 
+  # Shown for `:registry_unavailable`, on every path that can hit it. See
+  # `flash_session_error/3` for why this condition gets its own copy. Reword it
+  # for your product; keep it separate from the other failures.
+  @draining_message "This server is restarting. Please try that again in a moment."
+
   # ===========================================================================
   # State init / reset
   # ===========================================================================
@@ -124,9 +129,34 @@ defmodule <%= module %> do
   ## Returns
 
   - `{:ok, socket}` - Socket with conversation loaded and subscribed
-  - `{:error, socket}` - Socket with flash error (when conversation not found)
+  - `{:error, socket}` - Socket with flash error (conversation not found, or
+    this node cannot host agent sessions)
   """
   def load_conversation(socket, conversation_id, opts) do
+    if Sagents.ready?() do
+      do_load_conversation(socket, conversation_id, opts)
+    else
+      # This node's Sagents supervision tree is down: it is draining during a
+      # deploy, or has not finished booting. Reading the agent's status,
+      # subscribing, and waking it for a pending interrupt all need the
+      # registry, so there is nothing worth rendering here.
+      #
+      # The guard is what keeps this from being a crash.
+      # `AgentServer.get_status/1` below reads as total — it catches exits and
+      # answers `:not_running` — but it raises
+      # `Sagents.RegistryUnavailableError` before reaching the call it guards,
+      # and a `catch :exit` clause does not catch a raise. The `rescue` below
+      # does not catch it either.
+      Logger.warning(
+        "Refusing to load conversation #{inspect(conversation_id)}: " <>
+          "this node is draining, its Sagents registry is unavailable"
+      )
+
+      {:error, put_flash(socket, :error, @draining_message)}
+    end
+  end
+
+  defp do_load_conversation(socket, conversation_id, opts) do
     scope = Keyword.fetch!(opts, :scope)
     user_id = Keyword.get(opts, :user_id)
     conversations = Keyword.get(opts, :conversations_module, <%= conversations_alias %>)
@@ -555,8 +585,10 @@ defmodule <%= module %> do
         |> assign(Sagents.AgentUtils.cleared_interrupt_changes())
 
       {:error, reason} ->
-        Logger.error("halt dismissal failed: #{inspect(reason)}")
-        put_flash(socket, :error, "That could not be dismissed. Please try again.")
+        flash_session_error(socket, reason,
+          log_label: "halt dismissal failed",
+          user_message: "That could not be dismissed. Please try again."
+        )
     end
   end
 
@@ -570,14 +602,8 @@ defmodule <%= module %> do
   # the wrong state (someone answered from another tab) returns an error
   # rather than being woken, because there is nothing to wake.
   #
-  # `copy` carries two deliberately separate strings:
-  #
-  #   * `:log_label` - internal vocabulary, paired with the raw reason term.
-  #   * `:user_message` - product copy shown to the person. Never interpolate
-  #     the reason into it. A live-but-wrong-state agent returns "Cannot
-  #     resume, server is not interrupted": an internal string, and one that
-  #     says "agent", a word many products deliberately never put in front of
-  #     a user. This is a slot you are meant to edit and localize.
+  # `copy` is the log label / product copy pair described on
+  # `flash_session_error/3`.
   defp resume_or_flash(socket, resume_data, changes, running_changes, copy) do
     case <%= coordinator_alias %>.resume_agent_session(
            socket.assigns,
@@ -594,7 +620,60 @@ defmodule <%= module %> do
         |> assign(running_changes)
 
       {:error, reason} ->
-        Logger.error("#{Keyword.fetch!(copy, :log_label)}: #{inspect(reason)}")
+        flash_session_error(socket, reason, copy)
+    end
+  end
+
+  # ===========================================================================
+  # Session error reporting
+  # ===========================================================================
+
+  @doc """
+  The copy shown when this node cannot host agent sessions.
+
+  Exposed so tests can assert *which* message a path produced without
+  hardcoding the string. A test that inlines the literal keeps passing after
+  someone rewords the copy, which is the moment it stops testing anything. The
+  assertion worth writing is that the draining copy differs from the ordinary
+  failure copy, and it needs this to be expressible.
+  """
+  def draining_message, do: @draining_message
+
+  @doc """
+  Log a failed session action and flash product copy describing it.
+
+  `copy` carries two deliberately separate strings:
+
+    * `:log_label` - internal vocabulary, paired with the raw reason term.
+    * `:user_message` - product copy shown to the person. Never interpolate the
+      reason into it. A live-but-wrong-state agent returns "Cannot resume,
+      server is not interrupted": an internal string, and one that says "agent",
+      a word many products deliberately never put in front of a user. This is a
+      slot you are meant to edit and localize.
+
+  `:registry_unavailable` is answered separately because it is not a failure of
+  the request. It means this node cannot host or route agent sessions - it is
+  draining during a deploy, or has not finished booting - while another node
+  serves the same request fine. "Try again" is literally the correct
+  instruction, and after a deploy the reconnect lands on a node that works.
+  Reporting it as a generic failure tells the user something is broken when
+  nothing is, and logging it at `:error` fills the log with alarms for a routine
+  deploy.
+
+  Route every session failure through here rather than adding a clause per call
+  site: the drain path is the one failure a healthy production system produces
+  routinely, which is what makes both rules load-bearing rather than tidy.
+  """
+  def flash_session_error(socket, reason, copy) do
+    label = Keyword.fetch!(copy, :log_label)
+
+    case reason do
+      :registry_unavailable ->
+        Logger.warning("#{label}: this node is draining, its Sagents registry is unavailable")
+        put_flash(socket, :error, @draining_message)
+
+      other ->
+        Logger.error("#{label}: #{inspect(other)}")
         put_flash(socket, :error, Keyword.fetch!(copy, :user_message))
     end
   end

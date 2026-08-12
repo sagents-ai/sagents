@@ -54,6 +54,8 @@ defmodule Sagents.Subscriber do
   until `:DOWN` fires, which it will.
   """
 
+  require Logger
+
   alias Sagents.AgentServer
   alias Sagents.FileSystemServer
   alias Sagents.Publisher
@@ -126,7 +128,15 @@ defmodule Sagents.Subscriber do
     key = {:filesystem, scope_key}
 
     do_subscribe(subs, key, channel, fn ->
-      Publisher.subscribe(FileSystemServer.get_name(scope_key), channel)
+      # Resolve the pid rather than handing Publisher a `:via` tuple, for the
+      # reason given on `Sagents.AgentServer.subscribe/3`: the via resolution
+      # inside `GenServer.call` raises out of `:ets` on a node whose registry
+      # is gone, past Publisher's `catch :exit`.
+      case FileSystemServer.fetch_pid(scope_key) do
+        {:ok, pid} -> Publisher.subscribe(pid, channel)
+        {:error, :not_running} -> {:error, :process_not_found}
+        {:error, :registry_unavailable} = error -> error
+      end
     end)
   end
 
@@ -136,7 +146,7 @@ defmodule Sagents.Subscriber do
   @spec unsubscribe_from_agent(subs(), String.t()) :: subs()
   def unsubscribe_from_agent(subs, agent_id) do
     do_unsubscribe(subs, {:agent, agent_id}, fn channel ->
-      Publisher.unsubscribe(AgentServer.get_name(agent_id), channel)
+      AgentServer.unsubscribe(agent_id, channel)
     end)
   end
 
@@ -146,7 +156,10 @@ defmodule Sagents.Subscriber do
   @spec unsubscribe_from_filesystem(subs(), term()) :: subs()
   def unsubscribe_from_filesystem(subs, scope_key) do
     do_unsubscribe(subs, {:filesystem, scope_key}, fn channel ->
-      Publisher.unsubscribe(FileSystemServer.get_name(scope_key), channel)
+      case FileSystemServer.fetch_pid(scope_key) do
+        {:ok, pid} -> Publisher.unsubscribe(pid, channel)
+        {:error, _reason} -> :ok
+      end
     end)
   end
 
@@ -166,7 +179,15 @@ defmodule Sagents.Subscriber do
           state: :subscribed
         })
 
-      {:error, :process_not_found} ->
+      # No producer to subscribe to, or no registry on this node able to find
+      # one. Both rest at `:pending`, which the next presence arrival revives.
+      #
+      # Folding `:registry_unavailable` in here is safe in a way it is not
+      # elsewhere: nothing starts a producer off the back of a pending entry.
+      # The dangerous conflation is "cannot answer" read as "nothing is
+      # running" by a caller whose response is to start one. A pending
+      # subscription just waits.
+      {:error, reason} when reason in [:process_not_found, :registry_unavailable] ->
         Map.put(subs, key, %{
           channel: channel,
           server_pid: nil,
@@ -226,20 +247,36 @@ defmodule Sagents.Subscriber do
 
   `joins` whose key matches a `:pending` agent subscription triggers a
   re-subscribe. Returns the (possibly updated) subs map.
+
+  Entries that cannot be re-subscribed stay `:pending` rather than being
+  dropped, so a later diff can still revive them. That covers a node whose own
+  registry is unavailable: the presence topic is cluster-wide, so this fires
+  for agents booting anywhere in the cluster, including while this node drains
+  and can resolve nothing.
   """
   @spec handle_presence_diff(subs(), String.t(), map()) :: subs()
   def handle_presence_diff(subs, @presence_topic, %{joins: joins}) when is_map(joins) do
-    Enum.reduce(Map.keys(joins), subs, fn agent_id, acc ->
-      key = {:agent, agent_id}
+    if Sagents.ready?() do
+      Enum.reduce(Map.keys(joins), subs, fn agent_id, acc ->
+        key = {:agent, agent_id}
 
-      case Map.get(acc, key) do
-        %{state: :pending, channel: channel} ->
-          subscribe_to_agent(acc, agent_id, channel)
+        case Map.get(acc, key) do
+          %{state: :pending, channel: channel} ->
+            subscribe_to_agent(acc, agent_id, channel)
 
-        _other ->
-          acc
-      end
-    end)
+          _other ->
+            acc
+        end
+      end)
+    else
+      # Every re-subscribe would resolve to `:pending` anyway, which is what
+      # these entries already are. Skipping the work matters because a host
+      # calls this from `handle_info` for a cluster-wide topic: without the
+      # guard a draining node probes its dead registry once per joining agent,
+      # per broadcast, for the length of the drain.
+      Logger.debug("presence diff ignored: registry unavailable on this node")
+      subs
+    end
   end
 
   def handle_presence_diff(subs, _topic, _payload), do: subs

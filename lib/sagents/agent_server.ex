@@ -614,7 +614,12 @@ defmodule Sagents.AgentServer do
 
   ## Returns
 
-  - `:ok` — always returns `:ok`, even if the AgentServer is not running
+  `:ok` in every case, including the two where the message is not delivered:
+  no AgentServer is running for `agent_id`, and this node's registry cannot
+  answer (it is draining during a rolling deploy). Delivery is fire-and-forget
+  by design, so there is no queue to fall back to and no retry that helps on
+  this node. The undelivered cases are logged rather than returned, because a
+  caller cannot act on them and a silently dropped push is invisible.
 
   ## Examples
 
@@ -627,16 +632,21 @@ defmodule Sagents.AgentServer do
   """
   @spec notify_middleware(String.t(), term(), term()) :: :ok
   def notify_middleware(agent_id, middleware_id, message) do
-    agent_id
-    |> get_pid()
-    |> case do
-      pid when is_pid(pid) ->
+    case fetch_pid(agent_id) do
+      {:ok, pid} ->
         send(pid, {:middleware_message, middleware_id, message})
+
+      {:error, :not_running} ->
         :ok
 
-      _other ->
-        :ok
+      {:error, :registry_unavailable} ->
+        Logger.warning(
+          "notify_middleware(#{agent_id}, #{inspect(middleware_id)}): " <>
+            "registry unavailable on this node, message dropped"
+        )
     end
+
+    :ok
   end
 
   @doc """
@@ -658,8 +668,12 @@ defmodule Sagents.AgentServer do
   - `subscriber_pid` — the pid to receive events. Defaults to `self()` when
     `nil`.
 
-  Returns `{:ok, server_pid, monitor_ref}` on success, or
-  `{:error, :process_not_found}` if no AgentServer is running for `agent_id`.
+  Returns `{:ok, server_pid, monitor_ref}` on success,
+  `{:error, :process_not_found}` if no AgentServer is running for `agent_id`,
+  or `{:error, :registry_unavailable}` if this node's registry cannot answer.
+
+  The third answer is distinct because it is not a statement about the agent.
+  See `docs/deployment.md`.
 
   ## Examples
 
@@ -673,10 +687,20 @@ defmodule Sagents.AgentServer do
       {:ok, _pid, _ref} = AgentServer.subscribe("my-agent-1", :main, bridge_pid)
   """
   @spec subscribe(String.t(), :main | :debug, pid() | nil) ::
-          {:ok, pid(), reference()} | {:error, :process_not_found}
+          {:ok, pid(), reference()} | {:error, :process_not_found | :registry_unavailable}
   def subscribe(agent_id, channel \\ :main, subscriber_pid \\ nil)
       when is_binary(agent_id) and channel in [:main, :debug] do
-    Publisher.subscribe(get_name(agent_id), channel, subscriber_pid)
+    # Resolves the pid rather than handing Publisher a `:via` tuple.
+    # `Publisher.subscribe/3` is a `GenServer.call`, which resolves a via name
+    # itself, and that resolution raises `ArgumentError` from inside `:ets`
+    # while this node's registry is unavailable. Publisher's `catch :exit`
+    # guard does not catch a raise, so the error would escape a function whose
+    # whole visible structure claims to have handled it.
+    case fetch_pid(agent_id) do
+      {:ok, pid} -> Publisher.subscribe(pid, channel, subscriber_pid)
+      {:error, :not_running} -> {:error, :process_not_found}
+      {:error, :registry_unavailable} = error -> error
+    end
   end
 
   @doc """
@@ -684,11 +708,19 @@ defmodule Sagents.AgentServer do
 
   Mirrors `subscribe/3`. Defaults `channel` to `:main` and `subscriber_pid`
   to `self()` (when `nil`). Always returns `:ok`.
+
+  An unavailable registry is `:ok` rather than an error: the subscription lives
+  on a process this node cannot reach, the producer's own monitor cleans up the
+  entry when the subscriber goes away, and there is nothing for a caller to do
+  with the distinction.
   """
   @spec unsubscribe(String.t(), :main | :debug, pid() | nil) :: :ok
   def unsubscribe(agent_id, channel \\ :main, subscriber_pid \\ nil)
       when is_binary(agent_id) and channel in [:main, :debug] do
-    Publisher.unsubscribe(get_name(agent_id), channel, subscriber_pid)
+    case fetch_pid(agent_id) do
+      {:ok, pid} -> Publisher.unsubscribe(pid, channel, subscriber_pid)
+      {:error, _reason} -> :ok
+    end
   end
 
   @doc """
@@ -1340,6 +1372,15 @@ defmodule Sagents.AgentServer do
 
   @doc """
   Check if an agent is running.
+
+  **Raises `Sagents.RegistryUnavailableError`** when this node's registry
+  cannot answer, which covers the drain window of a rolling deploy. A boolean
+  has no room for "cannot tell", and `false` reads as "nothing is running",
+  which a caller responds to by starting a duplicate agent for an agent that
+  already has a process elsewhere.
+
+  Use `fetch_pid/1` anywhere a web request can reach: it reports the condition
+  as `{:error, :registry_unavailable}` instead.
   """
   def running?(agent_id) do
     case get_pid(agent_id) do
@@ -3170,12 +3211,23 @@ defmodule Sagents.AgentServer do
     :ok
   end
 
+  # Best-effort: the caller only broadcasts a cancellation event when this
+  # answers, so `nil` is an acceptable outcome and a raise is not. This runs
+  # during sub-agent teardown, where an escaping error would take the
+  # AgentServer down mid-cleanup.
+  #
+  # The two handlers do not cover each other: `keys/1` raises rather than
+  # exiting when this node's registry is gone, and a `catch :exit` clause does
+  # not catch a raise. Only the registry-unavailable raise is swallowed, so a
+  # genuine ArgumentError against a live registry still escapes.
   defp lookup_sub_agent_id(child_pid) do
     Sagents.ProcessRegistry.keys(child_pid)
     |> Enum.find_value(fn
       {:sub_agent, id} -> id
       _other -> nil
     end)
+  rescue
+    Sagents.RegistryUnavailableError -> nil
   catch
     :exit, _reason -> nil
   end

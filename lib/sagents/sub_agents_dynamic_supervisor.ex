@@ -65,6 +65,15 @@ defmodule Sagents.SubAgentsDynamicSupervisor do
   ## Examples
 
       pid = SubAgentsDynamicSupervisor.whereis("agent-123")
+
+  Raises `Sagents.RegistryUnavailableError` when this node's registry cannot
+  answer, for the same reason `Sagents.AgentServer.get_pid/1` does: `nil` would
+  be indistinguishable from "not running".
+
+  In practice this is unreachable. Every caller runs inside an agent turn, and
+  the agent itself is registered, so a registry that cannot answer would have
+  taken the caller down first. The raise is the correct answer to a question
+  that should not arise here.
   """
   @spec whereis(String.t()) :: pid() | nil
   def whereis(agent_id) do

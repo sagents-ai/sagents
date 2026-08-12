@@ -412,26 +412,63 @@ defmodule Sagents.Session do
 
   @doc """
   Whether an agent session is currently running for `conversation_id`.
+  **Raises on a node whose registry is unavailable.**
 
-  Raises `Sagents.RegistryUnavailableError` when this node's registry cannot
-  answer. A boolean has no room for "cannot tell", and `false` would be read as
+  A `?`-suffixed predicate is the least likely function in this API to be
+  suspected of raising, so the warning is here in the summary rather than
+  further down: `Sagents.RegistryUnavailableError` comes out of this whenever
+  this node's registry cannot answer, which covers the drain window of every
+  rolling deploy.
+
+  A boolean has no room for "cannot tell", and `false` would be read as
   "nothing is running", which callers respond to by starting a duplicate agent.
-  Guard with `Sagents.ready?/0`, or use `ensure_running/3`, which reports the
-  condition as a value.
+  Use `fetch_running/2` where that matters, or `ensure_running/3`, which reports
+  the condition as a value.
+
+  If you wrap this in your own host predicate, carry the warning into that
+  function's docs too. The wrapper is where the next reader will meet it.
   """
   @spec running?(config(), conversation_id :: term()) :: boolean()
   def running?(config, conversation_id) do
-    agent_id = config.agent_id_fun.(conversation_id)
-
-    case AgentServer.fetch_pid(agent_id) do
-      {:ok, _pid} ->
-        true
-
-      {:error, :not_running} ->
-        false
+    case fetch_running(config, conversation_id) do
+      {:ok, running?} ->
+        running?
 
       {:error, :registry_unavailable} ->
         raise Sagents.RegistryUnavailableError, operation: :"Session.running?/2"
+    end
+  end
+
+  @doc """
+  Whether an agent session is running for `conversation_id`, without raising.
+
+  The non-raising sibling of `running?/2`, in the same relationship as
+  `Sagents.AgentServer.fetch_pid/1` to `get_pid/1` and
+  `Sagents.ProcessRegistry.fetch/1` to `lookup/1`:
+
+  - `{:ok, true}` / `{:ok, false}` - the registry answered
+  - `{:error, :registry_unavailable}` - this node's registry could not answer
+
+  Prefer this anywhere a web request can reach. `{:ok, false}` means "start
+  one"; the error means this node cannot know, so it must not guess.
+
+  ## Examples
+
+      case Session.fetch_running(config, conversation_id) do
+        {:ok, true} -> :already_running
+        {:ok, false} -> start_it()
+        {:error, :registry_unavailable} -> {:error, :draining}
+      end
+  """
+  @spec fetch_running(config(), conversation_id :: term()) ::
+          {:ok, boolean()} | {:error, :registry_unavailable}
+  def fetch_running(config, conversation_id) do
+    agent_id = config.agent_id_fun.(conversation_id)
+
+    case AgentServer.fetch_pid(agent_id) do
+      {:ok, _pid} -> {:ok, true}
+      {:error, :not_running} -> {:ok, false}
+      {:error, :registry_unavailable} = error -> error
     end
   end
 

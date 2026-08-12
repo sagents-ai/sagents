@@ -68,6 +68,9 @@ defmodule Sagents.FileSystem do
   ## Returns
 
   - `{:ok, pid}` - Filesystem PID (existing or newly started)
+  - `{:error, :registry_unavailable}` - this node's registry could not answer,
+    so it cannot tell whether one is already running and deliberately does not
+    start one
   - `{:error, reason}` - Error starting filesystem
 
   ## Examples
@@ -111,6 +114,12 @@ defmodule Sagents.FileSystem do
           {:error, {:already_started, pid}} -> {:ok, pid}
           {:error, reason} -> {:error, reason}
         end
+
+      {:error, :registry_unavailable} = error ->
+        # This node cannot see whether a filesystem already exists for the
+        # scope, so it must not start one. Starting anyway is how a scope ends
+        # up with two servers holding the same files.
+        error
     end
   end
 
@@ -158,12 +167,19 @@ defmodule Sagents.FileSystem do
 
   - `:ok` - Successfully stopped
   - `{:error, :not_found}` - Filesystem not running
+  - `{:error, :registry_unavailable}` - this node's registry could not answer
+
+  The last one matters more than it looks. This is often a best-effort cleanup
+  called before real work, so it reports rather than raises: a raise here takes
+  the caller's whole operation down with it, turning "the scratch filesystem
+  survived" into "the record was never deleted".
 
   ## Examples
 
       :ok = stop_filesystem({:user, 123})
   """
-  @spec stop_filesystem(tuple(), keyword()) :: :ok | {:error, :not_found}
+  @spec stop_filesystem(tuple(), keyword()) ::
+          :ok | {:error, :not_found | :registry_unavailable}
 
   def stop_filesystem(scope_key, opts \\ []) do
     FileSystemSupervisor.stop_filesystem(scope_key, opts)
@@ -171,6 +187,14 @@ defmodule Sagents.FileSystem do
 
   @doc """
   Check if a filesystem is running for the given scope.
+  **Raises on a node whose registry is unavailable.**
+
+  `Sagents.RegistryUnavailableError` comes out of this whenever this node's
+  registry cannot answer, which covers the drain window of every rolling
+  deploy. A boolean has no room for "cannot tell", and `false` reads as
+  "nothing is running", which a caller responds to by starting a second
+  filesystem for a scope that already has one elsewhere. Use
+  `fetch_filesystem_running/1` anywhere a web request can reach.
 
   ## Parameters
 
@@ -187,9 +211,39 @@ defmodule Sagents.FileSystem do
   """
   @spec filesystem_running?(tuple()) :: boolean()
   def filesystem_running?(scope_key) when is_tuple(scope_key) do
+    case fetch_filesystem_running(scope_key) do
+      {:ok, running?} ->
+        running?
+
+      {:error, :registry_unavailable} ->
+        raise Sagents.RegistryUnavailableError,
+          operation: :"FileSystem.filesystem_running?/1"
+    end
+  end
+
+  @doc """
+  Whether a filesystem is running for `scope_key`, without raising.
+
+  The non-raising sibling of `filesystem_running?/1`, in the same relationship
+  as `Sagents.Session.fetch_running/2` to `running?/2`:
+
+  - `{:ok, true}` / `{:ok, false}` - the registry answered
+  - `{:error, :registry_unavailable}` - this node's registry could not answer
+
+  Prefer this anywhere a web request can reach. `{:ok, false}` means "start
+  one"; the error means this node cannot know, so it must not guess.
+
+  ## Examples
+
+      {:ok, true} = fetch_filesystem_running({:user, 123})
+      {:ok, false} = fetch_filesystem_running({:user, 999})
+  """
+  @spec fetch_filesystem_running(tuple()) :: {:ok, boolean()} | {:error, :registry_unavailable}
+  def fetch_filesystem_running(scope_key) when is_tuple(scope_key) do
     case FileSystemSupervisor.get_filesystem(scope_key) do
-      {:ok, _pid} -> true
-      {:error, :not_found} -> false
+      {:ok, _pid} -> {:ok, true}
+      {:error, :not_found} -> {:ok, false}
+      {:error, :registry_unavailable} = error -> error
     end
   end
 
@@ -204,12 +258,14 @@ defmodule Sagents.FileSystem do
 
   - `{:ok, pid}` - Filesystem found
   - `{:error, :not_found}` - Filesystem not running
+  - `{:error, :registry_unavailable}` - this node's registry could not answer
 
   ## Examples
 
       {:ok, pid} = get_filesystem_pid({:user, 123})
   """
-  @spec get_filesystem_pid(tuple()) :: {:ok, pid()} | {:error, :not_found}
+  @spec get_filesystem_pid(tuple()) ::
+          {:ok, pid()} | {:error, :not_found | :registry_unavailable}
   def get_filesystem_pid(scope_key) do
     FileSystemSupervisor.get_filesystem(scope_key)
   end
@@ -240,6 +296,9 @@ defmodule Sagents.FileSystem do
   ## Returns
 
   List of `{scope_key, pid}` tuples.
+
+  Raises `Sagents.RegistryUnavailableError` when this node's registry cannot
+  answer, rather than reporting an empty list as though it were a real result.
 
   ## Examples
 

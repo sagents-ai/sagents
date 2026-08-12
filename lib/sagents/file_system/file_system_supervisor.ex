@@ -239,8 +239,8 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
             {:error, :not_found}
         end
 
-      {:error, :not_found} ->
-        {:error, :not_found}
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -255,16 +255,27 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
 
   - `{:ok, pid}` - Filesystem found
   - `{:error, :not_found}` - Filesystem not running for this scope
+  - `{:error, :registry_unavailable}` - this node's registry could not answer
+
+  The third answer is deliberately distinct from `:not_found` for the same
+  reason it is in `Sagents.AgentSupervisor.get_pid/1`: a caller reads "not
+  found" as "start one", and on a draining node that produces a second
+  filesystem for a scope that already has one elsewhere. See
+  `docs/deployment.md`.
 
   ## Examples
 
       {:ok, pid} = get_filesystem({:user, 123})
   """
-  @spec get_filesystem(tuple()) :: {:ok, pid()} | {:error, :not_found}
+  @spec get_filesystem(tuple()) :: {:ok, pid()} | {:error, :not_found | :registry_unavailable}
   def get_filesystem(scope_key) when is_tuple(scope_key) do
-    case ProcessRegistry.lookup({:filesystem_server, scope_key}) do
-      [{pid, _value}] -> {:ok, pid}
-      [] -> {:error, :not_found}
+    # Delegates rather than reading the registry itself. This key had two
+    # independent readers, and only one of them was guarded, so the whole
+    # public Sagents.FileSystem API kept raising after the other was fixed.
+    case FileSystemServer.fetch_pid(scope_key) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, :not_running} -> {:error, :not_found}
+      {:error, :registry_unavailable} = error -> error
     end
   end
 
@@ -274,6 +285,10 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
   ## Returns
 
   List of `{scope_key, pid}` tuples.
+
+  Raises `Sagents.RegistryUnavailableError` when this node's registry cannot
+  answer, rather than reporting an empty list as though it were a real result.
+  Same reasoning as `Sagents.ProcessRegistry.select/1`, which it uses.
 
   ## Examples
 
@@ -309,8 +324,20 @@ defmodule Sagents.FileSystem.FileSystemSupervisor do
   # before the process is visible via lookup. With local Registry, this
   # succeeds immediately on the first check.
   defp await_registry_propagation(registry_key, expected_pid, attempts \\ 50) do
-    case ProcessRegistry.lookup(registry_key) do
-      [{^expected_pid, _value}] ->
+    # `fetch/1` rather than `lookup/1`: the node can begin shutting down between
+    # the successful start_child and this wait, and polling a registry that is
+    # gone cannot succeed. Raising here would take down a start that already
+    # produced a live pid.
+    case ProcessRegistry.fetch(registry_key) do
+      {:ok, ^expected_pid} ->
+        :ok
+
+      {:error, :registry_unavailable} ->
+        Logger.warning(
+          "Registry unavailable while waiting for #{inspect(registry_key)} to propagate; " <>
+            "this node is shutting down"
+        )
+
         :ok
 
       _other when attempts > 0 ->

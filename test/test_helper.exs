@@ -9,6 +9,7 @@ Mimic.copy(LangChain.ChatModels.ChatOpenAI)
 Mimic.copy(Sagents.SubAgentServer)
 Mimic.copy(Sagents.FileSystem.FileSystemSupervisor)
 Mimic.copy(Sagents.ProcessSupervisor)
+Mimic.copy(Sagents.ProcessRegistry)
 Mimic.copy(Sagents.AgentSupervisor)
 Mimic.copy(Horde.Cluster)
 

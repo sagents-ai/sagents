@@ -1,20 +1,25 @@
 defmodule Sagents.AgentCancelSubAgentTest do
   @moduledoc """
-  Integration test for the main-agent-cancel → sub-agent-cancel contract.
+  Integration coverage for the main-agent-cancel → sub-agent-cancel contract.
 
   When the main agent is cancelled, every running SubAgentServer must die too
   (the parent won't consume the sub-agent's result) AND the debugger must see
   a terminal :subagent_cancelled event before the sub-agent vanishes.
 
-  Tagged :slow because it mocks a sub-agent that sleeps 5 seconds; the test
-  asserts the sub-agent dies well before that. Without the fix the sub-agent
-  runs to completion and the assertion times out.
+  A sub-agent blocked in an LLM call cannot broadcast that event for itself, so
+  the parent broadcasts a minimal one on its behalf. Resolving the sub-agent's
+  id for that broadcast reads this node's registry, which is why one test here
+  drives the same path with the registry refusing to answer.
+
+  Tagged :slow because the mocked sub-agent sleeps 5 seconds; the tests assert
+  it dies well before that.
   """
 
   use Sagents.BaseCase, async: false
   use Mimic
 
-  alias Sagents.{Agent, AgentServer, State, SubAgent}
+  alias Sagents.{Agent, AgentServer, ProcessRegistry, State, SubAgent}
+  alias Sagents.RegistryUnavailableError
   alias Sagents.SubAgentsDynamicSupervisor
   alias LangChain.ChatModels.ChatAnthropic
   alias LangChain.Function
@@ -44,36 +49,26 @@ defmodule Sagents.AgentCancelSubAgentTest do
     )
   end
 
-  @tag :slow
-  test "cancelling main agent kills running sub-agent and broadcasts :subagent_cancelled" do
-    agent_id = "parent-cancel-#{System.unique_integer([:positive])}"
+  defp slow_researcher_config do
+    SubAgent.Config.new!(%{
+      name: "slow-researcher",
+      description: "Performs slow research",
+      system_prompt: "You research things slowly.",
+      tools: [
+        Function.new!(%{
+          name: "noop",
+          description: "Placeholder tool; never actually called in this test.",
+          function: fn _args, _ctx -> {:ok, "noop"} end
+        })
+      ]
+    })
+  end
 
-    subagent_config =
-      SubAgent.Config.new!(%{
-        name: "slow-researcher",
-        description: "Performs slow research",
-        system_prompt: "You research things slowly.",
-        tools: [
-          Function.new!(%{
-            name: "noop",
-            description: "Placeholder tool; never actually called in this test.",
-            function: fn _args, _ctx -> {:ok, "noop"} end
-          })
-        ]
-      })
-
-    agent = make_parent_agent(agent_id, [subagent_config])
-
-    # Start the SubAgentsDynamicSupervisor that the SubAgent middleware needs.
-    {:ok, _sup} = SubAgentsDynamicSupervisor.start_link(agent_id: agent_id)
-
-    # Subscribe later (after AgentServer starts) via the new direct transport.
-
-    test_pid = self()
-
-    # Mock LLM: parent's first call returns a task tool call; the sub-agent's
-    # first call sleeps 5s to simulate being stuck mid-LLM-call. If cancel
-    # doesn't kill the sub-agent, the full sleep elapses and the test times out.
+  # Mock LLM: the parent's first call returns a task tool call; the sub-agent's
+  # first call sleeps 5s to simulate being stuck mid-LLM-call. A cancel that
+  # fails to kill the sub-agent lets the full sleep elapse and the assertions
+  # time out.
+  defp stub_blocked_subagent_llm(test_pid) do
     ChatAnthropic
     |> stub(:call, fn _model, messages, _tools ->
       is_subagent_call =
@@ -115,10 +110,22 @@ defmodule Sagents.AgentCancelSubAgentTest do
         {:ok, [msg]}
       end
     end)
+  end
+
+  # Leaves the parent running with one sub-agent blocked inside its LLM call,
+  # which is the state that routes cancellation through the parent's fallback
+  # broadcast rather than the sub-agent's own.
+  defp start_parent_with_blocked_subagent(agent_id) do
+    agent = make_parent_agent(agent_id, [slow_researcher_config()])
+
+    # Start the SubAgentsDynamicSupervisor that the SubAgent middleware needs.
+    {:ok, _sup} = SubAgentsDynamicSupervisor.start_link(agent_id: agent_id)
+
+    stub_blocked_subagent_llm(self())
 
     initial_state = State.new!(%{messages: [Message.new_user!("Research")]})
 
-    {:ok, _pid} =
+    {:ok, server_pid} =
       AgentServer.start_link(
         agent: agent,
         initial_state: initial_state,
@@ -141,6 +148,15 @@ defmodule Sagents.AgentCancelSubAgentTest do
     [{_id, sub_pid, :worker, _modules}] = DynamicSupervisor.which_children(sup_pid)
     assert is_pid(sub_pid)
 
+    %{server_pid: server_pid, sub_pid: sub_pid}
+  end
+
+  @tag :slow
+  test "cancelling main agent kills running sub-agent and broadcasts :subagent_cancelled" do
+    agent_id = "parent-cancel-#{System.unique_integer([:positive])}"
+
+    %{sub_pid: sub_pid} = start_parent_with_blocked_subagent(agent_id)
+
     ref = Process.monitor(sub_pid)
 
     # Cancel the main agent.
@@ -150,7 +166,7 @@ defmodule Sagents.AgentCancelSubAgentTest do
     # have completed naturally.
     assert_receive {:DOWN, ^ref, :process, ^sub_pid, _reason}, 2_000
 
-    # Assert 2: observability — the terminal :subagent_cancelled event fired.
+    # Assert 2: observability. The terminal :subagent_cancelled event fired.
     # Context is empty in this test because the sub-agent was blocked in an
     # LLM call and the parent fallback-broadcasts without state -- the
     # debugger already has the per-turn messages from its own stream.
@@ -175,5 +191,36 @@ defmodule Sagents.AgentCancelSubAgentTest do
     assert_receive {:agent,
                     {:tool_execution_update, :cancelled, %{call_id: "parent_tc_1", name: "task"}}},
                    1_000
+  end
+
+  @tag :slow
+  test "cancel completes when the registry cannot resolve the sub-agent id" do
+    agent_id = "parent-cancel-drain-#{System.unique_integer([:positive])}"
+
+    %{sub_pid: sub_pid} = start_parent_with_blocked_subagent(agent_id)
+
+    # The drain window, narrowed to the single call the fallback broadcast
+    # makes. keys/1 raises rather than exiting, and it runs inside the :cancel
+    # handle_call, so an error escaping it takes the AgentServer down partway
+    # through cancelling.
+    stub(ProcessRegistry, :keys, fn _pid ->
+      raise RegistryUnavailableError, operation: :keys
+    end)
+
+    ref = Process.monitor(sub_pid)
+
+    # A crashed handle_call would exit the caller here rather than answering.
+    assert :ok = AgentServer.cancel(agent_id)
+
+    # Teardown still completes: the sub-agent dies and the parent survives to
+    # record the cancellation. get_status/1 is the synchronous proof of both.
+    assert_receive {:DOWN, ^ref, :process, ^sub_pid, _reason}, 2_000
+    assert AgentServer.get_status(agent_id) == :cancelled
+
+    # What is lost is the best-effort observability event, because the
+    # sub-agent's id cannot be resolved without the registry. Losing the event
+    # is the acceptable outcome; losing the AgentServer is not.
+    refute_receive {:agent, {:debug, {:subagent, _sub_id, {:subagent_cancelled, _ctx}}}},
+                   300
   end
 end

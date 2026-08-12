@@ -145,13 +145,38 @@ defmodule <%= module %> do
 
   Note: agents automatically stop after inactivity timeout. Only call this
   for explicit cleanup (e.g., conversation archival).
+
+  Returns `{:ok, :stopped}`, `{:ok, :not_running}`, or
+  `{:error, :registry_unavailable}` when this node cannot answer registry
+  lookups at all.
   """
   def stop_conversation_session(conversation_id),
     do: Sagents.Session.stop(@config, conversation_id)
 
-  @doc "Whether an agent session is currently running for `conversation_id`."
+  @doc """
+  Whether an agent session is currently running for `conversation_id`.
+  **Raises on a node whose registry is unavailable.**
+
+  `Sagents.RegistryUnavailableError` comes out of this whenever this node's
+  registry cannot answer, which covers the drain window of every rolling
+  deploy. A boolean has no room for "cannot tell", and `false` reads as
+  "nothing is running", which a caller responds to by starting a duplicate
+  agent for a conversation that already has one elsewhere.
+
+  Anywhere a web request can reach, use `fetch_session_running/1` or
+  `ensure_agent_session_running/2`, which report the condition as a value.
+  """
   def session_running?(conversation_id),
     do: Sagents.Session.running?(@config, conversation_id)
+
+  @doc """
+  Whether an agent session is running for `conversation_id`, without raising.
+
+  Returns `{:ok, boolean}` or `{:error, :registry_unavailable}`. The
+  non-raising form of `session_running?/1`; see `Sagents.Session.fetch_running/2`.
+  """
+  def fetch_session_running(conversation_id),
+    do: Sagents.Session.fetch_running(@config, conversation_id)
 
   # ===========================================================================
   # Customization slots (edit after generation as needed)
