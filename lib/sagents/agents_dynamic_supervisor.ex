@@ -280,7 +280,9 @@ defmodule Sagents.AgentsDynamicSupervisor do
   def list_agents(supervisor \\ __MODULE__) do
     Sagents.ProcessSupervisor.which_children(supervisor)
     |> Enum.map(fn {_id, pid, _type, _modules} ->
-      # Get agent_id from the AgentSupervisor's registered name via Registry
+      # Get agent_id from the AgentSupervisor's registered name via Registry.
+      # keys/1 raises on a node whose registry is gone, which is the right
+      # answer for a listing: an empty or short list reads as a real result.
       case Sagents.ProcessRegistry.keys(pid) do
         [{:agent_supervisor, agent_id}] -> agent_id
         _other -> nil

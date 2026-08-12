@@ -144,6 +144,14 @@ defmodule Sagents.SubAgentServer do
   ## Examples
 
       pid = SubAgentServer.whereis("main-agent-sub-1")
+
+  Raises `Sagents.RegistryUnavailableError` when this node's registry cannot
+  answer, for the same reason `Sagents.AgentServer.get_pid/1` does: `nil` would
+  be indistinguishable from "not running".
+
+  In practice this is unreachable. Callers run inside an agent turn, and the
+  parent agent is itself registered, so a registry that cannot answer would
+  have taken the caller down first.
   """
   @spec whereis(String.t()) :: pid() | nil
   def whereis(sub_agent_id) when is_binary(sub_agent_id) do

@@ -119,19 +119,24 @@ defmodule Sagents.AgentSupervisor do
   @doc """
   Stop the AgentSupervisor.
 
+  `{:error, :registry_unavailable}` means this node's registry could not answer,
+  so nothing was stopped and nothing is known about whether anything was
+  running. It is distinct from `:not_found` for the same reason it is in
+  `get_pid/1`.
+
   ## Examples
 
       AgentSupervisor.stop("my-agent-1")
       AgentSupervisor.stop("my-agent-1", 10_000) # 10 second timeout
 
   """
-  @spec stop(String.t(), timeout()) :: :ok | {:error, :not_found}
+  @spec stop(String.t(), timeout()) :: :ok | {:error, :not_found | :registry_unavailable}
   def stop(agent_id, timeout \\ 5_000) do
     case get_pid(agent_id) do
       {:ok, pid} ->
         Supervisor.stop(pid, :normal, timeout)
 
-      {:error, :not_found} = error ->
+      {:error, _reason} = error ->
         error
     end
   end

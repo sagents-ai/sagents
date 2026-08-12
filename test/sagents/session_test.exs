@@ -462,6 +462,35 @@ defmodule Sagents.SessionTest do
       stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
       assert Session.running?(base_config(), 1)
     end
+
+    test "raises rather than answering false when the registry cannot answer" do
+      # false would be read as "nothing is running", and a caller responds to
+      # that by starting a duplicate agent for a conversation that already has
+      # one on another node.
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:error, :registry_unavailable} end)
+
+      assert_raise Sagents.RegistryUnavailableError, fn ->
+        Session.running?(base_config(), 1)
+      end
+    end
+  end
+
+  describe "fetch_running/2" do
+    test "{:ok, false} when no agent is registered" do
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:error, :not_running} end)
+      assert {:ok, false} = Session.fetch_running(base_config(), 1)
+    end
+
+    test "{:ok, true} when an agent is registered" do
+      fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
+      assert {:ok, true} = Session.fetch_running(base_config(), 1)
+    end
+
+    test "keeps 'cannot answer' distinct from 'not running'" do
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:error, :registry_unavailable} end)
+      assert {:error, :registry_unavailable} = Session.fetch_running(base_config(), 1)
+    end
   end
 
   # ===========================================================================

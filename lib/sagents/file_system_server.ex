@@ -133,12 +133,47 @@ defmodule Sagents.FileSystemServer do
   The scope_key can be any term that uniquely identifies the filesystem scope.
   Common patterns include tuples like `{:user, 123}`, UUIDs like
   `"550e8400-e29b-41d4-a716-446655440000"`, or database IDs like `12345`.
+
+  Returns `nil` when no FileSystemServer is registered for `scope_key`.
+
+  Raises `Sagents.RegistryUnavailableError` when this node's registry cannot
+  answer at all, which happens while the node is starting and while it drains
+  during a rolling deploy. `nil` there would be indistinguishable from "not
+  running", and callers act on that by starting a server. Use `fetch_pid/1` on
+  request paths, where the condition is a value rather than a raise.
   """
   @spec whereis(term()) :: pid() | nil
   def whereis(scope_key) do
-    case ProcessRegistry.lookup({:filesystem_server, scope_key}) do
-      [{pid, _value}] -> pid
-      [] -> nil
+    case fetch_pid(scope_key) do
+      {:ok, pid} ->
+        pid
+
+      {:error, :not_running} ->
+        nil
+
+      {:error, :registry_unavailable} ->
+        raise Sagents.RegistryUnavailableError, operation: :"FileSystemServer.whereis/1"
+    end
+  end
+
+  @doc """
+  Get the FileSystemServer pid for `scope_key`, without raising.
+
+  The three outcomes are kept distinct on purpose:
+
+  - `{:ok, pid}` - a FileSystemServer is running
+  - `{:error, :not_running}` - the registry answered, nothing is registered
+  - `{:error, :registry_unavailable}` - this node's registry could not answer
+
+  Prefer this over `whereis/1` anywhere a web request can reach. See
+  `docs/deployment.md`.
+  """
+  @spec fetch_pid(term()) :: {:ok, pid()} | {:error, :not_running | :registry_unavailable}
+  def fetch_pid(scope_key) do
+    case ProcessRegistry.fetch({:filesystem_server, scope_key}) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, :not_registered} -> {:error, :not_running}
+      {:error, :registry_unavailable} = error -> error
     end
   end
 
