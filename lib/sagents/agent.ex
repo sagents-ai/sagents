@@ -43,6 +43,7 @@ defmodule Sagents.Agent do
 
   alias __MODULE__
   alias Sagents.AgentUtils
+  alias Sagents.Message.DisplayHelpers
   alias Sagents.Middleware
   alias Sagents.State
   alias LangChain.LangChainError
@@ -837,7 +838,7 @@ defmodule Sagents.Agent do
 
   defp check_for_streaming_error(%State{messages: messages}) do
     case List.last(messages) do
-      %Message{status: :cancelled, metadata: %{streaming_error: error}} -> error
+      %Message{} = message -> DisplayHelpers.streaming_error(message)
       _other -> nil
     end
   end

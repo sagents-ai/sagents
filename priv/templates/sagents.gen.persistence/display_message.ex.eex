@@ -35,6 +35,32 @@ defmodule <%= @context_module %>.DisplayMessage do
   - Tool result: `%{"tool_call_id" => "call_123", "name" => "search", "content" => "...", "is_error" => false}`
   - Todo snapshot: `%{"todos" => [%{"id" => 1, "content" => "Plan", "status" => "completed"}, ...], "summary" => %{"total" => 3, "pending" => 1, "in_progress" => 1, "completed" => 1, "cancelled" => 0}}`
 
+  ## Content Keys Written By The Framework
+
+  Beyond the per-type keys above, `Sagents.Message.DisplayHelpers` may add:
+
+  - `"stop_reason"` - present only when the model did not finish the message.
+    One of `"length"` (output token cap reached), `"cancelled"` (the run was
+    stopped), or `"stream_error"` (the stream died mid-flight). It appears on
+    the **last** item a message produced, because it means "and then it
+    stopped". A finished message carries no such key, so render the mark on the
+    presence of `content["stop_reason"]`.
+  - `"display_text"` - on `"tool_call"` content, a human-readable label for the
+    tool, taken from the `LangChain.Function` or humanized from its name.
+
+  ## Metadata Keys
+
+  The `metadata` field is a free-form map with several writers. Keys in use:
+
+  - `"result"` - tool output, written when a tool call completes
+  - `"display_text"` - tool label, written on completion and on interrupt
+  - `"error"` - failure description, written when a tool call fails
+  - `"hitl_decision"` - what a human approved or rejected, for tool calls that
+    went through `Sagents.Middleware.HumanInTheLoop`
+
+  Status transitions merge rather than replace, so a key set early survives
+  later transitions.
+
   ## Sequence Field (Message-Local Ordering)
 
   The `sequence` field (integer, default 0) ensures correct ordering of multiple content parts

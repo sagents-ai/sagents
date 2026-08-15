@@ -27,7 +27,70 @@ defmodule Sagents.Message.DisplayHelpers do
   library utilities that handle the extraction complexity.
   """
 
+  alias LangChain.LangChainError
   alias LangChain.Message
+
+  @typedoc """
+  Why a message stopped, normalized from `LangChain.Message.status`.
+
+  - `nil` - the model finished on its own
+  - `:length` - the model hit the output token cap
+  - `:cancelled` - the caller stopped the run
+  - `:stream_error` - the stream died mid-flight (content filter, `overloaded`,
+    invalid request)
+
+  `LangChain.Message.status` is `:cancelled` for both of the last two. The
+  discriminator is the presence of `metadata[:streaming_error]`, which
+  `LangChain.Chains.LLMChain.cancel_delta/3` sets. Untangling it here means no
+  caller has to know that convention.
+  """
+  @type stop_reason :: nil | :length | :cancelled | :stream_error
+
+  @doc """
+  Classifies why a message stopped.
+
+  Returns `nil` when the model finished. See `t:stop_reason/0` for the other
+  values.
+
+  ## Durability
+
+  `:stream_error` is only distinguishable during the turn that produced the
+  message. `Sagents.Persistence.StateSerializer` does not carry
+  `Message.metadata` through a state round trip, so a message read back from
+  persisted agent state classifies as `:cancelled` even when the stream died.
+  Classify at the point of persistence, where the distinction still exists, and
+  read the stored value afterwards.
+
+  ## Examples
+
+      iex> Sagents.Message.DisplayHelpers.stop_reason(LangChain.Message.new_assistant!("done"))
+      nil
+
+      iex> message = %LangChain.Message{role: :assistant, status: :length}
+      iex> Sagents.Message.DisplayHelpers.stop_reason(message)
+      :length
+  """
+  @spec stop_reason(Message.t()) :: stop_reason()
+  def stop_reason(%Message{status: :length}), do: :length
+
+  def stop_reason(%Message{status: :cancelled, metadata: %{streaming_error: error}})
+      when not is_nil(error),
+      do: :stream_error
+
+  def stop_reason(%Message{status: :cancelled}), do: :cancelled
+  def stop_reason(%Message{}), do: nil
+
+  @doc """
+  Returns the error that killed the stream, or `nil`.
+
+  Only populated during the turn that produced the message, for the same reason
+  described under `stop_reason/1`.
+  """
+  @spec streaming_error(Message.t()) :: LangChainError.t() | nil
+  def streaming_error(%Message{status: :cancelled, metadata: %{streaming_error: error}}),
+    do: error
+
+  def streaming_error(%Message{}), do: nil
 
   @doc """
   Extracts all displayable items from a Message.
@@ -46,6 +109,23 @@ defmodule Sagents.Message.DisplayHelpers do
   The caller should assign sequence numbers (0, 1, 2, ...) when persisting.
 
   **Note**: No mixed maps - top-level keys are atoms, content payload uses string keys.
+
+  ## Messages that stopped early
+
+  When `stop_reason/1` classifies the message as unfinished, the **last** item's
+  `content` carries a `"stop_reason"` string: `"length"`, `"cancelled"`, or
+  `"stream_error"`. Messages the model finished carry no such key, so a host
+  renders the mark on the truthiness of `content["stop_reason"]` rather than
+  having to compare against `nil`.
+
+  Only the last item is marked. A single message can yield several items
+  (thinking, then text, then tool calls), and the mark reads as "and then it
+  stopped", which is true only of the final thing said. The framework decides
+  this so that every host renders it the same way.
+
+  The key rides in `content` rather than alongside it because hosts persist
+  `item.content` verbatim into a JSONB column. Nothing has to be mapped, and no
+  `content_type` whitelist or migration is involved.
 
   ## Examples
 
@@ -92,7 +172,20 @@ defmodule Sagents.Message.DisplayHelpers do
     # Extract tool_results if present (tool messages)
     items = items ++ extract_tool_result_items(message)
 
-    items
+    mark_last_item(items, stop_reason(message))
+  end
+
+  # Stamp the stop reason onto the final item's content. A message that stopped
+  # while producing nothing extractable yields no items, and so no place to put
+  # the mark.
+  defp mark_last_item(items, nil), do: items
+  defp mark_last_item([], _stop_reason), do: []
+
+  defp mark_last_item(items, stop_reason) do
+    {leading, [last]} = Enum.split(items, -1)
+    content = Map.put(last.content, "stop_reason", Atom.to_string(stop_reason))
+
+    leading ++ [%{last | content: content}]
   end
 
   # Extract text and thinking content from message.content
