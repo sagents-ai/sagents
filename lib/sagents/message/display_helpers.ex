@@ -36,15 +36,16 @@ defmodule Sagents.Message.DisplayHelpers do
   - `nil` - the model finished on its own
   - `:length` - the model hit the output token cap
   - `:cancelled` - the caller stopped the run
-  - `:stream_error` - the stream died mid-flight (content filter, `overloaded`,
-    invalid request)
+  - `:content_filtered` - the provider's content filter stopped the response
+  - `:stream_error` - the stream died mid-flight (`overloaded`, an invalid
+    request, transport-level filtering)
 
-  `LangChain.Message.status` is `:cancelled` for both of the last two. The
-  discriminator is the presence of `metadata[:streaming_error]`, which
-  `LangChain.Chains.LLMChain.cancel_delta/3` sets. Untangling it here means no
-  caller has to know that convention.
+  Every value other than `nil` means the same thing to a reader ("it stopped
+  early"), so a host can treat the classification as one concept and vary the
+  wording per value. `:content_filtered` may additionally carry provider detail
+  naming the cause; see `stop_details/1`.
   """
-  @type stop_reason :: nil | :length | :cancelled | :stream_error
+  @type stop_reason :: nil | :length | :cancelled | :content_filtered | :stream_error
 
   @doc """
   Classifies why a message stopped.
@@ -54,12 +55,14 @@ defmodule Sagents.Message.DisplayHelpers do
 
   ## Durability
 
-  `:stream_error` is only distinguishable during the turn that produced the
-  message. `Sagents.Persistence.StateSerializer` does not carry
-  `Message.metadata` through a state round trip, so a message read back from
-  persisted agent state classifies as `:cancelled` even when the stream died.
-  Classify at the point of persistence, where the distinction still exists, and
-  read the stored value afterwards.
+  The classification survives a state round trip, because
+  `Sagents.Persistence.StateSerializer` carries `Message.status`. The error
+  *detail* does not: `Message.metadata` is not serialized, so `streaming_error/1`
+  returns `nil` for a message read back from persisted agent state even though
+  `stop_reason/1` still answers `:stream_error`.
+
+  Where metadata is the only discriminator, the classification is not durable
+  either, and a restored message reports `:cancelled`.
 
   ## Examples
 
@@ -72,7 +75,11 @@ defmodule Sagents.Message.DisplayHelpers do
   """
   @spec stop_reason(Message.t()) :: stop_reason()
   def stop_reason(%Message{status: :length}), do: :length
+  def stop_reason(%Message{status: :content_filtered}), do: :content_filtered
+  def stop_reason(%Message{status: :stream_error}), do: :stream_error
 
+  # Part of the supported LangChain range records a dead stream as :cancelled
+  # carrying the error, rather than as :stream_error.
   def stop_reason(%Message{status: :cancelled, metadata: %{streaming_error: error}})
       when not is_nil(error),
       do: :stream_error
@@ -83,14 +90,31 @@ defmodule Sagents.Message.DisplayHelpers do
   @doc """
   Returns the error that killed the stream, or `nil`.
 
-  Only populated during the turn that produced the message, for the same reason
-  described under `stop_reason/1`.
+  Keyed on the metadata alone rather than on the status, so it answers the same
+  way for either shape the supported LangChain range records a dead stream in.
+  Only populated during the turn that produced the message; see the durability
+  note on `stop_reason/1`.
   """
   @spec streaming_error(Message.t()) :: LangChainError.t() | nil
-  def streaming_error(%Message{status: :cancelled, metadata: %{streaming_error: error}}),
-    do: error
-
+  def streaming_error(%Message{metadata: %{streaming_error: error}}), do: error
   def streaming_error(%Message{}), do: nil
+
+  @doc """
+  Returns the provider's detail about why the response was stopped, or `nil`.
+
+  Populated by providers that name a cause beyond the status itself. Anthropic
+  sends it on a refusal as `%{"type" => "refusal", "category" => ...,
+  "explanation" => ...}` and omits it for every other stop reason, so a stop can
+  carry a reason with no detail.
+
+  Unlike `streaming_error/1` this is plain JSON rather than a struct, so
+  `extract_display_items/1` carries it into the item's `content` and it survives
+  persistence. It is not durable across an agent-state restore, for the reason
+  given under `stop_reason/1`.
+  """
+  @spec stop_details(Message.t()) :: map() | nil
+  def stop_details(%Message{metadata: %{stop_details: details}}) when is_map(details), do: details
+  def stop_details(%Message{}), do: nil
 
   @doc """
   Extracts all displayable items from a Message.
@@ -113,10 +137,14 @@ defmodule Sagents.Message.DisplayHelpers do
   ## Messages that stopped early
 
   When `stop_reason/1` classifies the message as unfinished, the **last** item's
-  `content` carries a `"stop_reason"` string: `"length"`, `"cancelled"`, or
-  `"stream_error"`. Messages the model finished carry no such key, so a host
-  renders the mark on the truthiness of `content["stop_reason"]` rather than
-  having to compare against `nil`.
+  `content` carries a `"stop_reason"` string: `"length"`, `"cancelled"`,
+  `"content_filtered"`, or `"stream_error"`. Messages the model finished carry no
+  such key, so a host renders the mark on the truthiness of
+  `content["stop_reason"]` rather than having to compare against `nil`.
+
+  When the provider named a cause beyond the status, `"stop_details"` sits
+  alongside it on the same item, carrying the provider's own map. It is absent
+  otherwise, including for stops that carry a reason but no detail.
 
   Only the last item is marked. A single message can yield several items
   (thinking, then text, then tool calls), and the mark reads as "and then it
@@ -172,21 +200,32 @@ defmodule Sagents.Message.DisplayHelpers do
     # Extract tool_results if present (tool messages)
     items = items ++ extract_tool_result_items(message)
 
-    mark_last_item(items, stop_reason(message))
+    mark_last_item(items, stop_reason(message), stop_details(message))
   end
 
   # Stamp the stop reason onto the final item's content. A message that stopped
   # while producing nothing extractable yields no items, and so no place to put
   # the mark.
-  defp mark_last_item(items, nil), do: items
-  defp mark_last_item([], _stop_reason), do: []
+  defp mark_last_item(items, nil, _stop_details), do: items
+  defp mark_last_item([], _stop_reason, _stop_details), do: []
 
-  defp mark_last_item(items, stop_reason) do
+  defp mark_last_item(items, stop_reason, stop_details) do
     {leading, [last]} = Enum.split(items, -1)
-    content = Map.put(last.content, "stop_reason", Atom.to_string(stop_reason))
+
+    content =
+      last.content
+      |> Map.put("stop_reason", Atom.to_string(stop_reason))
+      |> put_stop_details(stop_details)
 
     leading ++ [%{last | content: content}]
   end
+
+  # Only providers that name a cause contribute detail, so the key is absent
+  # rather than nil when there is none. Hosts match on presence.
+  defp put_stop_details(content, details) when is_map(details),
+    do: Map.put(content, "stop_details", details)
+
+  defp put_stop_details(content, _details), do: content
 
   # Extract text and thinking content from message.content
   defp extract_content_items(%Message{content: content, role: role}) do

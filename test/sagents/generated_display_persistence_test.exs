@@ -116,6 +116,29 @@ defmodule Sagents.GeneratedDisplayPersistenceTest do
       refute Map.has_key?(content, "stop_reason")
     end
 
+    test "carries the provider's stop detail through to persisted content", %{module: module} do
+      # A refusal arrives on the success path with empty or partial content, so
+      # the detail is the only thing that says why the transcript stops here.
+      details = %{
+        "type" => "refusal",
+        "category" => "cyber",
+        "explanation" => "Declined to assist."
+      }
+
+      message = %Message{
+        role: :assistant,
+        content: [ContentPart.text!("I can't help with")],
+        status: :content_filtered,
+        metadata: %{stop_details: details}
+      }
+
+      assert {:ok, [_row]} = module.save_message(:scope, message, %{conversation_id: 7})
+
+      assert_receive {:appended, %{"content" => content}}
+      assert content["stop_reason"] == "content_filtered"
+      assert content["stop_details"] == details
+    end
+
     test "still lifts tool_call_id into its own column and starts it pending", %{module: module} do
       message =
         Message.new_assistant!(%{

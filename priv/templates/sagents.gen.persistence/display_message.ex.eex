@@ -41,10 +41,16 @@ defmodule <%= @context_module %>.DisplayMessage do
 
   - `"stop_reason"` - present only when the model did not finish the message.
     One of `"length"` (output token cap reached), `"cancelled"` (the run was
-    stopped), or `"stream_error"` (the stream died mid-flight). It appears on
-    the **last** item a message produced, because it means "and then it
-    stopped". A finished message carries no such key, so render the mark on the
-    presence of `content["stop_reason"]`.
+    stopped), `"content_filtered"` (the provider's filter or safety classifier
+    stopped the response), or `"stream_error"` (the stream died mid-flight). It
+    appears on the **last** item a message produced, because it means "and then
+    it stopped". A finished message carries no such key, so render the mark on
+    the presence of `content["stop_reason"]`.
+  - `"stop_details"` - the provider's own description of the cause, present only
+    alongside `"stop_reason"` and only when the provider named one. Anthropic
+    sends it on a refusal as
+    `%{"type" => "refusal", "category" => ..., "explanation" => ...}`. Treat it
+    as optional: most stops carry a reason and no detail.
   - `"display_text"` - on `"tool_call"` content, a human-readable label for the
     tool, taken from the `LangChain.Function` or humanized from its name.
 

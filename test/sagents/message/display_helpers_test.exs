@@ -207,14 +207,33 @@ defmodule Sagents.Message.DisplayHelpersTest do
       assert :stream_error == DisplayHelpers.stop_reason(message)
     end
 
-    test "a stream error read back from persisted state classifies as :cancelled" do
+    test "returns :stream_error for the LangChain status of the same name" do
+      # Built as a struct rather than through Message.new/1 so the assertion is
+      # about classification alone, independent of which LangChain in the
+      # supported range is installed and what its Ecto.Enum accepts.
+      message = %Message{role: :assistant, content: "Partial", status: :stream_error}
+
+      assert :stream_error == DisplayHelpers.stop_reason(message)
+    end
+
+    test "returns :content_filtered when the provider's filter stopped the response" do
+      message = %Message{role: :assistant, content: "Partial", status: :content_filtered}
+
+      assert :content_filtered == DisplayHelpers.stop_reason(message)
+    end
+
+    test "a metadata-discriminated stream error is not durable across a state round trip" do
       # StateSerializer carries role, content, status, tool_calls and tool_results.
-      # metadata does not survive the round trip, so the discriminator between a
-      # caller-initiated stop and a dead stream is gone by the time state is
-      # restored. Classify while the message is still in the turn that made it.
+      # metadata does not survive the round trip, so where metadata is the only
+      # discriminator a restored message reports :cancelled. Where the status
+      # itself says :stream_error, the classification survives.
       restored = Message.new_assistant!(%{content: "Partial", status: :cancelled, metadata: %{}})
 
       assert :cancelled == DisplayHelpers.stop_reason(restored)
+
+      restored_with_status = %Message{role: :assistant, content: "Partial", status: :stream_error}
+
+      assert :stream_error == DisplayHelpers.stop_reason(restored_with_status)
     end
   end
 
@@ -240,6 +259,61 @@ defmodule Sagents.Message.DisplayHelpersTest do
 
     test "returns nil for a completed message" do
       assert nil == DisplayHelpers.streaming_error(Message.new_assistant!("All done"))
+    end
+
+    test "reads the error whatever status LangChain used to record the stop" do
+      error = LangChainError.exception(type: "overloaded", message: "busy")
+
+      message = %Message{
+        role: :assistant,
+        content: "Partial",
+        status: :stream_error,
+        metadata: %{streaming_error: error}
+      }
+
+      assert ^error = DisplayHelpers.streaming_error(message)
+    end
+  end
+
+  describe "stop_details/1" do
+    test "returns the provider's detail for a refusal" do
+      details = %{
+        "type" => "refusal",
+        "category" => "cyber",
+        "explanation" => "Declined to assist."
+      }
+
+      message = %Message{
+        role: :assistant,
+        content: "",
+        status: :content_filtered,
+        metadata: %{stop_details: details}
+      }
+
+      assert ^details = DisplayHelpers.stop_details(message)
+    end
+
+    test "returns nil when the stop carries no detail" do
+      message = %Message{role: :assistant, content: "Partial", status: :length}
+
+      assert nil == DisplayHelpers.stop_details(message)
+    end
+
+    test "returns nil for a finished message" do
+      assert nil == DisplayHelpers.stop_details(Message.new_assistant!("All done"))
+    end
+
+    test "returns nil when metadata carries something else" do
+      error = LangChainError.exception(type: "overloaded", message: "busy")
+
+      message = %Message{
+        role: :assistant,
+        content: "Partial",
+        status: :stream_error,
+        metadata: %{streaming_error: error}
+      }
+
+      assert nil == DisplayHelpers.stop_details(message)
     end
   end
 
@@ -315,6 +389,77 @@ defmodule Sagents.Message.DisplayHelpersTest do
 
       assert [%{content: content}] = DisplayHelpers.extract_display_items(message)
       assert content["stop_reason"] == "stream_error"
+    end
+
+    test "marks a content filtered message as content_filtered" do
+      message = %Message{
+        role: :assistant,
+        content: [ContentPart.text!("Partial answ")],
+        status: :content_filtered
+      }
+
+      assert [%{content: content}] = DisplayHelpers.extract_display_items(message)
+      assert content["stop_reason"] == "content_filtered"
+    end
+
+    test "carries the provider's stop detail alongside the reason" do
+      details = %{
+        "type" => "refusal",
+        "category" => "cyber",
+        "explanation" => "Declined to assist."
+      }
+
+      message = %Message{
+        role: :assistant,
+        content: [ContentPart.text!("Partial answ")],
+        status: :content_filtered,
+        metadata: %{stop_details: details}
+      }
+
+      assert [%{content: content}] = DisplayHelpers.extract_display_items(message)
+      assert content["stop_reason"] == "content_filtered"
+      assert content["stop_details"] == details
+    end
+
+    test "marks only the last item with the detail when a message yields several" do
+      details = %{"type" => "refusal", "category" => "cyber"}
+
+      message = %Message{
+        role: :assistant,
+        content: [ContentPart.thinking!("Considering"), ContentPart.text!("Partial answ")],
+        status: :content_filtered,
+        metadata: %{stop_details: details}
+      }
+
+      assert [%{content: thinking}, %{content: text}] =
+               DisplayHelpers.extract_display_items(message)
+
+      refute Map.has_key?(thinking, "stop_reason")
+      refute Map.has_key?(thinking, "stop_details")
+      assert text["stop_reason"] == "content_filtered"
+      assert text["stop_details"] == details
+    end
+
+    test "a stop with no detail writes no stop_details key" do
+      # Absence rather than nil: hosts render on presence, and a nil would make
+      # every unfinished message look like it carried detail.
+      message = %Message{
+        role: :assistant,
+        content: [ContentPart.text!("Partial answ")],
+        status: :length
+      }
+
+      assert [%{content: content}] = DisplayHelpers.extract_display_items(message)
+      assert content["stop_reason"] == "length"
+      refute Map.has_key?(content, "stop_details")
+    end
+
+    test "a finished message writes neither key" do
+      message = Message.new_assistant!(%{content: [ContentPart.text!("All done")]})
+
+      assert [%{content: content}] = DisplayHelpers.extract_display_items(message)
+      refute Map.has_key?(content, "stop_reason")
+      refute Map.has_key?(content, "stop_details")
     end
 
     test "a message that stopped before producing anything yields no items" do

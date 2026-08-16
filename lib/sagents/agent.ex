@@ -790,20 +790,12 @@ defmodule Sagents.Agent do
       chain
       |> execute_chain(agent.middleware, agent, opts)
       |> handle_chain_result(state)
+      |> reject_streaming_error()
     end
   end
 
-  defp handle_chain_result({:ok, executed_chain}, state) do
-    with {:ok, final_state} <- extract_state_from_chain(executed_chain, state) do
-      # Check if the last message was cancelled due to a streaming error
-      # (e.g. content filtering). The error is stored in message metadata
-      # by LLMChain.cancel_delta/3.
-      case check_for_streaming_error(final_state) do
-        nil -> {:ok, final_state}
-        error -> {:error, error}
-      end
-    end
-  end
+  defp handle_chain_result({:ok, executed_chain}, state),
+    do: extract_state_from_chain(executed_chain, state)
 
   defp handle_chain_result({:ok, executed_chain, extra}, state) do
     with {:ok, final_state} <- extract_state_from_chain(executed_chain, state) do
@@ -835,6 +827,33 @@ defmodule Sagents.Agent do
 
   defp pause_reason_from_chain(%LLMChain{custom_context: %{pause_reason: reason}}), do: reason
   defp pause_reason_from_chain(_chain), do: nil
+
+  # A stream that dies mid-flight is not an error at the chain level. LLMChain
+  # keeps the partial message and reports the run as successful, with the cause
+  # in that message's metadata, so a run has to be inspected before its result
+  # is handed back. Without this the caller receives a silently truncated turn
+  # as a success.
+  #
+  # Applied to the result of `handle_chain_result/2` rather than inside its
+  # clauses. The check is cross-cutting and the clauses dispatch on result
+  # shape, so attaching it per clause lets the shapes disagree about whether a
+  # dead stream counts. A new successful shape needs a clause here.
+  defp reject_streaming_error({:ok, %State{} = state} = success),
+    do: streaming_error_or(state, success)
+
+  defp reject_streaming_error({:ok, %State{} = state, _extra} = success),
+    do: streaming_error_or(state, success)
+
+  # An interrupt or a pause is the chain stopping deliberately, with the stream
+  # intact. Only errors reach the remaining clause, and they are already errors.
+  defp reject_streaming_error(other), do: other
+
+  defp streaming_error_or(%State{} = state, success) do
+    case check_for_streaming_error(state) do
+      nil -> success
+      error -> {:error, error}
+    end
+  end
 
   defp check_for_streaming_error(%State{messages: messages}) do
     case List.last(messages) do

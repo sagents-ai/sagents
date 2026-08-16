@@ -69,6 +69,14 @@ defmodule Sagents.DisplayMessagePersistence do
   2. Persist them to the database (scoped via `scope`)
   3. Return the list of saved records
 
+  Use `Sagents.Message.DisplayHelpers.extract_display_items/1` to do the
+  conversion, and store each item's `content` map **verbatim**. Beyond the keys
+  a given `content_type` needs for rendering, the framework writes keys of its
+  own — `"stop_reason"` and `"stop_details"` on a message the model did not
+  finish, `"display_text"` on a tool call. An implementation that rebuilds
+  `content` key by key silently drops them. `extract_display_items/1` documents
+  the full inventory.
+
   AgentServer broadcasts `{:display_message_saved, msg}` for each
   returned record, so connected LiveViews can update their UI.
 
