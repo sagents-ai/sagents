@@ -14,8 +14,10 @@ defmodule <%= @context_module %>.DisplayMessage do
   - `"image"` - Image content (URL or base64 data)
   - `"file_reference"` - Reference to a file
   - `"structured_data"` - Structured/formatted data (tables, JSON, etc.)
-  - `"notification"` - System/UI notification
-  - `"error"` - Error message
+  - `"notification"` - System/UI notification. Sagents writes one when a run is
+    cancelled, carrying `content["stop_reason"] = "cancelled"`
+  - `"error"` - Error message. Sagents writes one when a turn fails, carrying
+    `content["error_type"]` when the failure named one
   - `"tool_call"` - Tool invocation request from assistant
   - `"tool_result"` - Tool execution result
   - `"todo_snapshot"` - Point-in-time snapshot of an agent's todo list,
@@ -53,6 +55,17 @@ defmodule <%= @context_module %>.DisplayMessage do
     as optional: most stops carry a reason and no detail.
   - `"display_text"` - on `"tool_call"` content, a human-readable label for the
     tool, taken from the `LangChain.Function` or humanized from its name.
+  - `"error_type"` - on `"error"` content, the `LangChain.LangChainError` type
+    behind the failure, such as `"overloaded"` or `"exceeded_max_runs"`. Absent
+    when the failure named no type. Note that `"error"` rows carry no
+    `"stop_reason"`: that key describes a message the model began and did not
+    finish, which is a different thing from a turn that failed.
+
+  Rows the framework originates rather than the model — `"notification"` and
+  `"error"` — reach `save_synthetic_message/3` rather than `save_message/3`, and
+  are broadcast as `{:display_message_saved, _}` only. A host that does not
+  implement `save_synthetic_message/3` receives them as ordinary assistant text
+  instead, and cannot style or translate them.
 
   ## Metadata Keys
 

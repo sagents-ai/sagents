@@ -37,6 +37,37 @@ defmodule Sagents.TestDisplayMessagePersistenceRaising do
   end
 end
 
+defmodule Sagents.TestDisplayMessagePersistenceNoSynthetic do
+  @moduledoc """
+  Forwards messages to a registered process and does **not** implement the
+  optional `save_synthetic_message/3`.
+
+  Stands in for a host generated before that callback existed, which is the case
+  the framework's cancel and error rows have to keep working for.
+
+  Register a test process with `register_test_process/1` before use.
+  """
+
+  @behaviour Sagents.DisplayMessagePersistence
+
+  def register_test_process(pid) do
+    :persistent_term.put({__MODULE__, :test_pid}, pid)
+  end
+
+  @impl true
+  def save_message(_scope, %LangChain.Message{} = message, _context) do
+    display_items = Sagents.Message.DisplayHelpers.extract_display_items(message)
+    pid = :persistent_term.get({__MODULE__, :test_pid})
+    send(pid, {:saved_message, message, display_items})
+    {:ok, []}
+  end
+
+  @impl true
+  def update_tool_status(_scope, _status, _tool_info, _context) do
+    {:error, :not_found}
+  end
+end
+
 defmodule Sagents.TestDisplayMessagePersistenceForwarding do
   @moduledoc """
   Test implementation that forwards messages and display items to a registered process.

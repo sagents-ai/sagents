@@ -139,6 +139,15 @@ defmodule Sagents.AgentServer do
     persisted via `display_message_persistence` behaviour.
     The `{:llm_message, ...}` event is also broadcast alongside this event
 
+    Rows the framework originates rather than the model — the cancellation
+    notice, the error notice, and middleware-emitted rows such as a todo
+    snapshot — are the exception: they broadcast only
+    `{:display_message_saved, _}`, because there is no `%Message{}` to carry.
+    Render these from this event. `{:llm_message, _}` is the live channel for
+    model output alone, and it carries the full struct, `status` included, for a
+    host wanting to react to a message that stopped early before the display row
+    lands.
+
   ### Queued Message Events
   - `{:agent, {:message_queued, %Message{}}}` - A message arrived while a run was
     in flight and is being held for delivery at the next run boundary. See
@@ -249,6 +258,7 @@ defmodule Sagents.AgentServer do
   alias Sagents.Agent
   alias Sagents.State
   alias Sagents.AgentSupervisor
+  alias Sagents.Message.DisplayHelpers
   alias Sagents.Middleware
   alias Sagents.MiddlewareEntry
   alias Sagents.Persistence.StateSerializer
@@ -3044,7 +3054,7 @@ defmodule Sagents.AgentServer do
     updated_state = maybe_persist_state(updated_state, :on_error)
 
     # Persist an assistant message describing the error so it survives page reloads
-    persist_error_as_display_message(updated_state, reason)
+    maybe_persist_error_as_display_message(updated_state, reason)
 
     broadcast_event(updated_state, {:status_changed, :error, reason})
     update_presence_status(updated_state, :error)
@@ -3884,22 +3894,114 @@ defmodule Sagents.AgentServer do
     end
   end
 
-  # Create and persist an assistant message for the error so it shows up on page reload.
-  defp persist_error_as_display_message(server_state, reason) do
-    error_text = format_error_for_display(reason)
-    error_message = Message.new_assistant!(error_text)
-    maybe_save_and_broadcast_message(server_state, error_message)
+  # A dead stream puts the partial message the model produced into the
+  # transcript, carrying `content["stop_reason"] = "stream_error"`, so the reader
+  # already sees both the text and the fact that it stopped. Adding a fabricated
+  # row underneath would say the same thing again, less precisely and in prose a
+  # host can neither style nor translate.
+  #
+  # Every other error still writes one. An error that produced no partial — a
+  # request rejected before the stream opened, a tool blowing up, a delta that
+  # would not convert — leaves the reader nothing at all otherwise.
+  defp maybe_persist_error_as_display_message(server_state, reason) do
+    if stream_error_partial_shown?(server_state) do
+      :ok
+    else
+      persist_error_as_display_message(server_state, reason)
+    end
   end
 
-  # Create and persist an assistant message on cancellation so it survives page
-  # reload and reaches every subscribed LiveView via :display_message_saved.
-  # Persisting here (single authoritative writer) avoids duplicate inserts when
-  # multiple LiveViews are subscribed to the same agent.
-  defp persist_cancel_as_display_message(server_state) do
-    cancel_text = "_Agent execution cancelled by user. Partial response discarded._"
-    cancel_message = Message.new_assistant!(cancel_text)
-    maybe_save_and_broadcast_message(server_state, cancel_message)
+  # `Sagents.Agent` announces the partial through `:on_message_processed`, whose
+  # handler both persists the display row and casts `{:turn_state_update, ...}`.
+  # The cast and the task's result are sent by the same process, so the rolling
+  # state has already absorbed the partial by the time the error is handled, and
+  # its presence here is what says the transcript got it.
+  #
+  # A partial that produced nothing displayable is never announced, so it is
+  # absent here too and the error row is written, which is what should happen.
+  defp stream_error_partial_shown?(%ServerState{state: %State{messages: messages}}) do
+    case List.last(messages) do
+      %Message{} = message -> DisplayHelpers.stop_reason(message) == :stream_error
+      _other -> false
+    end
   end
+
+  defp stream_error_partial_shown?(_server_state), do: false
+
+  # Persist a row describing the error so it survives page reload.
+  #
+  # `content_type: "error"` is the classification; a host styles and translates
+  # from that rather than from the prose. `content["error_type"]` carries the
+  # `LangChain.LangChainError` type when there is one, which is the useful
+  # discriminator here — "overloaded" and "exceeded_max_runs" want different
+  # words, and neither is a message that stopped early.
+  #
+  # Deliberately not `content["stop_reason"]`. That vocabulary describes a
+  # message the model began and did not finish, and after the dead-stream partial
+  # is persisted no such case reaches this row. Reusing the key would make a
+  # host's stop-reason branch mean two different things.
+  defp persist_error_as_display_message(server_state, reason) do
+    text = format_error_for_display(reason)
+
+    persist_framework_row(server_state, text, %{
+      message_type: "system",
+      content_type: "error",
+      content: put_error_type(%{"text" => text}, reason)
+    })
+  end
+
+  # Persist a row on cancellation so it survives page reload and reaches every
+  # subscribed LiveView. Persisting here (single authoritative writer) avoids
+  # duplicate inserts when multiple LiveViews are subscribed to the same agent.
+  #
+  # `content["stop_reason"] = "cancelled"` is the same key and the same value
+  # `Sagents.Message.DisplayHelpers` writes for a model message the caller
+  # stopped, so a host renders both from one branch. There is no partial to mark
+  # on this path: cancelling kills the task outright.
+  defp persist_cancel_as_display_message(server_state) do
+    text = "Agent execution cancelled."
+
+    persist_framework_row(server_state, text, %{
+      message_type: "system",
+      content_type: "notification",
+      content: %{"text" => text, "stop_reason" => "cancelled"}
+    })
+  end
+
+  # Write a row the framework originated rather than the model.
+  #
+  # `save_synthetic_message/3` is optional, and a host generated before it
+  # existed does not export it. Routing there unconditionally would delete these
+  # rows outright for those hosts, so the prose message remains the fallback and
+  # every host keeps a transcript entry.
+  #
+  # The two paths do not broadcast alike. `maybe_save_and_broadcast_message/2`
+  # emits both `{:display_message_saved, _}` and `{:llm_message, _}`; the
+  # synthetic path emits only the former, because there is no `%Message{}` to
+  # put in the latter and fabricating one is the misattribution this row exists
+  # to stop making. A host rendering these live from `{:llm_message, _}` reads
+  # `{:display_message_saved, _}` instead, which it already handles if it
+  # implements the callback at all.
+  defp persist_framework_row(server_state, fallback_text, attrs) do
+    if synthetic_message_supported?(server_state) do
+      maybe_save_synthetic_and_broadcast(server_state, attrs)
+    else
+      maybe_save_and_broadcast_message(server_state, Message.new_assistant!(fallback_text))
+    end
+  end
+
+  defp synthetic_message_supported?(%ServerState{display_message_persistence: nil}), do: false
+
+  defp synthetic_message_supported?(%ServerState{display_message_persistence: module}) do
+    Code.ensure_loaded?(module) and function_exported?(module, :save_synthetic_message, 3)
+  end
+
+  # Absent rather than nil when the failure carried no type, matching how the
+  # framework writes every other optional content key.
+  defp put_error_type(content, %LangChain.LangChainError{type: type}) when is_binary(type),
+    do: Map.put(content, "error_type", type)
+
+  defp put_error_type(content, _reason), do: content
 
   defp format_error_for_display(%LangChain.LangChainError{type: "delta_conversion_failed"}) do
     "The assistant returned an invalid response. Please try again."

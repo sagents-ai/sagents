@@ -765,11 +765,14 @@ defmodule Sagents.Agent do
     end)
   end
 
-  # Fire a Sagents-specific callback key (e.g., :on_after_middleware) from the
-  # callbacks list. This handles keys that are NOT LangChain-native — they won't
-  # be fired by LLMChain.run, so we iterate the list and fire matching handlers
-  # ourselves. LangChain-native keys are handled separately via maybe_add_callbacks
-  # which adds each map to the chain for LLMChain to fire during execution.
+  # Fire a callback key across every handler map, in fan-out.
+  #
+  # Two kinds of key reach this. Sagents-specific keys such as
+  # `:on_after_middleware` are not LangChain-native, so `LLMChain.run/2` will
+  # never fire them and this is the only path they have. LangChain-native keys
+  # are normally fired by the chain itself, having been added to it by
+  # maybe_add_callbacks/2, and are fired from here only for a message the chain
+  # is known not to announce — see notify_partial_message/3.
   defp fire_callback([], _key, _args), do: :ok
 
   defp fire_callback(callbacks, key, args) when is_list(callbacks) do
@@ -787,10 +790,15 @@ defmodule Sagents.Agent do
   defp execute_model(%Agent{} = agent, %State{} = state, callbacks, opts) do
     with {:ok, langchain_messages} <- validate_messages(state.messages),
          {:ok, chain} <- build_chain_impl(agent, langchain_messages, state, callbacks) do
-      chain
-      |> execute_chain(agent.middleware, agent, opts)
+      # The chain result is kept alongside the converted state because
+      # reject_streaming_error/3 announces the partial message a dead stream
+      # leaves behind, and `:on_message_processed` handlers are passed the chain
+      # that produced it.
+      chain_result = execute_chain(chain, agent.middleware, agent, opts)
+
+      chain_result
       |> handle_chain_result(state)
-      |> reject_streaming_error()
+      |> reject_streaming_error(chain_result, callbacks)
     end
   end
 
@@ -834,33 +842,64 @@ defmodule Sagents.Agent do
   # is handed back. Without this the caller receives a silently truncated turn
   # as a success.
   #
+  # The partial message is announced on the way past, so that converting the run
+  # to an error does not also lose the text the model produced. See
+  # notify_partial_message/3.
+  #
   # Applied to the result of `handle_chain_result/2` rather than inside its
   # clauses. The check is cross-cutting and the clauses dispatch on result
   # shape, so attaching it per clause lets the shapes disagree about whether a
   # dead stream counts. A new successful shape needs a clause here.
-  defp reject_streaming_error({:ok, %State{} = state} = success),
-    do: streaming_error_or(state, success)
+  defp reject_streaming_error({:ok, %State{} = state} = success, chain_result, callbacks),
+    do: streaming_error_or(state, success, chain_result, callbacks)
 
-  defp reject_streaming_error({:ok, %State{} = state, _extra} = success),
-    do: streaming_error_or(state, success)
+  defp reject_streaming_error({:ok, %State{} = state, _extra} = success, chain_result, callbacks),
+    do: streaming_error_or(state, success, chain_result, callbacks)
 
   # An interrupt or a pause is the chain stopping deliberately, with the stream
   # intact. Only errors reach the remaining clause, and they are already errors.
-  defp reject_streaming_error(other), do: other
+  defp reject_streaming_error(other, _chain_result, _callbacks), do: other
 
-  defp streaming_error_or(%State{} = state, success) do
-    case check_for_streaming_error(state) do
-      nil -> success
-      error -> {:error, error}
+  defp streaming_error_or(%State{} = state, success, chain_result, callbacks) do
+    with %Message{} = message <- List.last(state.messages),
+         %LangChainError{} = error <- DisplayHelpers.streaming_error(message) do
+      notify_partial_message(callbacks, chain_result, message)
+      {:error, error}
+    else
+      _other -> success
     end
   end
 
-  defp check_for_streaming_error(%State{messages: messages}) do
-    case List.last(messages) do
-      %Message{} = message -> DisplayHelpers.streaming_error(message)
-      _other -> nil
+  # Announce the partial message a dead stream left behind.
+  #
+  # `LLMChain.cancel_delta/3` appends it with `add_message/2`, which fires no
+  # callbacks, so without this the text the model did produce reaches neither the
+  # host's transcript nor the rolling state an AgentServer keeps — it exists only
+  # inside the chain, which the `{:error, _}` return is about to discard.
+  # Firing `:on_message_processed` puts it on the same path every other message
+  # takes. `Sagents.Message.DisplayHelpers.extract_display_items/1` marks it
+  # `stop_reason: "stream_error"`, so a host renders it as a message that stopped
+  # early rather than as ordinary output.
+  #
+  # A partial carrying nothing displayable is not announced. There is no text for
+  # a reader to gain, and an empty assistant message in the transcript and in
+  # persisted agent state is worse than none.
+  #
+  # This cannot double-fire: `add_message/2` is the only way the message was
+  # produced, and it announces nothing.
+  defp notify_partial_message(callbacks, chain_result, %Message{} = message) do
+    if DisplayHelpers.extract_display_items(message) != [] do
+      fire_callback(callbacks, :on_message_processed, [executed_chain(chain_result), message])
     end
+
+    :ok
   end
+
+  # Only the two successful shapes reach notify_partial_message/3, so a chain is
+  # always present by the time this is asked.
+  defp executed_chain({:ok, %LLMChain{} = chain}), do: chain
+  defp executed_chain({:ok, %LLMChain{} = chain, _extra}), do: chain
+  defp executed_chain(_other), do: nil
 
   defp validate_messages(messages) do
     # Messages are already LangChain.Message structs, just validate them
