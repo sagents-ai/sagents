@@ -10,6 +10,8 @@ defmodule Sagents.AgentTest do
   alias LangChain.Message.ToolCall
   alias LangChain.Message.ToolResult
   alias Sagents.MiddlewareEntry
+  alias Sagents.Message.DisplayHelpers
+  alias LangChain.Chains.LLMChain
   alias LangChain.LangChainError
 
   # Test middleware for composition testing
@@ -716,6 +718,98 @@ defmodule Sagents.AgentTest do
 
       assert {:ok, %State{} = result_state} = Agent.execute(agent, initial_state)
       assert %Message{status: :length} = List.last(result_state.messages)
+    end
+
+    # The partial is announced through :on_message_processed so it reaches the
+    # host's transcript and an AgentServer's rolling state. Converting the run to
+    # {:error, _} discards the chain, so this is the only chance to surface it.
+    #
+    # These drive a mode that appends via LLMChain.add_message/2, which is what
+    # cancel_delta/3 does and which fires no callbacks. A model stub cannot show
+    # the behaviour: messages returned from the model go through process_message/2,
+    # which announces them anyway.
+
+    test "announces the partial message so it can reach the transcript" do
+      test_pid = self()
+
+      {:ok, agent} =
+        Agent.new(
+          %{model: mock_model(), mode: __MODULE__.DeadStreamAddMessageMode},
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      callbacks = [
+        %{
+          on_message_processed: fn chain, message ->
+            send(test_pid, {:processed, chain, message})
+          end
+        }
+      ]
+
+      assert {:error, %LangChainError{type: "overloaded"}} =
+               Agent.execute(agent, initial_state, callbacks: callbacks)
+
+      assert_received {:processed, %LLMChain{}, %Message{content: "Partial answ"} = announced}
+      assert DisplayHelpers.stop_reason(announced) == :stream_error
+
+      # Announced once. add_message/2 announces nothing, so nothing else can.
+      refute_received {:processed, _chain, _message}
+    end
+
+    test "announces the partial when the run carried a result alongside the chain" do
+      test_pid = self()
+
+      {:ok, agent} =
+        Agent.new(
+          %{model: mock_model(), mode: __MODULE__.DeadStreamThreeTupleMode},
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      callbacks = [
+        %{
+          on_message_processed: fn chain, message ->
+            send(test_pid, {:processed, chain, message})
+          end
+        }
+      ]
+
+      assert {:error, %LangChainError{type: "overloaded"}} =
+               Agent.execute(agent, initial_state, callbacks: callbacks)
+
+      assert_received {:processed, %LLMChain{}, %Message{content: "Partial answ"}}
+    end
+
+    test "a partial carrying nothing displayable is not announced" do
+      # A stream that died before producing content yields a message with no
+      # display items. Announcing it would put an empty assistant message in the
+      # transcript and in persisted agent state, and would suppress the error row
+      # that is then the only thing left to show.
+      test_pid = self()
+
+      {:ok, agent} =
+        Agent.new(
+          %{model: mock_model(), mode: __MODULE__.DeadStreamEmptyPartialMode},
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      callbacks = [
+        %{
+          on_message_processed: fn chain, message ->
+            send(test_pid, {:processed, chain, message})
+          end
+        }
+      ]
+
+      assert {:error, %LangChainError{type: "overloaded"}} =
+               Agent.execute(agent, initial_state, callbacks: callbacks)
+
+      refute_received {:processed, _chain, _message}
     end
   end
 
@@ -1956,6 +2050,40 @@ defmodule Sagents.AgentTest do
   # Returns the {:ok, chain, extra} shape that until_tool and friends produce,
   # with a chain whose last message is a stream that died. Driving this through
   # a mode is the only way to reach that arm without a full tool round trip.
+  # Reproduces LLMChain.cancel_delta/3: the partial is appended with
+  # add_message/2, which announces nothing, and the run still reports success.
+  defmodule DeadStreamAddMessageMode do
+    @behaviour LangChain.Chains.LLMChain.Mode
+
+    @impl true
+    def run(chain, _opts) do
+      {:ok, LangChain.Chains.LLMChain.add_message(chain, DeadStreamAddMessageMode.partial())}
+    end
+
+    def partial(content \\ "Partial answ") do
+      %LangChain.Message{
+        role: :assistant,
+        content: content,
+        status: :stream_error,
+        metadata: %{
+          streaming_error: LangChain.LangChainError.exception(type: "overloaded", message: "busy")
+        }
+      }
+    end
+  end
+
+  # The stream died before any content arrived, so the partial yields no display
+  # items.
+  defmodule DeadStreamEmptyPartialMode do
+    @behaviour LangChain.Chains.LLMChain.Mode
+
+    @impl true
+    def run(chain, _opts) do
+      partial = DeadStreamAddMessageMode.partial("")
+      {:ok, LangChain.Chains.LLMChain.add_message(chain, partial)}
+    end
+  end
+
   defmodule DeadStreamThreeTupleMode do
     @behaviour LangChain.Chains.LLMChain.Mode
 

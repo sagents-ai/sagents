@@ -3,6 +3,8 @@ defmodule Sagents.Persistence.StateSerializerTest do
 
   alias Sagents.Persistence.StateSerializer
   alias Sagents.{Agent, State, Todo}
+  alias Sagents.Message.DisplayHelpers
+  alias LangChain.LangChainError
   alias LangChain.Message
   alias LangChain.Message.{ToolCall, ToolResult}
   alias LangChain.ChatModels.ChatOpenAI
@@ -518,6 +520,135 @@ defmodule Sagents.Persistence.StateSerializerTest do
       assert restored_call.name == "calculator"
       # metadata can be nil or empty map
       assert restored_call.metadata == nil or restored_call.metadata == %{}
+    end
+  end
+
+  describe "message metadata projection" do
+    # `Message.metadata` holds arbitrary terms, so only the two keys the
+    # framework reads from restored history cross the boundary. Everything here
+    # is about a message read back from persisted agent state answering the same
+    # way it did in the turn that produced it.
+
+    defp round_trip_message(%Message{} = message) do
+      {:ok, model} = ChatOpenAI.new(%{model: "gpt-4", api_key: "test-key"})
+      {:ok, agent} = Agent.new(%{agent_id: "agent-meta", model: model})
+
+      serialized =
+        StateSerializer.serialize_server_state(agent, State.new!(%{messages: [message]}))
+
+      {:ok, restored} = StateSerializer.deserialize_server_state("agent-meta", serialized)
+
+      {List.last(restored.messages), serialized}
+    end
+
+    test "a dead stream still classifies as :stream_error after a restore" do
+      error = LangChainError.exception(type: "overloaded", message: "busy")
+
+      {restored, _serialized} =
+        round_trip_message(%Message{
+          role: :assistant,
+          content: "Partial answ",
+          status: :stream_error,
+          metadata: %{streaming_error: error}
+        })
+
+      assert DisplayHelpers.stop_reason(restored) == :stream_error
+
+      assert %LangChainError{type: "overloaded", message: "busy"} =
+               restored.metadata.streaming_error
+    end
+
+    test "the :cancelled shape classifies as :stream_error after a restore" do
+      # LangChain releases below 0.10.0 record a dead stream as :cancelled
+      # carrying the error, so metadata is the only discriminator. Without the
+      # projection a restored message of this shape reports a caller-initiated
+      # stop, which is a different thing.
+      error = LangChainError.exception(type: "overloaded", message: "busy")
+
+      {restored, _serialized} =
+        round_trip_message(%Message{
+          role: :assistant,
+          content: "Partial answ",
+          status: :cancelled,
+          metadata: %{streaming_error: error}
+        })
+
+      assert DisplayHelpers.stop_reason(restored) == :stream_error
+    end
+
+    test "the error's :original does not cross the boundary" do
+      error =
+        LangChainError.exception(
+          type: "overloaded",
+          message: "busy",
+          original: %{secret: self()}
+        )
+
+      {restored, serialized} =
+        round_trip_message(%Message{
+          role: :assistant,
+          content: "Partial answ",
+          status: :stream_error,
+          metadata: %{streaming_error: error}
+        })
+
+      assert restored.metadata.streaming_error.original == nil
+
+      [message_data] = serialized["state"]["messages"]
+
+      assert message_data["metadata"]["streaming_error"] == %{
+               "type" => "overloaded",
+               "message" => "busy"
+             }
+    end
+
+    test "stop_details survives verbatim" do
+      details = %{"type" => "refusal", "category" => "cyber", "explanation" => "no"}
+
+      {restored, _serialized} =
+        round_trip_message(%Message{
+          role: :assistant,
+          content: "",
+          status: :content_filtered,
+          metadata: %{stop_details: details}
+        })
+
+      assert DisplayHelpers.stop_details(restored) == details
+      assert DisplayHelpers.stop_reason(restored) == :content_filtered
+    end
+
+    test "metadata outside the projection is dropped and writes no key" do
+      # Token usage and anything else a caller stashed lives for the turn that
+      # set it. A message whose metadata projects to nothing serializes exactly
+      # as it did before the projection existed.
+      {restored, serialized} =
+        round_trip_message(%Message{
+          role: :assistant,
+          content: "All done",
+          metadata: %{usage: %{"input" => 10}, whatever: make_ref()}
+        })
+
+      assert restored.metadata == nil
+
+      [message_data] = serialized["state"]["messages"]
+      refute Map.has_key?(message_data, "metadata")
+    end
+
+    test "history written without the key restores unchanged" do
+      {:ok, model} = ChatOpenAI.new(%{model: "gpt-4", api_key: "test-key"})
+      {:ok, agent} = Agent.new(%{agent_id: "agent-meta", model: model})
+
+      serialized =
+        StateSerializer.serialize_server_state(
+          agent,
+          State.new!(%{messages: [Message.new_assistant!("Hi")]})
+        )
+
+      # Stand in for a payload written before the projection existed.
+      refute Map.has_key?(List.first(serialized["state"]["messages"]), "metadata")
+
+      {:ok, restored} = StateSerializer.deserialize_server_state("agent-meta", serialized)
+      assert %Message{content: [_part], metadata: nil} = List.last(restored.messages)
     end
   end
 
