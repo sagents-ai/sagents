@@ -26,6 +26,17 @@ defmodule Sagents.Persistence.StateSerializer do
   - ❌ Agent configuration: middleware, tools, model
   - ❌ Runtime identifiers: agent_id
 
+  ## Message Metadata
+
+  `LangChain.Message.metadata` is a free-form map that can hold any term,
+  including token usage structs and error causes wrapping HTTP responses. Rather
+  than round-tripping it, the serializer projects the two keys the framework
+  reads from restored history — `:streaming_error` and `:stop_details`, both used
+  by `Sagents.Message.DisplayHelpers` — and drops the rest.
+
+  A restored `:streaming_error` carries the failure's `type` and `message` only.
+  Anything else a caller puts in `metadata` lives for the turn that set it.
+
   Agent capabilities (middleware, tools, model) are code-defined by your
   application. When restoring a conversation, create the agent from your
   application code and restore only the conversation state.
@@ -47,6 +58,7 @@ defmodule Sagents.Persistence.StateSerializer do
   """
 
   alias Sagents.{State, Agent, Todo}
+  alias LangChain.LangChainError
   alias LangChain.Message
   alias LangChain.Message.{ContentPart, ToolCall, ToolResult}
 
@@ -213,8 +225,53 @@ defmodule Sagents.Persistence.StateSerializer do
         base
       end
 
-    base
+    maybe_add_metadata(base, message.metadata)
   end
+
+  # `Message.metadata` holds arbitrary terms — token usage structs, provider
+  # bookkeeping, whatever a caller put there — so it is not round-tripped
+  # wholesale. Two keys are projected into a JSON-safe shape, because the
+  # framework answers questions about them from restored history:
+  # `Sagents.Message.DisplayHelpers.streaming_error/1` and `stop_details/1`.
+  #
+  # The projection is narrower than the in-process value. A
+  # `LangChain.LangChainError` carries `:original`, which can be any term at all
+  # — an exception, an HTTP response, a socket error — so only `type` and
+  # `message` cross the boundary and a restored error has no `:original`.
+  #
+  # Additive and unversioned: history written before this carries no "metadata"
+  # key and restores as it always did, and a reader that does not know the key
+  # ignores it.
+  defp maybe_add_metadata(base, metadata) when is_map(metadata) do
+    case serialize_metadata(metadata) do
+      projected when map_size(projected) == 0 -> base
+      projected -> Map.put(base, "metadata", projected)
+    end
+  end
+
+  defp maybe_add_metadata(base, _metadata), do: base
+
+  defp serialize_metadata(metadata) do
+    %{}
+    |> put_serialized_streaming_error(Map.get(metadata, :streaming_error))
+    |> put_serialized_stop_details(Map.get(metadata, :stop_details))
+  end
+
+  defp put_serialized_streaming_error(projected, %LangChainError{} = error) do
+    Map.put(projected, "streaming_error", %{
+      "type" => error.type,
+      "message" => error.message
+    })
+  end
+
+  defp put_serialized_streaming_error(projected, _error), do: projected
+
+  # Already a string-keyed map decoded from the provider's JSON, so it is stored
+  # as it stands.
+  defp put_serialized_stop_details(projected, details) when is_map(details),
+    do: Map.put(projected, "stop_details", details)
+
+  defp put_serialized_stop_details(projected, _details), do: projected
 
   defp deserialize_message(data) when is_map(data) do
     # Convert string keys to atom keys for Message.new
@@ -244,12 +301,43 @@ defmodule Sagents.Persistence.StateSerializer do
         attrs
       end
 
+    attrs = maybe_add_deserialized_metadata(attrs, data["metadata"])
+
     # Use Message.new! to create the message
     case Message.new(attrs) do
       {:ok, message} -> message
       {:error, _changeset} -> raise "Failed to deserialize message: #{inspect(data)}"
     end
   end
+
+  # Restores the projection written by serialize_metadata/1 under the atom keys
+  # the framework matches on. Keys it did not write stay absent rather than nil,
+  # because presence is what callers test.
+  defp maybe_add_deserialized_metadata(attrs, metadata) when is_map(metadata) do
+    projected =
+      %{}
+      |> put_deserialized_streaming_error(metadata["streaming_error"])
+      |> put_deserialized_stop_details(metadata["stop_details"])
+
+    if map_size(projected) == 0, do: attrs, else: Map.put(attrs, :metadata, projected)
+  end
+
+  defp maybe_add_deserialized_metadata(attrs, _metadata), do: attrs
+
+  defp put_deserialized_streaming_error(projected, error) when is_map(error) do
+    Map.put(
+      projected,
+      :streaming_error,
+      LangChainError.exception(type: error["type"], message: error["message"])
+    )
+  end
+
+  defp put_deserialized_streaming_error(projected, _error), do: projected
+
+  defp put_deserialized_stop_details(projected, details) when is_map(details),
+    do: Map.put(projected, :stop_details, details)
+
+  defp put_deserialized_stop_details(projected, _details), do: projected
 
   defp serialize_content(content) when is_binary(content), do: content
 

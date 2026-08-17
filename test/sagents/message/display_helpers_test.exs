@@ -222,18 +222,18 @@ defmodule Sagents.Message.DisplayHelpersTest do
       assert :content_filtered == DisplayHelpers.stop_reason(message)
     end
 
-    test "a metadata-discriminated stream error is not durable across a state round trip" do
-      # StateSerializer carries role, content, status, tool_calls and tool_results.
-      # metadata does not survive the round trip, so where metadata is the only
-      # discriminator a restored message reports :cancelled. Where the status
-      # itself says :stream_error, the classification survives.
-      restored = Message.new_assistant!(%{content: "Partial", status: :cancelled, metadata: %{}})
+    test "a :cancelled message carrying no error is a caller-initiated stop" do
+      # `:cancelled` and a dead stream are told apart by the presence of the
+      # error in metadata, for the LangChain releases that record both as
+      # `:cancelled`. Absence has to mean the caller stopped the run, or every
+      # cancellation would report as a connection failure.
+      #
+      # Durability of that discrimination across an agent-state round trip is
+      # covered in `Sagents.Persistence.StateSerializerTest`, which is where the
+      # projection that carries it lives.
+      message = Message.new_assistant!(%{content: "Partial", status: :cancelled, metadata: %{}})
 
-      assert :cancelled == DisplayHelpers.stop_reason(restored)
-
-      restored_with_status = %Message{role: :assistant, content: "Partial", status: :stream_error}
-
-      assert :stream_error == DisplayHelpers.stop_reason(restored_with_status)
+      assert :cancelled == DisplayHelpers.stop_reason(message)
     end
   end
 

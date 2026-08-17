@@ -55,14 +55,16 @@ defmodule Sagents.Message.DisplayHelpers do
 
   ## Durability
 
-  The classification survives a state round trip, because
-  `Sagents.Persistence.StateSerializer` carries `Message.status`. The error
-  *detail* does not: `Message.metadata` is not serialized, so `streaming_error/1`
-  returns `nil` for a message read back from persisted agent state even though
-  `stop_reason/1` still answers `:stream_error`.
+  The classification survives a state round trip. `Message.status` is
+  serialized, and `Sagents.Persistence.StateSerializer` projects the two metadata
+  keys this module reads, so a message restored from persisted agent state
+  classifies the way it did in the turn that produced it — including where
+  metadata is the only discriminator, which is how LangChain releases below
+  v0.10.0 record a dead stream.
 
-  Where metadata is the only discriminator, the classification is not durable
-  either, and a restored message reports `:cancelled`.
+  The projection is narrower than the live value. `streaming_error/1` returns an
+  error carrying the failure's `type` and `message` but not the `:original` term
+  behind it, which can be any term and does not belong in a persisted state.
 
   ## Examples
 
@@ -92,7 +94,7 @@ defmodule Sagents.Message.DisplayHelpers do
 
   Keyed on the metadata alone rather than on the status, so it answers the same
   way for either shape the supported LangChain range records a dead stream in.
-  Only populated during the turn that produced the message; see the durability
+  Survives a state round trip carrying `type` and `message`; see the durability
   note on `stop_reason/1`.
   """
   @spec streaming_error(Message.t()) :: LangChainError.t() | nil
@@ -108,9 +110,8 @@ defmodule Sagents.Message.DisplayHelpers do
   carry a reason with no detail.
 
   Unlike `streaming_error/1` this is plain JSON rather than a struct, so
-  `extract_display_items/1` carries it into the item's `content` and it survives
-  persistence. It is not durable across an agent-state restore, for the reason
-  given under `stop_reason/1`.
+  `extract_display_items/1` carries it into the item's `content` verbatim and
+  agent state stores it as it stands, with no projection.
   """
   @spec stop_details(Message.t()) :: map() | nil
   def stop_details(%Message{metadata: %{stop_details: details}}) when is_map(details), do: details
