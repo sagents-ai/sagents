@@ -624,6 +624,101 @@ defmodule Sagents.AgentTest do
     end
   end
 
+  describe "execute/2 when the stream died" do
+    # A chain whose stream dies still returns {:ok, chain}: the partial message
+    # is on the chain and no error is raised. Agent turns that into
+    # {:error, error} so the caller is not handed a silently truncated turn as a
+    # success. Both shapes the supported LangChain range records a dead stream
+    # in have to be recognized.
+
+    test "returns the error for a message carrying :stream_error" do
+      error = LangChainError.exception(type: "overloaded", message: "busy")
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok,
+         [
+           %Message{
+             role: :assistant,
+             content: "Partial answ",
+             status: :stream_error,
+             metadata: %{streaming_error: error}
+           }
+         ]}
+      end)
+
+      {:ok, agent} = Agent.new(%{model: mock_model(), replace_default_middleware: true})
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:error, %LangChainError{type: "overloaded"}} =
+               Agent.execute(agent, initial_state)
+    end
+
+    test "returns the error for a message carrying :cancelled plus the error" do
+      error = LangChainError.exception(type: "overloaded", message: "busy")
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok,
+         [
+           %Message{
+             role: :assistant,
+             content: "Partial answ",
+             status: :cancelled,
+             metadata: %{streaming_error: error}
+           }
+         ]}
+      end)
+
+      {:ok, agent} = Agent.new(%{model: mock_model(), replace_default_middleware: true})
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:error, %LangChainError{type: "overloaded"}} =
+               Agent.execute(agent, initial_state)
+    end
+
+    test "returns the error when the run carried a result alongside the chain" do
+      # Modes like until_tool return {:ok, chain, extra} rather than
+      # {:ok, chain}. The dead-stream check has to apply to every successful
+      # shape, not only the two-element one.
+      {:ok, agent} =
+        Agent.new(
+          %{model: mock_model(), mode: __MODULE__.DeadStreamThreeTupleMode},
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:error, %LangChainError{type: "overloaded"}} =
+               Agent.execute(agent, initial_state)
+    end
+
+    test "a healthy run carrying a result keeps its extra payload" do
+      {:ok, agent} =
+        Agent.new(
+          %{model: mock_model(), mode: __MODULE__.HealthyThreeTupleMode},
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:ok, %State{}, %ToolResult{name: "search"}} =
+               Agent.execute(agent, initial_state)
+    end
+
+    test "a message that stopped for length is not an error" do
+      # :length ends the turn early but nothing failed, so the caller gets the
+      # partial message as a normal result. Only the display mark reports it.
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [%Message{role: :assistant, content: "Partial answ", status: :length}]}
+      end)
+
+      {:ok, agent} = Agent.new(%{model: mock_model(), replace_default_middleware: true})
+      initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
+
+      assert {:ok, %State{} = result_state} = Agent.execute(agent, initial_state)
+      assert %Message{status: :length} = List.last(result_state.messages)
+    end
+  end
+
   describe "execute/2 with callbacks as list" do
     setup do
       stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
@@ -1855,6 +1950,49 @@ defmodule Sagents.AgentTest do
 
       # Delegate to the real mode so execution completes
       Sagents.Modes.AgentExecution.run(chain, opts)
+    end
+  end
+
+  # Returns the {:ok, chain, extra} shape that until_tool and friends produce,
+  # with a chain whose last message is a stream that died. Driving this through
+  # a mode is the only way to reach that arm without a full tool round trip.
+  defmodule DeadStreamThreeTupleMode do
+    @behaviour LangChain.Chains.LLMChain.Mode
+
+    @impl true
+    def run(chain, _opts) do
+      error = LangChain.LangChainError.exception(type: "overloaded", message: "busy")
+
+      message = %LangChain.Message{
+        role: :assistant,
+        content: "Partial answ",
+        status: :stream_error,
+        metadata: %{streaming_error: error}
+      }
+
+      {:ok, LangChain.Chains.LLMChain.add_message(chain, message), tool_result()}
+    end
+
+    # Matches the documented shape: the third element of a 3-tuple completion is
+    # the ToolResult that satisfied until_tool.
+    def tool_result do
+      LangChain.Message.ToolResult.new!(%{
+        tool_call_id: "call_abc",
+        name: "search",
+        content: "Found"
+      })
+    end
+  end
+
+  defmodule HealthyThreeTupleMode do
+    @behaviour LangChain.Chains.LLMChain.Mode
+
+    @impl true
+    def run(chain, _opts) do
+      message = LangChain.Message.new_assistant!("All done")
+
+      {:ok, LangChain.Chains.LLMChain.add_message(chain, message),
+       DeadStreamThreeTupleMode.tool_result()}
     end
   end
 end

@@ -21,11 +21,17 @@ defmodule <%= module %> do
     if Enum.empty?(display_items) do
       {:ok, []}
     else
-      Enum.reduce_while(display_items, {:ok, []}, fn item, {:ok, acc} ->
+      display_items
+      |> Enum.with_index()
+      |> Enum.reduce_while({:ok, []}, fn {item, index}, {:ok, acc} ->
+        # `sequence` is message-local. A message that yields several items
+        # (thinking, then text, then tool calls) needs it to order them, since
+        # they are all inserted within the same microsecond and share a timestamp.
         attrs = %{
           "message_type" => Atom.to_string(item.message_type),
           "content_type" => Atom.to_string(item.type),
-          "content" => item.content
+          "content" => item.content,
+          "sequence" => index
         }
 
         # Pull the tool-call id out of `content` into the top-level
