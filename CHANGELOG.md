@@ -1,5 +1,126 @@
 # Changelog
 
+## v0.12.1
+
+A message the model did not finish now leaves a trace in the display transcript.
+
+Hitting the output token cap, a provider content filter, and a stream that dies
+mid-flight all end a turn early without raising. The chain proceeds, nothing is
+broadcast as an error, and the conversation stays usable. Nothing marked the
+message, so a response truncated inside a collapsed thinking block was
+indistinguishable from a hung agent: no error, no status change, and text simply
+stopped arriving.
+
+The information was never missing, it was dropped.
+`DisplayHelpers.extract_display_items/1` narrowed a `LangChain.Message` to
+three-key maps, and neither `status` nor `metadata` crossed that boundary. It now
+stamps `content["stop_reason"]` onto the **last** item a message produces, as one
+of `"length"`, `"cancelled"`, `"content_filtered"` or `"stream_error"`. A
+finished message carries no such key, so render on presence.
+
+No breaking changes and no migration. Hosts get the persisted mark with no code
+change, because the generated `save_message/3` copies `item.content` verbatim
+into the JSONB column and the schema's `validate_content/2` is pattern matched,
+so the extra keys pass. Rendering it is opt-in, and the data is captured either
+way — a host that upgrades today and adds rendering next month loses nothing in
+between.
+
+### Upgrading from v0.12.0 - v0.12.1
+
+Nothing is required. Two things are worth doing.
+
+**Render the mark.** Read `content["stop_reason"]` and show a note when it is
+present. Place it as a **sibling** of the message body rather than inside it: the
+reported case is a thinking block, whose body sits in a collapsed container until
+expanded, so a note nested there is invisible to exactly the reader wondering why
+nothing is moving.
+
+**Apply the `sequence` fix**, a one-line update to generated code you own.
+`mix deps.update` cannot reach it. Without it, the rows of a multi-item message
+are all inserted at the schema default `0` and ordered by microsecond
+`inserted_at` ties. In your `save_message/3`:
+
+```elixir
+display_items
+|> Enum.with_index()
+|> Enum.reduce_while({:ok, []}, fn {item, index}, {:ok, acc} ->
+  attrs = %{
+    "message_type" => Atom.to_string(item.message_type),
+    "content_type" => Atom.to_string(item.type),
+    "content" => item.content,
+    "sequence" => index
+  }
+```
+
+Prefer the hand edit to regenerating: host copies of
+`display_message_persistence.ex` are routinely hand-edited and drift from the
+template, so regenerating risks overwriting local changes for the sake of one
+line. There is no migration and no backfill, and existing rows stay at `0` and
+keep sorting exactly as they do today.
+
+To classify `:content_filtered` and `:stream_error`, and to receive
+`content["stop_details"]`, you also need LangChain v0.10.0. The floor stays at
+`>= 0.8.11` and older releases keep working — `stop_reason/1` handles both shapes
+the supported range records a dead stream in, so hosts see no difference.
+
+### Added
+
+- `Sagents.Message.DisplayHelpers.stop_reason/1`, classifying why a message
+  stopped as `nil | :length | :cancelled | :content_filtered | :stream_error`,
+  normalized across the supported LangChain range.
+  [#172](https://github.com/sagents-ai/sagents/pull/172)
+- `DisplayHelpers.streaming_error/1`, returning the `LangChainError` that killed
+  a stream. `Sagents.Agent` delegates to it, so the `metadata[:streaming_error]`
+  convention is known in one place.
+  [#172](https://github.com/sagents-ai/sagents/pull/172)
+- `DisplayHelpers.stop_details/1`, returning the provider's own description of
+  the cause. Anthropic sends this on a refusal as
+  `%{"type" => "refusal", "category" => ..., "explanation" => ...}`. Being plain
+  JSON rather than a struct, it is carried into `content["stop_details"]` and
+  survives persistence. Absent when the provider named no cause.
+  [#172](https://github.com/sagents-ai/sagents/pull/172)
+- `content["stop_reason"]` and `content["stop_details"]` on the last item
+  `extract_display_items/1` produces. The last-item rule is the framework's
+  decision, documented so hosts render it identically.
+  [#172](https://github.com/sagents-ai/sagents/pull/172)
+- The generated `display_message.ex` moduledoc gains "Content Keys Written By The
+  Framework" and "Metadata Keys" inventories, so a host reading the schema can
+  learn which keys exist. [#172](https://github.com/sagents-ai/sagents/pull/172)
+
+### Changed
+
+- **`Agent.execute/3` now returns `{:error, error}` rather than
+  `{:ok, state, tool_result}` when a run producing the three-element result
+  (`until_tool` and friends) had its stream die.** Only the two-element clause
+  checked for a dead stream, so those callers were handed a silently truncated
+  turn as a success. This surfaces a failure that was already happening.
+  [#172](https://github.com/sagents-ai/sagents/pull/172)
+- `Sagents.DisplayMessagePersistence.save_message/3`'s docs now state that
+  `content` must be stored verbatim, since the framework writes keys of its own
+  that an implementation rebuilding the map key by key would drop.
+  [#172](https://github.com/sagents-ai/sagents/pull/172)
+- The `langchain` lock moved to 0.10.0 so CI exercises the new statuses against
+  a real release. The dependency floor is unchanged.
+  [#172](https://github.com/sagents-ai/sagents/pull/172)
+
+### Fixed
+
+- **A message the model did not finish left no trace in the display transcript.**
+  The reported case was a response cut off inside a collapsed thinking block,
+  which from the author's seat was indistinguishable from a hung agent.
+  [#172](https://github.com/sagents-ai/sagents/pull/172)
+- **The generated persistence module never assigned `sequence`.** Every row of a
+  multi-item message was inserted with the schema default `0` while
+  `load_display_messages/3` ordered by `[asc: :inserted_at, asc: :sequence]`, so
+  the order of thinking against text within one message came down to microsecond
+  timestamp ties. The library documented a contract its own template broke.
+  [#172](https://github.com/sagents-ai/sagents/pull/172)
+- **Dead-stream detection survives the LangChain upgrade.**
+  `check_for_streaming_error/1` keyed on `status: :cancelled`, which LangChain
+  v0.10.0 no longer uses for a dead stream. It now reads the metadata, so
+  upgrading LangChain does not silently stop the detection.
+  [#172](https://github.com/sagents-ai/sagents/pull/172)
+
 ## v0.12.0
 
 A node stops being able to serve agent requests the moment `Sagents.Supervisor`
