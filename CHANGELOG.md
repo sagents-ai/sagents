@@ -1,5 +1,78 @@
 # Changelog
 
+## v0.13.0
+
+A stream that dies mid-flight now keeps the text the model already produced, and
+the two transcript rows the framework writes itself — cancellation and error —
+are classified rather than fabricated as assistant prose.
+
+**Breaking for hosts that implement `save_synthetic_message/3`.** Those two rows
+now take that callback instead of `save_message/3`, which changes their shape and
+the event they broadcast. See
+[#173](https://github.com/sagents-ai/sagents/pull/173) for the reasoning.
+
+### Upgrading from v0.12.1 - v0.13.0
+
+**If your persistence module does not implement `save_synthetic_message/3`**,
+you keep the prose rows. Only the cancellation wording changed, to
+"Agent execution cancelled." — the previous text claimed the partial response was
+discarded, which overstated it.
+
+**If it does**, three things change and need attention:
+
+- Cancellation arrives as `content_type: "notification"` carrying
+  `content["stop_reason"] = "cancelled"`; a failed turn as `content_type:
+  "error"` carrying `content["error_type"]`. Both use `message_type: "system"`.
+  Add renderers for them, or read `content["text"]`, which still carries readable
+  English.
+- These rows broadcast `{:display_message_saved, _}` **only**, not
+  `{:llm_message, _}`. If you render cancellations live from the latter, switch.
+- If you already render `content["stop_reason"]`, the cancellation row reuses the
+  same key and value as a model message the caller stopped, so one branch covers
+  both.
+
+No migration. `"notification"` and `"error"` are already in the generated
+`@content_types` and validate on `%{"text" => _}`, so the extra keys pass.
+
+The dead-stream fix needs no host action at all.
+
+### Added
+
+- `content["error_type"]` on error rows, carrying the `LangChainError` type
+  behind the failure (`"overloaded"`, `"exceeded_max_runs"`). Absent when the
+  failure named none. [#173](https://github.com/sagents-ai/sagents/pull/173)
+- `Sagents.Persistence.StateSerializer` carries a narrow projection of
+  `LangChain.Message.metadata`, so `DisplayHelpers.streaming_error/1` and
+  `stop_details/1` answer for restored history. The error's `:original` is not
+  projected. Additive and unversioned — nothing to migrate.
+  [#173](https://github.com/sagents-ai/sagents/pull/173)
+
+### Changed
+
+- **Cancellation and error rows are persisted via `save_synthetic_message/3`
+  when the host implements it**, classified rather than written as assistant
+  prose a host can neither style nor translate. A host without the callback keeps
+  the previous behaviour. [#173](https://github.com/sagents-ai/sagents/pull/173)
+- Those rows use `message_type: "system"`. They previously claimed
+  `"assistant"`, asserting the model said something it did not.
+  [#173](https://github.com/sagents-ai/sagents/pull/173)
+
+### Fixed
+
+- **A stream that died discarded the text the model had already produced.** The
+  partial reaches the transcript marked
+  `content["stop_reason"] = "stream_error"`, and `AgentServer`'s rolling state
+  matches the chain. No host change needed.
+  [#173](https://github.com/sagents-ai/sagents/pull/173)
+- **A dead stream no longer also writes "Sorry, I encountered an error".** That
+  row is written only when there was no partial to show.
+  [#173](https://github.com/sagents-ai/sagents/pull/173)
+- **A restored message classified as `:cancelled` when the stream had actually
+  died.** LangChain below v0.10.0 records a dead stream as `:cancelled` plus
+  `metadata[:streaming_error]`, where metadata was the only discriminator and did
+  not survive persistence, so restored history reported a caller-initiated stop.
+  [#173](https://github.com/sagents-ai/sagents/pull/173)
+
 ## v0.12.1
 
 A message the model did not finish now leaves a trace in the display transcript.
