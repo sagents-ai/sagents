@@ -20,6 +20,13 @@ defmodule Sagents.Todo do
   - `:completed` - Task finished successfully
   - `:cancelled` - Task no longer needed
 
+  The statuses split into two groups. `:pending` and `:in_progress` are *open* —
+  the item still needs work. `:completed` and `:cancelled` are *resolved* — the
+  item has been dealt with, whether by doing it or by establishing that it no
+  longer applies. Use `resolved?/1` and `open?/1` rather than comparing against
+  individual statuses, so a list that ends in a mix of completed and cancelled
+  items is recognized as finished.
+
   ## Usage
 
       # Create a single TODO (id is required)
@@ -37,13 +44,16 @@ defmodule Sagents.Todo do
   import Ecto.Changeset
   alias __MODULE__
 
+  @statuses [:pending, :in_progress, :completed, :cancelled]
+  @resolved_statuses [:completed, :cancelled]
+
   @primary_key false
   embedded_schema do
     field :id, :integer
     field :content, :string
 
     field :status, Ecto.Enum,
-      values: [:pending, :in_progress, :completed, :cancelled],
+      values: @statuses,
       default: :pending
   end
 
@@ -104,6 +114,34 @@ defmodule Sagents.Todo do
       "status" => Atom.to_string(todo.status)
     }
   end
+
+  @doc """
+  Whether the TODO has been dealt with.
+
+  A TODO is resolved when it is `:completed` or `:cancelled`. Cancelling is a
+  legitimate outcome: a step can turn out not to apply once earlier steps
+  report their findings.
+
+  ## Examples
+
+      Todo.resolved?(Todo.new!(%{id: 1, content: "Task", status: :cancelled}))
+      # => true
+  """
+  @spec resolved?(t()) :: boolean()
+  def resolved?(%Todo{status: status}), do: status in @resolved_statuses
+
+  @doc """
+  Whether the TODO still needs work.
+
+  The complement of `resolved?/1` — true for `:pending` and `:in_progress`.
+
+  ## Examples
+
+      Todo.open?(Todo.new!(%{id: 1, content: "Task", status: :in_progress}))
+      # => true
+  """
+  @spec open?(t()) :: boolean()
+  def open?(%Todo{} = todo), do: not resolved?(todo)
 
   @doc """
   Create a single TODO from a map (for deserialization).
@@ -214,7 +252,7 @@ defmodule Sagents.Todo do
     |> validate_required([:id, :content, :status])
     |> validate_number(:id, greater_than: 0)
     |> validate_length(:content, min: 1, max: 1000)
-    |> validate_inclusion(:status, [:pending, :in_progress, :completed, :cancelled])
+    |> validate_inclusion(:status, @statuses)
     |> apply_action(:insert)
   end
 
