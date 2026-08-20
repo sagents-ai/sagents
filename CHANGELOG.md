@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.13.1
+
+A TODO list that ends with a cancelled item now clears like any other finished
+list.
+
+`Sagents.Todo` gains the vocabulary for that distinction: `:pending` and
+`:in_progress` are *open*, `:completed` and `:cancelled` are *resolved*.
+
+No breaking changes and no migration.
+
+### Added
+
+- `Sagents.Todo.resolved?/1` and `Sagents.Todo.open?/1`, naming the split
+  between statuses that still need work and statuses that have been dealt with.
+  [#176](https://github.com/sagents-ai/sagents/pull/176)
+
+### Changed
+
+- `write_todos` reports "TODO list cleared - all tasks resolved" when it
+  collapses a finished list. The previous wording claimed every task was
+  completed, which is untrue of a list that ended in cancellations.
+  [#176](https://github.com/sagents-ai/sagents/pull/176)
+
+### Fixed
+
+- **A cancelled TODO kept the list from ever clearing.** The auto-clear
+  recognized only `:completed`, so a single cancelled item pinned the list in
+  `state.todos` for the rest of the conversation, re-serialized and re-broadcast
+  on every turn. Cancelling is ordinary work: a step can stop applying once an
+  earlier step reports its findings, and the middleware's own system prompt
+  already tells the model to mark such steps cancelled.
+  [#176](https://github.com/sagents-ai/sagents/pull/176)
+
 ## v0.13.0
 
 A stream that dies mid-flight now keeps the text the model already produced, and
