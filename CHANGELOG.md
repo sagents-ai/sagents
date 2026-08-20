@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.13.2
+
+`Sagents.Todo.resolved?/1` and `open?/1` now take a bare status, so code holding
+serialized todo data can ask about a `"status"` value without rebuilding a
+struct for the comparison.
+
+No breaking changes and no migration.
+
+### Added
+
+- `Sagents.Todo.status/0` type, naming the four statuses the schema already
+  defines so the widened specs can refer to them.
+  [#178](https://github.com/sagents-ai/sagents/pull/178)
+
+### Changed
+
+- `Sagents.Todo.resolved?/1` and `Sagents.Todo.open?/1` accept a status atom or
+  string in addition to a `%Todo{}` struct. Consumers restoring todos from
+  persisted maps can call `Todo.resolved?(map["status"])` rather than running the
+  map back through `from_map/1` just to make the comparison, which also works on
+  maps whose id is missing or in the legacy base64 form. A status outside the
+  four known values reads as open, matching how `from_map/1` treats an
+  unrecognized status.
+  [#178](https://github.com/sagents-ai/sagents/pull/178)
+
 ## v0.13.1
 
 A TODO list that ends with a cancelled item now clears like any other finished
