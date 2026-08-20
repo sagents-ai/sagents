@@ -27,6 +27,10 @@ defmodule Sagents.Todo do
   individual statuses, so a list that ends in a mix of completed and cancelled
   items is recognized as finished.
 
+  Both predicates accept a bare status as well as a `Todo` struct, so code
+  holding serialized todo data can ask about a `"status"` value without
+  rebuilding a struct for the comparison.
+
   ## Usage
 
       # Create a single TODO (id is required)
@@ -46,6 +50,7 @@ defmodule Sagents.Todo do
 
   @statuses [:pending, :in_progress, :completed, :cancelled]
   @resolved_statuses [:completed, :cancelled]
+  @resolved_status_strings Enum.map(@resolved_statuses, &Atom.to_string/1)
 
   @primary_key false
   embedded_schema do
@@ -57,10 +62,12 @@ defmodule Sagents.Todo do
       default: :pending
   end
 
+  @type status :: :pending | :in_progress | :completed | :cancelled
+
   @type t :: %Todo{
           id: integer(),
           content: String.t(),
-          status: :pending | :in_progress | :completed | :cancelled
+          status: status()
         }
 
   @doc """
@@ -122,26 +129,54 @@ defmodule Sagents.Todo do
   legitimate outcome: a step can turn out not to apply once earlier steps
   report their findings.
 
+  Takes a `Todo` struct or a bare status, as an atom or a string. Code holding
+  serialized todo data can ask about a `"status"` value directly instead of
+  rebuilding a struct for the comparison. A status outside the four known
+  values reads as not resolved, matching how `from_map/1` treats an
+  unrecognized status.
+
   ## Examples
 
       Todo.resolved?(Todo.new!(%{id: 1, content: "Task", status: :cancelled}))
       # => true
+
+      Todo.resolved?(:completed)
+      # => true
+
+      Todo.resolved?("cancelled")
+      # => true
+
+      Todo.resolved?("in_progress")
+      # => false
   """
-  @spec resolved?(t()) :: boolean()
-  def resolved?(%Todo{status: status}), do: status in @resolved_statuses
+  @spec resolved?(t() | status() | String.t()) :: boolean()
+  def resolved?(%Todo{status: status}), do: resolved?(status)
+  def resolved?(status) when is_atom(status), do: status in @resolved_statuses
+  def resolved?(status) when is_binary(status), do: status in @resolved_status_strings
 
   @doc """
   Whether the TODO still needs work.
 
-  The complement of `resolved?/1` — true for `:pending` and `:in_progress`.
+  The complement of `resolved?/1`: true for `:pending` and `:in_progress`, and
+  for any status outside the four known values.
+
+  Takes the same arguments as `resolved?/1`: a `Todo` struct, a status atom, or
+  a status string.
 
   ## Examples
 
       Todo.open?(Todo.new!(%{id: 1, content: "Task", status: :in_progress}))
       # => true
+
+      Todo.open?(:pending)
+      # => true
+
+      Todo.open?("completed")
+      # => false
   """
-  @spec open?(t()) :: boolean()
-  def open?(%Todo{} = todo), do: not resolved?(todo)
+  @spec open?(t() | status() | String.t()) :: boolean()
+  def open?(%Todo{status: status}), do: not resolved?(status)
+  def open?(status) when is_atom(status) or is_binary(status), do: not resolved?(status)
 
   @doc """
   Create a single TODO from a map (for deserialization).

@@ -221,6 +221,89 @@ defmodule Sagents.TodoTest do
     end
   end
 
+  describe "resolved?/1 and open?/1" do
+    test "classifies a Todo struct by its status" do
+      for {status, resolved} <- [
+            pending: false,
+            in_progress: false,
+            completed: true,
+            cancelled: true
+          ] do
+        todo = Todo.new!(%{id: 1, content: "Task", status: status})
+
+        assert Todo.resolved?(todo) == resolved
+        assert Todo.open?(todo) == not resolved
+      end
+    end
+
+    test "classifies a bare status atom" do
+      assert Todo.resolved?(:completed)
+      assert Todo.resolved?(:cancelled)
+      refute Todo.resolved?(:pending)
+      refute Todo.resolved?(:in_progress)
+
+      assert Todo.open?(:pending)
+      assert Todo.open?(:in_progress)
+      refute Todo.open?(:completed)
+      refute Todo.open?(:cancelled)
+    end
+
+    test "classifies a bare status string" do
+      assert Todo.resolved?("completed")
+      assert Todo.resolved?("cancelled")
+      refute Todo.resolved?("pending")
+      refute Todo.resolved?("in_progress")
+
+      assert Todo.open?("pending")
+      assert Todo.open?("in_progress")
+      refute Todo.open?("completed")
+      refute Todo.open?("cancelled")
+    end
+
+    test "treats an unrecognized status as still needing work" do
+      for status <- ["done", "COMPLETED", "", :done, nil] do
+        refute Todo.resolved?(status)
+        assert Todo.open?(status)
+      end
+    end
+
+    test "raises for a value that is not a struct, atom, or string" do
+      # Called through apply/3 so the compiler's type checker doesn't flag the
+      # deliberately invalid arguments before the test gets to run them.
+      for value <- [42, %{"status" => "completed"}] do
+        assert_raise FunctionClauseError, fn -> apply(Todo, :resolved?, [value]) end
+        assert_raise FunctionClauseError, fn -> apply(Todo, :open?, [value]) end
+      end
+    end
+
+    test "a serialized status agrees with the struct it came from" do
+      for status <- [:pending, :in_progress, :completed, :cancelled] do
+        todo = Todo.new!(%{id: 1, content: "Task", status: status})
+        serialized = Todo.to_map(todo)["status"]
+
+        assert Todo.resolved?(serialized) == Todo.resolved?(todo)
+        assert Todo.open?(serialized) == Todo.open?(todo)
+      end
+    end
+
+    test "open? is the exact complement of resolved? across every accepted input" do
+      structs =
+        Enum.map([:pending, :in_progress, :completed, :cancelled], fn status ->
+          Todo.new!(%{id: 1, content: "Task", status: status})
+        end)
+
+      inputs =
+        structs ++
+          [:pending, :in_progress, :completed, :cancelled] ++
+          ["pending", "in_progress", "completed", "cancelled"] ++
+          ["done", :done, nil]
+
+      for input <- inputs do
+        assert Todo.open?(input) == not Todo.resolved?(input)
+      end
+    end
+  end
+
   defp errors_on(changeset) do
     Ecto.Changeset.traverse_errors(changeset, fn {message, _opts} -> message end)
   end
