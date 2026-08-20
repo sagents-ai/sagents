@@ -548,7 +548,7 @@ defmodule Sagents.Middleware.TodoListTest do
       {:ok, msg, updated_state} = tool.function.(params, %{state: state})
 
       assert updated_state.todos == []
-      assert msg == "TODO list cleared - all tasks completed"
+      assert msg == "TODO list cleared - all tasks resolved"
     end
 
     test "clears todo list when all todos marked as completed in merge mode" do
@@ -564,7 +564,7 @@ defmodule Sagents.Middleware.TodoListTest do
       {:ok, msg, updated_state} = tool.function.(params, %{state: state})
 
       assert updated_state.todos == []
-      assert msg == "TODO list cleared - all tasks completed"
+      assert msg == "TODO list cleared - all tasks resolved"
     end
 
     test "keeps todo list when not all todos are completed" do
@@ -615,7 +615,78 @@ defmodule Sagents.Middleware.TodoListTest do
       {:ok, msg, updated_state} = tool.function.(params, %{state: state})
 
       assert updated_state.todos == []
-      assert msg == "TODO list cleared - all tasks completed"
+      assert msg == "TODO list cleared - all tasks resolved"
+    end
+
+    test "clears todo list when every todo is cancelled" do
+      state = State.new!()
+      [tool] = TodoList.tools(nil)
+
+      params = %{
+        merge: false,
+        todos: [
+          %{"id" => 1, "content" => "Task 1", "status" => "cancelled"},
+          %{"id" => 2, "content" => "Task 2", "status" => "cancelled"}
+        ]
+      }
+
+      {:ok, msg, updated_state} = tool.function.(params, %{state: state})
+
+      assert updated_state.todos == []
+      assert msg == "TODO list cleared - all tasks resolved"
+    end
+
+    test "clears todo list when todos are a mix of completed and cancelled" do
+      state = State.new!()
+      [tool] = TodoList.tools(nil)
+
+      params = %{
+        merge: false,
+        todos: [
+          %{"id" => 1, "content" => "Task 1", "status" => "completed"},
+          %{"id" => 2, "content" => "Task 2", "status" => "cancelled"},
+          %{"id" => 3, "content" => "Task 3", "status" => "completed"}
+        ]
+      }
+
+      {:ok, msg, updated_state} = tool.function.(params, %{state: state})
+
+      assert updated_state.todos == []
+      assert msg == "TODO list cleared - all tasks resolved"
+    end
+
+    test "clears list when the final open todo is cancelled via merge" do
+      todo1 = Todo.new!(%{id: 1, content: "Task 1", status: :completed})
+      todo2 = Todo.new!(%{id: 2, content: "Task 2", status: :pending})
+      state = State.new!(%{todos: [todo1, todo2]})
+      [tool] = TodoList.tools(nil)
+
+      params = %{
+        merge: true,
+        todos: [%{"id" => 2, "content" => "No longer applies", "status" => "cancelled"}]
+      }
+
+      {:ok, msg, updated_state} = tool.function.(params, %{state: state})
+
+      assert updated_state.todos == []
+      assert msg == "TODO list cleared - all tasks resolved"
+    end
+
+    test "keeps todo list when a cancelled todo sits alongside a pending one" do
+      state = State.new!()
+      [tool] = TodoList.tools(nil)
+
+      params = %{
+        merge: false,
+        todos: [
+          %{"id" => 1, "content" => "Task 1", "status" => "cancelled"},
+          %{"id" => 2, "content" => "Task 2", "status" => "pending"}
+        ]
+      }
+
+      {:ok, _msg, updated_state} = tool.function.(params, %{state: state})
+
+      assert length(updated_state.todos) == 2
     end
   end
 end

@@ -261,13 +261,13 @@ defmodule Sagents.Middleware.TodoList do
     case parse_todos(todos_data) do
       {:ok, parsed_todos} ->
         # Compute the post-update state, then apply the auto-clear that
-        # collapses a fully-completed list. We hold both: the inline-mode
+        # collapses a fully-resolved list. We hold both: the inline-mode
         # snapshot uses the pre-clear state (so the chat preserves the
-        # final celebratory checked list), while the actual state delta
-        # and sidebar broadcast use the post-clear state (so the agent
-        # and sidebar see the list as resolved).
+        # final checked list), while the actual state delta and sidebar
+        # broadcast use the post-clear state (so the agent and sidebar
+        # see the list as resolved).
         state_after_update = update_todos(context.state, parsed_todos, merge)
-        updated_state = clear_if_all_completed(state_after_update)
+        updated_state = clear_if_all_resolved(state_after_update)
 
         # Broadcast todos immediately for real-time UI updates
         # This is the point where todos are actually committed to state
@@ -396,12 +396,14 @@ defmodule Sagents.Middleware.TodoList do
     %{state | todos: todos_list}
   end
 
-  defp clear_if_all_completed(%State{todos: []} = state), do: state
+  defp clear_if_all_resolved(%State{todos: []} = state), do: state
 
-  defp clear_if_all_completed(%State{todos: todos} = state) do
-    all_completed? = Enum.all?(todos, fn todo -> todo.status == :completed end)
-
-    if all_completed? do
+  defp clear_if_all_resolved(%State{todos: todos} = state) do
+    # Cancelling is a normal outcome, not an abandoned item: a step can turn
+    # out not to apply once an earlier step reports its findings. A list that
+    # ends in a mix of completed and cancelled items is finished, so it clears
+    # the same way an all-completed list does.
+    if Enum.all?(todos, &Todo.resolved?/1) do
       %{state | todos: []}
     else
       state
@@ -420,7 +422,7 @@ defmodule Sagents.Middleware.TodoList do
   defp format_response(todos, merge) do
     case todos do
       [] ->
-        "TODO list cleared - all tasks completed"
+        "TODO list cleared - all tasks resolved"
 
       _other ->
         mode = if merge, do: "merged", else: "replaced"
