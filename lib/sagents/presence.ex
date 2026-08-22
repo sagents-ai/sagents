@@ -4,8 +4,14 @@ defmodule Sagents.Presence do
 
   This module provides thin wrappers around Phoenix.Presence to make presence tracking
   more convenient in agent-based applications. These functions always track the calling
-  process (`self()`). Phoenix.Presence automatically cleans up presence entries when
-  the tracked process terminates, so no manual cleanup is needed.
+  process (`self()`).
+
+  Phoenix.Presence reaps an entry when the tracked process terminates, but that
+  is a backstop rather than the mechanism. A process that tracks viewers of a
+  conversation typically outlives the conversations it shows, and may be viewing
+  several at once, so it has to release each entry when it stops viewing that
+  conversation. `Sagents.ViewerPresence` does that bookkeeping; prefer it over
+  calling `track/4` and `untrack/3` directly.
 
   ## Examples
 
@@ -27,9 +33,11 @@ defmodule Sagents.Presence do
   @doc """
   Track presence for the calling process on the given topic and identifier.
 
-  Tracks `self()` — must be called from the process you want to track.
-  Phoenix.Presence automatically removes the entry when the tracked process terminates,
-  so manual cleanup is typically not needed.
+  Tracks `self()`, so it must be called from the process you want to track.
+
+  Phoenix.Presence removes the entry when that process terminates. A process
+  that outlives what it is tracking presence for must still release the entry
+  itself; see `Sagents.ViewerPresence`.
 
   ## Parameters
 
@@ -64,9 +72,13 @@ defmodule Sagents.Presence do
   @doc """
   Untrack presence for the calling process on the given topic and identifier.
 
-  Untracks `self()` — must be called from the same process that originally tracked.
-  Note: This is rarely needed since Phoenix.Presence automatically cleans up
-  when the tracked process terminates. Only use this for explicit early cleanup.
+  Untracks `self()`, so it must be called from the same process that originally
+  tracked.
+
+  Note that `Phoenix.Tracker` answers `:ok` to an untrack of a key it never
+  tracked, so a wrong key reports success here while leaving the real entry in
+  place. `Sagents.ViewerPresence` records the key that was tracked for exactly
+  this reason.
   """
   def untrack(presence_module, topic, id) do
     presence_module.untrack(self(), topic, id)

@@ -290,6 +290,7 @@ defmodule Mix.Tasks.Sagents.Setup do
       display_message_persistence_module: config.display_message_persistence_module,
       pubsub_module: config.pubsub_module,
       presence_module: config.presence_module,
+      subscriber_session_alias: short_alias(config.agent_subscriber_session_module),
       owner_type: config.owner_type,
       owner_field: config.owner_field
     ]

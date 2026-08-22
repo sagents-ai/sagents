@@ -398,24 +398,102 @@ The agent then:
 4. Subscribers receive `{:agent, {:agent_shutdown, %{reason: :no_viewers}}}`
    and the process terminates.
 
-The host application is responsible for tracking and untracking its own
-viewers — typically in `mount/3` and `terminate/2`:
+### The host's side: track and release on the switch
+
+`Sagents.Presence.track/4` tracks `self()`, and a subscriber process outlives
+the conversation it is showing. A LiveView that opens conversation A, then
+switches to B, is the same process throughout: the entry on A stays until that
+process dies. So the release belongs on the **conversation switch**, not on
+`mount/3` plus `terminate/2`.
+
+`Phoenix.Presence` does reap an entry when the tracked process dies, but that is
+a backstop, not the mechanism. It is also why the mistake is easy to miss:
+closing the tab cleans up perfectly, so a session that tracked five
+conversations and released none looks fine from the outside while five agents
+sit past the check that exists to release them.
+
+The generated helpers do this for you. Open a conversation through
+`AgentLiveHelpers.load_conversation/3`, or through `enter_conversation/3` when
+the caller already holds the conversation and no database read is wanted:
 
 ```elixir
-def mount(%{"id" => id}, _session, socket) do
-  if connected?(socket) do
-    {:ok, _ref} =
-      MyApp.Presence.track(
-        self(),
-        "conversation:#{id}",
-        socket.assigns.current_user.id,
-        %{joined_at: DateTime.utc_now()}
-      )
-  end
+# The load path: reads the conversation, subscribes, tracks the viewer, and
+# releases whatever entry this socket held before.
+{:ok, socket} =
+  AgentLiveHelpers.load_conversation(socket, conversation_id,
+    scope: socket.assigns.current_scope,
+    user_id: socket.assigns.current_scope.user.id
+  )
 
-  {:ok, socket}
-end
+# A conversation the caller just created or was handed.
+socket =
+  AgentLiveHelpers.enter_conversation(socket, conversation,
+    user_id: socket.assigns.current_scope.user.id
+  )
+
+# Leaving without entering another: a reset, a deleted thread, a closed panel.
+socket = AgentLiveHelpers.reset_conversation(socket)
 ```
+
+Every path that opens a conversation goes through one funnel that leaves the
+previous one first, which is what keeps an entry from being taken without the
+previous one being handed back.
+
+Two rules keep it that way:
+
+- Never assign `:conversation_id` directly. A path that assigns it and then
+  navigates can short-circuit the host's own same-id guard, so
+  `load_conversation/3` never runs for that conversation, and the hand-rolled
+  `track_conversation_viewer/3` call such paths end up making is the one nothing
+  releases.
+- Never call `Coordinator.track_conversation_viewer/3` or
+  `untrack_conversation_viewer/2` yourself. The session state records what
+  Presence holds so a leaving path can release it without a viewer id it may no
+  longer have, and calling the coordinator behind that record makes the two
+  drift apart.
+
+### Viewing several conversations from one process
+
+Presence bookkeeping is a **set**, not a slot. One process can hold an entry per
+conversation, which is what a split view, a dashboard with a row per running
+agent, or a panel of threads each backed by its own forked agent all need.
+
+The generated LiveView helpers above model a socket showing one conversation,
+named by `:conversation_id`, and opening another replaces it. A host that shows
+several at once is not restricted to that. It works the set directly, on its own
+state map, through `AgentSubscriberSession`:
+
+```elixir
+# Incremental.
+changes = AgentSubscriberSession.add_tracked_viewer(state, conversation_id, user_id)
+changes = AgentSubscriberSession.remove_tracked_viewer(state, conversation_id)
+changes = AgentSubscriberSession.clear_tracked_viewers(state)
+
+# Declarative: whatever this process was viewing, it is viewing exactly these now.
+changes = AgentSubscriberSession.sync_tracked_viewers(state, %{
+  main_id => user_id,
+  note_a_id => user_id,
+  note_b_id => user_id
+})
+```
+
+Prefer `sync_tracked_viewers/2` wherever the viewed set is derivable from state
+the host already keeps. The incremental pair can accumulate entries, because
+nothing in the library knows when one of the host's panels went away, and
+declaring the set removes the question. It is also idempotent: re-declaring the
+same set issues no calls at all, which matters because an untrack followed by a
+track of the same conversation is a leave broadcast, and an idle agent that acts
+on it schedules the very shutdown the entry exists to prevent.
+
+One caveat for a host going down this road today: main-channel events are
+delivered as a bare `{:agent, event}` and do not name the agent that sent them,
+so two agents streaming into one mailbox are not separable. Until that changes,
+route each conversation's events through its own subscriber process (pass it to
+`Sagents.Subscriber.subscribe_to_agent/4`) or its own LiveView. Viewer presence
+has no such limit: entries are per topic and one process can hold as many as it
+likes.
+
+Non-LiveView hosts use exactly these same functions on their own state map.
 
 For lifecycle details (inactivity timeout, manual stop, grace periods),
 see [lifecycle.md](lifecycle.md).
