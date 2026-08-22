@@ -190,6 +190,111 @@ defmodule Sagents.AgentServerPresenceTest do
       refute Process.alive?(agent_pid)
     end
 
+    test "a scheduled shutdown does not fire once a viewer has returned" do
+      # `check_delay` is a window the user can navigate out of a conversation
+      # and back into, and neither the scheduled shutdown nor its timer can be
+      # revoked. The viewer list is therefore re-read when the message lands
+      # rather than trusted from when it was scheduled.
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+      presence_topic = "conversation:test-viewer-returned"
+
+      TestPresence.set_viewers(presence_topic, %{})
+
+      {:ok, _pid} =
+        AgentSupervisor.start_link(
+          agent: agent,
+          initial_state: State.new!(),
+          name: AgentSupervisor.get_name(agent_id),
+          shutdown_delay: @shutdown_delay,
+          presence_tracking: [
+            enabled: true,
+            presence_module: TestPresence,
+            topic: presence_topic,
+            # Long enough that only the hand-delivered message below reaches
+            # the handler during this test.
+            check_delay: 5_000
+          ]
+        )
+
+      agent_pid = AgentServer.get_pid(agent_id)
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id)
+      assert AgentServer.get_status(agent_id) == :idle
+
+      # The viewer comes back while the shutdown is still in flight.
+      TestPresence.set_viewers(presence_topic, %{
+        "user-1" => %{metas: [%{joined_at: System.system_time(:second)}]}
+      })
+
+      send(agent_pid, :shutdown_no_viewers)
+
+      # Synchronize: the handler has run by the time this call is answered.
+      _state = AgentServer.get_state(agent_id)
+
+      # The event is what the assertion hangs on rather than the pid: shutdown
+      # broadcasts before it stops, and the stop itself runs from a spawned
+      # process whose timing a live pid says nothing about.
+      refute_receive {:agent, {:agent_shutdown, _payload}}, 200
+
+      AgentSupervisor.stop(agent_id)
+    end
+
+    test "a scheduled shutdown does not fire while the agent is working" do
+      # A message can arrive from somewhere other than a viewer, such as an API
+      # call or a resume handed to a sleeping agent, and put the agent back to
+      # work inside the delay. Stopping then would kill a run in progress.
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+      presence_topic = "conversation:test-back-to-work"
+
+      TestPresence.set_viewers(presence_topic, %{})
+
+      test_pid = self()
+
+      Agent
+      |> expect(:execute, fn _agent, _state, _callbacks ->
+        send(test_pid, {:execution_started, self()})
+
+        receive do
+          :finish_execution -> {:ok, State.new!()}
+        after
+          2_000 -> {:ok, State.new!()}
+        end
+      end)
+
+      {:ok, _pid} =
+        AgentSupervisor.start_link(
+          agent: agent,
+          initial_state: State.new!(),
+          name: AgentSupervisor.get_name(agent_id),
+          shutdown_delay: @shutdown_delay,
+          presence_tracking: [
+            enabled: true,
+            presence_module: TestPresence,
+            topic: presence_topic,
+            check_delay: 5_000
+          ]
+        )
+
+      agent_pid = AgentServer.get_pid(agent_id)
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id)
+
+      assert :ok = AgentServer.add_message(agent_id, Message.new_user!("test"))
+      assert_receive {:execution_started, execution_pid}, 1_000
+      assert AgentServer.get_status(agent_id) == :running
+
+      send(agent_pid, :shutdown_no_viewers)
+
+      # Synchronize: the handler has run by the time this call is answered.
+      _state = AgentServer.get_state(agent_id)
+
+      refute_receive {:agent, {:agent_shutdown, _payload}}, 200
+
+      send(execution_pid, :finish_execution)
+
+      AgentSupervisor.stop(agent_id)
+    end
+
     test "agent uses standard inactivity timeout when presence disabled" do
       agent = create_test_agent()
       agent_id = agent.agent_id

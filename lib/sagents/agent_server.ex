@@ -2467,12 +2467,34 @@ defmodule Sagents.AgentServer do
   @impl true
   def handle_info(:shutdown_no_viewers, server_state) do
     agent_id = server_state.agent.agent_id
-    Logger.info("Agent #{agent_id} shutting down - idle with no viewers")
 
-    # Broadcast shutdown event
-    broadcast_event(server_state, {:agent_shutdown, shutdown_payload(server_state, :no_viewers)})
+    # The decision to stop was made `check_delay` ago, against a viewer list
+    # that was empty and a status that was `:idle`. Both can have changed since,
+    # and neither the schedule nor the timer is revocable: a viewer re-enters
+    # when the user switches away from a conversation and back inside the delay,
+    # and an inbound message puts the agent back to work. So the decision is
+    # re-made here rather than trusted from when it was made.
+    #
+    # Re-reading is also what makes a duplicate timer harmless. Every leave
+    # broadcast that finds an idle agent with no viewers schedules another one.
+    if server_state.status == :idle and no_viewers?(server_state) do
+      Logger.info("Agent #{agent_id} shutting down - idle with no viewers")
 
-    {:noreply, stop_supervisor(server_state)}
+      # Broadcast shutdown event
+      broadcast_event(
+        server_state,
+        {:agent_shutdown, shutdown_payload(server_state, :no_viewers)}
+      )
+
+      {:noreply, stop_supervisor(server_state)}
+    else
+      Logger.debug(
+        "Agent #{agent_id} no-viewers shutdown cancelled - " <>
+          "status #{inspect(server_state.status)}, viewers returned or work resumed"
+      )
+
+      {:noreply, server_state}
+    end
   end
 
   # Handle presence_diff broadcasts from Phoenix.Presence
@@ -3095,6 +3117,21 @@ defmodule Sagents.AgentServer do
       _other ->
         # Presence tracking disabled, use standard inactivity timeout
         :ok
+    end
+  end
+
+  # Whether the conversation this agent backs is currently unwatched.
+  #
+  # Answers `false` when presence tracking is off. Callers read a `true` here as
+  # grounds to stop the agent, and "nobody is watching" is only a meaningful
+  # answer when somebody could have been watching.
+  defp no_viewers?(server_state) do
+    case server_state.presence_config do
+      %{enabled: true, presence_module: presence_mod, topic: topic} ->
+        map_size(presence_mod.list(topic)) == 0
+
+      _other ->
+        false
     end
   end
 

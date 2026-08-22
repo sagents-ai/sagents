@@ -43,6 +43,7 @@ defmodule <%= module %> do
   alias Sagents.AgentUtils
   alias Sagents.StreamingSession
   alias Sagents.Subscriber
+  alias Sagents.ViewerPresence
   alias LangChain.MessageDelta
 
   require Logger
@@ -73,7 +74,18 @@ defmodule <%= module %> do
       question_responses: [],
       interrupt_data: nil,
       hitl_decisions: [],
-      sagents_subs: %{}
+      sagents_subs: %{},
+      # Every viewer-presence entry `Phoenix.Presence` holds for this process,
+      # as `%{conversation_id => viewer_id}`. Presence tracks `self()`, and this
+      # process outlives the conversations it shows, so entries are handed back
+      # on the way out rather than left for process exit to reap. Recording the
+      # viewer id per conversation is what lets a leaving path release an entry
+      # under the id it was taken with, which a re-auth may have changed.
+      #
+      # A map rather than a single slot because one process can view any number
+      # of conversations at once: a split view, a dashboard row per agent, a
+      # panel of threads each backed by its own forked agent.
+      tracked_viewers: %{}
     }
   end
 
@@ -354,28 +366,87 @@ defmodule <%= module %> do
   def question_resume_running_changes, do: %{agent_status: :running, loading: true}
 
   # ===========================================================================
-  # Presence tracking
+  # Viewer presence
   # ===========================================================================
 
   @doc """
-  Track the viewer in Phoenix.Presence so the agent can use smart shutdown.
-  No-op if `user_id` is nil.
+  Add `conversation_id` to what this process is viewing.
+
+  `<%= coordinator_alias %>` reads the viewer list to decide an idle agent may
+  *not* shut down yet, so an entry left on a conversation nobody is looking at
+  any more pins that agent for the full inactivity timeout. Every path that adds
+  one needs a path that gives it back.
+
+  Adding does not release anything else. A host showing several conversations at
+  once holds an entry per conversation, and the one it just opened says nothing
+  about the others.
+
+  `viewer_id` may be nil, for a host with no identified viewer. Nothing is
+  tracked and any existing entry is left alone.
+
+  Returns the changes to merge into the host's state.
   """
-  def maybe_track_viewer(_conversation_id, nil), do: :ok
-
-  def maybe_track_viewer(conversation_id, user_id) do
-    case <%= coordinator_alias %>.track_conversation_viewer(conversation_id, user_id) do
-      {:ok, _ref} ->
-        :ok
-
-      {:error, {:already_tracked, _topic, _key, _meta}} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Failed to track presence: #{inspect(reason)}")
-        :ok
-    end
+  def add_tracked_viewer(state, conversation_id, viewer_id) do
+    %{
+      tracked_viewers:
+        ViewerPresence.track(
+          tracked_viewers(state),
+          <%= coordinator_alias %>,
+          conversation_id,
+          viewer_id
+        )
+    }
   end
+
+  @doc """
+  Remove `conversation_id` from what this process is viewing.
+
+  Releases the entry under the viewer id it was taken with. Holding nothing for
+  `conversation_id` is a no-op.
+
+  Returns the changes to merge into the host's state.
+  """
+  def remove_tracked_viewer(state, conversation_id) do
+    %{
+      tracked_viewers:
+        ViewerPresence.untrack(tracked_viewers(state), <%= coordinator_alias %>, conversation_id)
+    }
+  end
+
+  @doc """
+  Release every viewer-presence entry this process holds.
+
+  For a host that stops viewing everything at once: a reset, a closed panel, a
+  navigation away.
+
+  Returns the changes to merge into the host's state.
+  """
+  def clear_tracked_viewers(state) do
+    %{tracked_viewers: ViewerPresence.untrack_all(tracked_viewers(state), <%= coordinator_alias %>)}
+  end
+
+  @doc """
+  Make what this process holds match `desired` exactly.
+
+  `desired` is `%{conversation_id => viewer_id}`. Releases the conversations no
+  longer in the set, takes the ones that are new, and leaves the unchanged ones
+  untouched.
+
+  Prefer this over `add_tracked_viewer/3` and `remove_tracked_viewer/2` wherever
+  the viewed set is derivable from state the host already keeps. The incremental
+  pair can accumulate entries, since nothing here knows when one of the host's
+  panels went away; declaring the set removes the question. It is also
+  idempotent, which matters more than tidiness: an untrack followed by a track
+  of the same conversation is a leave broadcast, and an idle agent that acts on
+  it schedules the very shutdown the entry exists to prevent.
+
+  Returns the changes to merge into the host's state.
+  """
+  def sync_tracked_viewers(state, desired) do
+    %{tracked_viewers: ViewerPresence.sync(tracked_viewers(state), <%= coordinator_alias %>, desired)}
+  end
+
+  defp tracked_viewers(state), do: Map.get(state, :tracked_viewers) || %{}
 
   # ===========================================================================
   # Error formatting
