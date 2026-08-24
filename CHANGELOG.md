@@ -1,5 +1,97 @@
 # Changelog
 
+## v0.14.0
+
+A subscriber process that switches between conversations now hands back the
+viewer-presence entry it held on the one it left. `Sagents.Presence.track/4`
+tracks `self()`, and a LiveView is the same process for every conversation it
+shows, so an entry taken when one opened survived the switch to the next.
+`Sagents.AgentServer` reads the viewer list to decide an idle agent may *not*
+shut down yet, so each stale entry pinned an agent for its full inactivity
+timeout. `Phoenix.Presence` reaps entries when the tracked process dies, so
+closing the tab cleans up perfectly, which is what kept the leak invisible in
+development and visible only in production.
+
+`Sagents.ViewerPresence` is the new home for that bookkeeping. It records what
+Presence actually holds for the calling process, keyed per conversation, because
+`Phoenix.Tracker` answers `:ok` to an untrack of a key it never tracked: a
+release aimed at the wrong viewer id reports success while leaving the real entry
+in place. It holds a **set**, not a slot, which is the groundwork for a host
+viewing several agents at once.
+
+**Nothing here breaks your application.** Upgrade, change no host code, and your
+app compiles clean, passes its tests, and behaves as v0.13.2 did, plus the
+shutdown-timer fix below. The leak is also still there: the functions that fix it
+live in modules `mix sagents.setup` generated into your app, which a dependency
+bump does not touch.
+
+### Upgrading from v0.13.x to v0.14.0
+
+Read
+[MIGRATION_PROMPT_v0.13.x_TO_v0.14.0.md](https://github.com/sagents-ai/sagents/blob/main/MIGRATION_PROMPT_v0.13.x_TO_v0.14.0.md).
+It is written to be handed to a coding agent, and because the compiler gives
+almost no signal here, it ships the searches that find the affected call sites.
+
+In short: `AgentSubscriberSession` gains a `tracked_viewers` record and four
+functions replacing `maybe_track_viewer/2`; `AgentLiveHelpers` funnels every open
+through one path that leaves the previous conversation first; and your own code
+needs auditing, which is where the real risk is. A hand-rolled
+`Coordinator.track_conversation_viewer/3` in a `mount/3`, or a direct
+`:conversation_id` assign before a navigate, puts the leak back with every
+generated file correctly updated.
+
+Two rules keep it fixed: never assign `:conversation_id` directly, and never call
+the coordinator's viewer-presence functions from host code.
+
+No database migration.
+
+### Added
+
+- `Sagents.ViewerPresence`, holding the viewer-presence entries a subscriber
+  process owns as `%{conversation_id => viewer_id}`. `track/4`, `untrack/3` and
+  `untrack_all/2` are incremental; `sync/3` declares the set being viewed now and
+  diffs it against what is held. Prefer `sync/3`: the incremental pair can
+  accumulate entries, since nothing here knows when one of the host's panels went
+  away. [#180](https://github.com/sagents-ai/sagents/pull/180)
+- `Sagents.ViewerPresence` behaviour callbacks `track_conversation_viewer/3` and
+  `untrack_conversation_viewer/2`, which the generated coordinator now declares.
+  [#180](https://github.com/sagents-ai/sagents/pull/180)
+- Generated `AgentSubscriberSession` gains `add_tracked_viewer/3`,
+  `remove_tracked_viewer/2`, `clear_tracked_viewers/1` and
+  `sync_tracked_viewers/2`, replacing `maybe_track_viewer/2`. Non-LiveView hosts
+  use the same functions on their own state map.
+  [#180](https://github.com/sagents-ai/sagents/pull/180)
+- Generated `AgentLiveHelpers.enter_conversation/3`, for opening a conversation
+  the caller already holds without a database read.
+  [#180](https://github.com/sagents-ai/sagents/pull/180)
+- `docs/subscriptions_and_presence.md` covers where the release belongs and what
+  a host viewing several conversations at once can and cannot do today.
+  [#180](https://github.com/sagents-ai/sagents/pull/180)
+
+### Changed
+
+- **Generated `AgentLiveHelpers.load_conversation/3` reads the conversation
+  before leaving the current one**, so a conversation that is not there leaves the
+  socket where it was rather than taking the subscription off an agent still on
+  screen. [#180](https://github.com/sagents-ai/sagents/pull/180)
+- Generated `AgentLiveHelpers.reset_conversation/1` releases every viewer entry
+  the socket holds, not just the subscription.
+  [#180](https://github.com/sagents-ai/sagents/pull/180)
+- Developed and tested against `langchain` v0.12.0. The requirement stays
+  `>= 0.8.11`. [#180](https://github.com/sagents-ai/sagents/pull/180)
+
+### Fixed
+
+- **A no-viewers shutdown fired even when the viewer had come back or the agent
+  had gone back to work.** The decision was made `check_delay` earlier and the
+  timer is not revocable. The condition is re-read when the timer fires, which
+  also makes the duplicate timers every leave broadcast schedules harmless. No
+  host change needed. [#180](https://github.com/sagents-ai/sagents/pull/180)
+- **A subscriber switching conversations left its viewer entry on the previous
+  one**, pinning that idle agent for its full inactivity timeout instead of
+  letting it stop promptly. Needs the migration above.
+  [#180](https://github.com/sagents-ai/sagents/pull/180)
+
 ## v0.13.2
 
 `Sagents.Todo.resolved?/1` and `open?/1` now take a bare status, so code holding
