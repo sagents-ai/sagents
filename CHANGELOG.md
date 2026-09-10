@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.14.1
+
+A newly started agent is now reachable by every caller by the time
+`Sagents.AgentsDynamicSupervisor.start_agent_sync/1` reports it ready.
+
+No breaking changes and no migration.
+
+### Fixed
+
+- **`start_agent_sync/1` could report an agent ready before callers could reach
+  it.** Its readiness wait polled the `AgentSupervisor`'s registration rather
+  than the `AgentServer`'s, and the two are made at different points in startup:
+  a supervisor registers before its own `init/1` runs, while its `AgentServer`
+  child registers only once that `init/1` has loaded persisted state. A caller
+  acting on the premature success got `:agent_not_running` from its very next
+  call, leaving the fresh agent idle until its inactivity timeout. Most visible
+  under the `:horde` backend, where the two registrations reach another node at
+  different times.
+  [#184](https://github.com/sagents-ai/sagents/pull/184)
+
+### Changed
+
+- `start_agent_sync/1` now waits on the `AgentServer` itself, so the wait spans
+  the persisted-state load. A start that exceeds `:startup_timeout` (default
+  5000ms) returns `{:error, :timeout_waiting_for_agent}` where it previously
+  returned success and failed downstream. The success and error shapes are
+  unchanged.
+  [#184](https://github.com/sagents-ai/sagents/pull/184)
+
 ## v0.14.0
 
 A subscriber process that switches between conversations now hands back the
