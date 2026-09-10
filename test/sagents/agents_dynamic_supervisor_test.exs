@@ -3,15 +3,16 @@ defmodule Sagents.AgentsDynamicSupervisorTest do
   Unit tests for the registration-timeout resilience added to
   `Sagents.AgentsDynamicSupervisor`.
 
-  These tests stub `Sagents.ProcessSupervisor.start_child/2` and
-  `Sagents.AgentSupervisor.get_pid/1` with Mimic so the recovery/retry logic can
-  be exercised without a real Horde cluster.
+  These tests stub `Sagents.ProcessSupervisor.start_child/2` and the registry
+  lookup with Mimic so the recovery/retry logic can be exercised without a real
+  Horde cluster.
   """
   use ExUnit.Case, async: true
   use Mimic
 
   alias Sagents.AgentSupervisor
   alias Sagents.AgentsDynamicSupervisor
+  alias Sagents.ProcessRegistry
   alias Sagents.ProcessSupervisor
 
   # The exact error shape Horde produces when a `:via` registration call exceeds
@@ -64,9 +65,9 @@ defmodule Sagents.AgentsDynamicSupervisorTest do
 
       expect(ProcessSupervisor, :start_child, fn _sup, _spec -> {:ok, ready_pid} end)
 
-      # get_pid is only consulted by the post-start readiness wait, never on the
-      # timeout path itself.
-      expect(AgentSupervisor, :get_pid, fn ^agent_id -> {:ok, ready_pid} end)
+      # The readiness wait polls the AgentServer's own key, which is what
+      # callers of a started agent look up.
+      expect(ProcessRegistry, :fetch, fn {:agent_server, ^agent_id} -> {:ok, ready_pid} end)
 
       assert {:ok, ^ready_pid} =
                AgentsDynamicSupervisor.start_agent_sync(
@@ -82,8 +83,9 @@ defmodule Sagents.AgentsDynamicSupervisorTest do
 
       stub(ProcessSupervisor, :start_child, fn _sup, _spec -> {:error, reason} end)
 
-      # Every attempt times out, so no readiness wait runs and get_pid is never used.
-      reject(&AgentSupervisor.get_pid/1)
+      # Every attempt times out, so no readiness wait runs and nothing is
+      # looked up.
+      reject(&ProcessRegistry.fetch/1)
 
       assert {:error, ^reason} =
                AgentsDynamicSupervisor.start_agent_sync(

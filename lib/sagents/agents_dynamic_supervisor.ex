@@ -34,6 +34,7 @@ defmodule Sagents.AgentsDynamicSupervisor do
   use DynamicSupervisor
   require Logger
 
+  alias Sagents.AgentServer
   alias Sagents.AgentSupervisor
 
   # ============================================================================
@@ -203,13 +204,11 @@ defmodule Sagents.AgentsDynamicSupervisor do
 
   defp do_start_agent_sync(opts, agent_id, startup_timeout, retries_left) do
     case start_agent(opts) do
-      {:ok, _pid} ->
-        # Wait for AgentServer to be registered
-        wait_for_agent_ready(agent_id, startup_timeout)
+      {:ok, sup_pid} ->
+        await_agent_server(agent_id, sup_pid, startup_timeout)
 
-      {:ok, _pid, :already_started} ->
-        # Already running, verify it's ready
-        wait_for_agent_ready(agent_id, startup_timeout)
+      {:ok, sup_pid, :already_started} ->
+        await_agent_server(agent_id, sup_pid, startup_timeout)
 
       {:error, reason} = error ->
         if retries_left > 0 and registration_timeout?(reason) do
@@ -332,17 +331,34 @@ defmodule Sagents.AgentsDynamicSupervisor do
 
   defp registration_timeout?(_reason), do: false
 
+  defp await_agent_server(agent_id, sup_pid, startup_timeout) do
+    case wait_for_agent_ready(agent_id, startup_timeout) do
+      :ok -> {:ok, sup_pid}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # Waits on the AgentServer's own registration, which is the key every caller
+  # of a started agent looks up.
+  #
+  # An AgentSupervisor registers its `:via` name inside `:gen.init_it`, before
+  # `init/1` runs, while its AgentServer child registers only once that `init/1`
+  # has finished loading persisted state. Waiting on the supervisor's key
+  # reports ready during the span between the two, and a caller acting on that
+  # gets `:agent_not_running` from the very next lookup. The two keys are
+  # written to the registry at different moments, so under Horde they also reach
+  # another node's replica at different moments.
   defp wait_for_agent_ready(agent_id, timeout) do
     deadline = System.monotonic_time(:millisecond) + timeout
     do_wait_for_agent_ready(agent_id, deadline, 10)
   end
 
   defp do_wait_for_agent_ready(agent_id, deadline, delay) do
-    case AgentSupervisor.get_pid(agent_id) do
-      {:ok, pid} ->
-        {:ok, pid}
+    case AgentServer.fetch_pid(agent_id) do
+      {:ok, _pid} ->
+        :ok
 
-      {:error, :not_found} ->
+      {:error, :not_running} ->
         now = System.monotonic_time(:millisecond)
 
         if now < deadline do
