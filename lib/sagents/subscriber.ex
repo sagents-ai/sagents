@@ -110,7 +110,30 @@ defmodule Sagents.Subscriber do
     subscribe_to_agent(subs, agent_id, channel, _subscriber_pid = self())
   end
 
-  @doc false
+  @doc """
+  Subscribe `subscriber_pid` to an agent's channel, threading the subscription
+  map through.
+
+  `subscribe_to_agent/3` subscribes the calling process. Use this arity when the
+  process receiving the events is a different one, such as a host running one
+  receiver per conversation. Main-channel events arrive as `{:agent, event}` and
+  do not name the agent that sent them, so a single process holding two
+  subscriptions cannot separate them; a receiver per agent can.
+
+  Events go to `subscriber_pid`. The returned subs map, and the producer monitor
+  recorded in it, belong to the calling process, which is therefore the process
+  that must run `handle_publisher_down/3` and `handle_presence_diff/3`.
+
+  > #### A revived subscription moves to the caller {: .warning}
+  >
+  > An entry rests at `:pending` when no agent is running at subscribe time, and
+  > returns there when the producer goes down. `handle_presence_diff/3` revives a
+  > pending entry by subscribing the process that calls it, and the entry does
+  > not record `subscriber_pid`, so a revived subscription made with this arity
+  > delivers to the caller rather than to the original receiver. Subscribe from
+  > the receiving process itself wherever that is reachable.
+  """
+  @spec subscribe_to_agent(subs(), String.t(), :main | :debug, pid()) :: subs()
   def subscribe_to_agent(subs, agent_id, channel, subscriber_pid)
       when channel in [:main, :debug] do
     key = {:agent, agent_id}
