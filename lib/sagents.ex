@@ -45,9 +45,8 @@ defmodule Sagents do
       # Provide complete middleware stack
       {:ok, agent} = Agent.new(%{
         model: model,
-        replace_default_middleware: true,
         middleware: [MyMiddleware1, MyMiddleware2]
-      })
+      }, replace_default_middleware: true)
 
   ## Creating Custom Middleware
 
