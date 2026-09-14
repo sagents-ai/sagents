@@ -335,7 +335,7 @@ defmodule Sagents.SubAgent do
     scope = Keyword.get(opts, :scope, agent.scope)
     until_tool = Keyword.get(opts, :until_tool)
     require_tool_success = Keyword.get(opts, :require_tool_success, false)
-    max_runs = Keyword.get(opts, :max_runs)
+    max_runs = Keyword.get(opts, :max_runs) || agent.max_runs
     parent_trace = Keyword.get(opts, :parent_trace, %{})
     suppress_debug_events = Keyword.get(opts, :suppress_debug_events, false)
 
@@ -1423,7 +1423,8 @@ defmodule Sagents.SubAgent do
         model: model,
         base_system_prompt: base_system_prompt,
         tools: config.tools,
-        middleware: middleware
+        middleware: middleware,
+        max_runs: config.max_runs
       },
       replace_default_middleware: true
     )

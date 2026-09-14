@@ -48,6 +48,20 @@ defmodule Sagents.Modes.AgentExecutionTest do
     })
   end
 
+  defp stateful_submit_tool do
+    Function.new!(%{
+      name: "submit_report",
+      description: "Submit a report",
+      parameters_schema: %{
+        type: "object",
+        properties: %{"title" => %{type: "string"}}
+      },
+      function: fn args, _ctx ->
+        {:ok, Jason.encode!(args), Sagents.State.new!(%{metadata: %{approved: true}})}
+      end
+    })
+  end
+
   defp other_tool do
     Function.new!(%{
       name: "search",
@@ -251,11 +265,73 @@ defmodule Sagents.Modes.AgentExecutionTest do
       assert is_map(interrupt_data)
       assert Map.has_key?(interrupt_data, :action_requests)
     end
+
+    test "approval executes a target tool returned on the final allowed call" do
+      tools = [stateful_submit_tool()]
+
+      chain =
+        build_chain(tools, [Message.new_user!("Write a report")])
+        |> LLMChain.update_custom_context(%{
+          state: Sagents.State.new!(%{agent_id: "test-hitl-agent"})
+        })
+
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [assistant_with_tool_call("submit_report", %{"title" => "Report"})]}
+      end)
+
+      middleware = [
+        %MiddlewareEntry{
+          module: HumanInTheLoop,
+          config: %{
+            interrupt_on: %{
+              "submit_report" => %{allowed_decisions: [:approve, :reject]}
+            }
+          }
+        }
+      ]
+
+      opts = [until_tool: "submit_report", middleware: middleware, max_runs: 1]
+
+      assert {:interrupt, interrupted_chain, _interrupt_data} =
+               AgentExecution.run(chain, opts)
+
+      tool_calls = interrupted_chain.last_message.tool_calls
+
+      resumed_chain =
+        LLMChain.execute_tool_calls_with_decisions(
+          interrupted_chain,
+          tool_calls,
+          [%{type: :approve}]
+        )
+
+      assert {:ok, final_chain, %ToolResult{name: "submit_report", is_error: false}} =
+               AgentExecution.run(resumed_chain, opts)
+
+      assert final_chain.custom_context.state.metadata.approved
+    end
   end
 
   # ── Test: max_runs exceeded with until_tool active ───────────────
 
   describe "until_tool: max_runs exceeded" do
+    test "executes a successful target tool returned on the final allowed call" do
+      tools = [other_tool(), submit_tool()]
+      chain = build_chain(tools, [Message.new_user!("Research and report")])
+
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [assistant_with_tool_call("search", %{query: "test"}, "call_1")]}
+      end)
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [assistant_with_tool_call("submit_report", %{title: "done"}, "call_2")]}
+      end)
+
+      result = AgentExecution.run(chain, until_tool: "submit_report", max_runs: 2)
+
+      assert {:ok, %LLMChain{}, %ToolResult{name: "submit_report", is_error: false}} = result
+    end
+
     test "max_runs exceeded with until_tool active returns error" do
       tools = [other_tool(), submit_tool()]
       chain = build_chain(tools, [Message.new_user!("Research and report")])

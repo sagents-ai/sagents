@@ -63,15 +63,16 @@ defmodule Sagents.Modes.AgentExecution do
     chain = ensure_mode_state(chain)
     opts = normalize_until_tool_opts(opts)
 
-    chain
-    |> do_run(opts)
+    {:continue, chain}
+    |> maybe_process_resumed_tool_results(opts)
+    |> continue_execution(opts)
     |> normalize_pause()
   end
 
   defp do_run(chain, opts) do
     {:continue, chain}
-    |> call_llm()
     |> check_max_runs(Keyword.put_new(opts, :max_runs, 50))
+    |> call_llm()
     |> check_pause(opts)
     |> check_pre_tool_hitl(opts)
     |> execute_tools()
@@ -103,6 +104,20 @@ defmodule Sagents.Modes.AgentExecution do
   defp normalize_tool_names([]), do: nil
   defp normalize_tool_names(name) when is_binary(name), do: [name]
   defp normalize_tool_names(names) when is_list(names), do: names
+
+  defp maybe_process_resumed_tool_results({:continue, chain} = pipeline_result, opts) do
+    if get_run_count(chain) > 0 do
+      pipeline_result
+      |> propagate_state(opts)
+      |> check_tool_interrupts(opts)
+      |> maybe_check_until_tool(opts)
+    else
+      pipeline_result
+    end
+  end
+
+  defp continue_execution({:continue, chain}, opts), do: do_run(chain, opts)
+  defp continue_execution(terminal, _opts), do: terminal
 
   defp maybe_check_until_tool(pipeline_result, opts) do
     cond do
