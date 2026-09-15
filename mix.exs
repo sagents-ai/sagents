@@ -66,6 +66,8 @@ defmodule Sagents.MixProject do
 
       # Test dependencies
       {:mimic, "~> 1.8", only: :test},
+      {:opentelemetry_api, "~> 1.4", only: :test},
+      {:opentelemetry, "~> 1.5", only: :test, runtime: false},
       {:local_cluster, "~> 2.0", only: :test},
 
       # AGENTS.md file maintenance
