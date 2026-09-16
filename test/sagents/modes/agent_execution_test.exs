@@ -12,6 +12,8 @@ defmodule Sagents.Modes.AgentExecutionTest do
   alias LangChain.Function
   alias Sagents.MiddlewareEntry
   alias Sagents.Middleware.HumanInTheLoop
+  alias LangChain.Message.ContentPart
+  alias LangChain.MessageExpansion
 
   setup :verify_on_exit!
 
@@ -383,6 +385,184 @@ defmodule Sagents.Modes.AgentExecutionTest do
       result = AgentExecution.run(chain, [])
 
       assert {:ok, %LLMChain{}} = result
+    end
+  end
+
+  # ── Test: Tool results that expand into messages ─────────────────
+
+  describe "tool results that expand into messages" do
+    @material "POLICY SECTION 4: refunds are issued within 30 days."
+
+    defp loading_tool do
+      Function.new!(%{
+        name: "load_reference",
+        description: "Load the reference material",
+        parameters_schema: %{type: "object", properties: %{}},
+        function: fn _args, _ctx ->
+          MessageExpansion.expand(
+            "Loaded 1 document.\n\n" <> @material,
+            [
+              Message.new_assistant!(@material),
+              Message.new_user!("Answer using the policy above.")
+            ],
+            result_content: "Loaded 1 document."
+          )
+        end
+      })
+    end
+
+    defp text_of(%Message{content: content}) when is_list(content) do
+      content
+      |> Enum.filter(&match?(%ContentPart{type: :text}, &1))
+      |> Enum.map_join(" ", & &1.content)
+    end
+
+    defp text_of(%Message{content: content}) when is_binary(content), do: content
+    defp text_of(%Message{}), do: ""
+
+    test "the material is in the conversation for the next LLM call, in the same run" do
+      chain = build_chain([loading_tool(), other_tool()], [Message.new_user!("Policy?")])
+      test_pid = self()
+
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [assistant_with_tool_call("load_reference", %{})]}
+      end)
+      # The model keeps working rather than stopping. This is the turn where a
+      # run-boundary delivery leaves the model with nothing.
+      |> expect(:call, fn _model, messages, _tools ->
+        send(test_pid, {:turn_2, messages})
+        {:ok, [assistant_with_tool_call("search", %{"query" => "refunds"}, "call_2")]}
+      end)
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [plain_assistant_message("30 days.")]}
+      end)
+
+      assert {:ok, %LLMChain{}} = AgentExecution.run(chain, [])
+
+      assert_received {:turn_2, turn_2}
+
+      assert Enum.any?(turn_2, fn message ->
+               message.role == :assistant and text_of(message) =~ @material
+             end)
+
+      assert %Message{role: :user} = List.last(turn_2)
+      assert text_of(List.last(turn_2)) =~ "Answer using the policy above."
+    end
+
+    test "the bulky payload leaves the tool result once expanded" do
+      chain = build_chain([loading_tool()], [Message.new_user!("Policy?")])
+      test_pid = self()
+
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [assistant_with_tool_call("load_reference", %{})]}
+      end)
+      |> expect(:call, fn _model, messages, _tools ->
+        send(test_pid, {:turn_2, messages})
+        {:ok, [plain_assistant_message("30 days.")]}
+      end)
+
+      assert {:ok, %LLMChain{}} = AgentExecution.run(chain, [])
+
+      assert_received {:turn_2, turn_2}
+      tool_message = Enum.find(turn_2, &(&1.role == :tool))
+
+      assert [%ToolResult{content: [%ContentPart{content: "Loaded 1 document."}]}] =
+               tool_message.tool_results
+
+      assert 1 = Enum.count(turn_2, &(text_of(&1) =~ @material))
+    end
+
+    test "expands a result produced outside the pipeline, as a resume does" do
+      # The shape `HumanInTheLoop` hands back: the approved tool already ran, so
+      # the chain is rebuilt from stored messages and `exchanged_messages` is
+      # empty. Nothing in the loop produced this tool message.
+      {:ok, staged} =
+        MessageExpansion.expand(
+          "Loaded 1 document.\n\n" <> @material,
+          [
+            Message.new_assistant!(@material),
+            Message.new_user!("Answer using the policy above.")
+          ],
+          result_content: "Loaded 1 document."
+        )
+
+      result = %ToolResult{staged | tool_call_id: "call_1", name: "load_reference"}
+
+      chain =
+        build_chain([loading_tool()], [
+          Message.new_user!("Policy?"),
+          assistant_with_tool_call("load_reference", %{}),
+          Message.new_tool_result!(%{content: nil, tool_results: [result]})
+        ])
+
+      test_pid = self()
+
+      expect(ChatAnthropic, :call, fn _model, messages, _tools ->
+        send(test_pid, {:first_call, messages})
+        {:ok, [plain_assistant_message("30 days.")]}
+      end)
+
+      assert {:ok, %LLMChain{}} = AgentExecution.run(chain, [])
+
+      assert_received {:first_call, messages}
+
+      assert Enum.any?(messages, fn message ->
+               message.role == :assistant and text_of(message) =~ @material
+             end)
+    end
+
+    test "a satisfied until_tool contract ends the run with nothing expanded" do
+      chain = build_chain([loading_tool()], [Message.new_user!("Policy?")])
+
+      expect(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [assistant_with_tool_call("load_reference", %{})]}
+      end)
+
+      assert {:ok, final_chain, %ToolResult{name: "load_reference"}} =
+               AgentExecution.run(chain, until_tool: "load_reference")
+
+      assert %Message{role: :tool} = final_chain.last_message
+      refute Enum.any?(final_chain.messages, &(text_of(&1) =~ @material))
+    end
+
+    test "an interrupted turn ends with nothing expanded" do
+      interrupting_tool =
+        Function.new!(%{
+          name: "gated",
+          description: "Needs approval",
+          parameters_schema: %{type: "object", properties: %{}},
+          function: fn _args, _ctx -> {:interrupt, "Needs approval", %{type: :halt}} end
+        })
+
+      chain =
+        build_chain([loading_tool(), interrupting_tool], [Message.new_user!("Policy?")])
+
+      expect(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        calls = [
+          ToolCall.new!(%{
+            status: :complete,
+            call_id: "call_1",
+            name: "load_reference",
+            arguments: %{}
+          }),
+          ToolCall.new!(%{status: :complete, call_id: "call_2", name: "gated", arguments: %{}})
+        ]
+
+        {:ok, [Message.new_assistant!(%{tool_calls: calls})]}
+      end)
+
+      assert {:interrupt, interrupted_chain, _data} = AgentExecution.run(chain, [])
+
+      assert %Message{role: :tool} = interrupted_chain.last_message
+      refute Enum.any?(interrupted_chain.messages, &(text_of(&1) =~ @material))
+
+      # Fail-open: the material is still readable, in the untrimmed result.
+      assert Enum.any?(interrupted_chain.last_message.tool_results, fn result ->
+               match?([%ContentPart{content: text}] when is_binary(text), result.content) and
+                 hd(result.content).content =~ @material
+             end)
     end
   end
 end

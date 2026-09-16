@@ -7,12 +7,37 @@ defmodule Sagents.Modes.AgentExecution do
 
   ## Pipeline
 
-  1. Call the LLM
-  2. Check for HITL interrupts (if HumanInTheLoop middleware present)
-  3. Execute tools
-  4. Propagate state updates from tool results
-  5. Check if target tool was called (if `until_tool` is set)
-  6. Loop if `needs_response` is true, or error if until_tool contract violated
+  1. Expand any tool result from the previous turn that asked to
+  2. Call the LLM
+  3. Check for HITL interrupts (if HumanInTheLoop middleware present)
+  4. Execute tools
+  5. Propagate state updates from tool results
+  6. Check if target tool was called (if `until_tool` is set)
+  7. Loop if `needs_response` is true, or error if until_tool contract violated
+
+  ## Tool results that expand into messages
+
+  A tool can return material as *messages* rather than as tool-result content,
+  choosing the role it arrives at, and have the model read them on its very next
+  LLM call. A tool asks for that with `LangChain.MessageExpansion.expand/3`;
+  step 1 applies it.
+
+  Step 1 comes first, not last, and both halves of that matter:
+
+  - **Before the LLM call**, which is the guarantee the tool is relying on. A
+    tool that says "this arrives next" while the model keeps working in the same
+    run is making a promise nothing keeps, and a model handed a description of
+    material it does not have will write the material itself.
+  - **After the loop boundary**, so every step that decides whether the run is
+    over reads a `last_message` the model produced or the tools returned. A turn
+    that interrupted or satisfied an `until_tool` contract ends without
+    expanding anything into it.
+
+  Running first also covers the results a resume produces:
+  `Sagents.Middleware.HumanInTheLoop` executes approved tool calls outside this
+  pipeline and hands `Sagents.Agent.execute/3` a fresh chain whose last message
+  is that tool message. Step 1 is the first thing to see it, so a tool gated
+  behind human approval expands on the same terms as one that is not.
 
   ## Options
 
@@ -70,6 +95,7 @@ defmodule Sagents.Modes.AgentExecution do
 
   defp do_run(chain, opts) do
     {:continue, chain}
+    |> expand_tool_results(opts)
     |> call_llm()
     |> check_max_runs(Keyword.put_new(opts, :max_runs, 50))
     |> check_pause(opts)
