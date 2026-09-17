@@ -178,9 +178,8 @@ Read
 [MIGRATION_PROMPT_v0.14.x_TO_v0.15.0.md](https://github.com/sagents-ai/sagents/blob/main/MIGRATION_PROMPT_v0.14.x_TO_v0.15.0.md).
 It is written to be handed to a coding agent.
 
-It covers the tagged shape only, and none of that is required. An app that
-adopts no tags keeps working. The one change an upgrade demands is moving
-misplaced `Agent.new/2` options, if your app has any.
+It covers the required `Agent.new/2` fix first, then the optional work of
+adopting the tagged shape. An app that adopts no tags keeps working.
 
 ### Changed
 
