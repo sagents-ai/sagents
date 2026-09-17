@@ -8,6 +8,7 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
   alias Sagents.State
   alias LangChain.Message
   alias LangChain.Message.ToolCall
+  alias LangChain.Message.ToolResult
   alias LangChain.Function
   alias LangChain.ChatModels.ChatAnthropic
 
@@ -311,6 +312,58 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
         {:error, reason} ->
           flunk("Resume failed: #{inspect(reason)}")
       end
+    end
+
+    test "agent resume completes until_tool when the approved call is the target tool" do
+      test_pid = self()
+
+      submit_tool =
+        Function.new!(%{
+          name: "submit_report",
+          description: "Submit a report",
+          parameters_schema: %{
+            type: "object",
+            properties: %{"title" => %{type: "string"}}
+          },
+          function: fn _args, _context -> {:ok, "Report submitted"} end
+        })
+
+      tool_call =
+        ToolCall.new!(%{
+          call_id: "submit_call",
+          name: "submit_report",
+          arguments: %{"title" => "Report"}
+        })
+
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        send(test_pid, :llm_called)
+        {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+      end)
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: create_test_model(),
+            tools: [submit_tool],
+            middleware: [{HumanInTheLoop, [interrupt_on: %{"submit_report" => true}]}]
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Write the report")]})
+      opts = [until_tool: "submit_report", max_runs: 1]
+
+      assert {:interrupt, interrupted_state, _interrupt_data} =
+               Agent.execute(agent, initial_state, opts)
+
+      assert_received :llm_called
+
+      assert {:ok, final_state, %ToolResult{name: "submit_report", is_error: false}} =
+               Agent.resume(agent, interrupted_state, [%{type: :approve}], opts)
+
+      assert [_user, _assistant, %Message{role: :tool}] = final_state.messages
+      refute_received :llm_called
     end
 
     test "agent resume handles edit decision" do

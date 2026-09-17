@@ -636,6 +636,20 @@ defmodule Sagents.SubAgentTest do
       assert agent.model == custom_model
     end
 
+    test "Config subagent preserves max_runs on the built agent" do
+      config =
+        SubAgentConfig.new!(%{
+          name: "bounded-agent",
+          description: "Bounded agent",
+          system_prompt: "Prompt",
+          tools: [test_tool()],
+          max_runs: 7
+        })
+
+      assert {:ok, registry} = SubAgent.build_agent_map([config], test_model(), [])
+      assert registry["bounded-agent"].max_runs == 7
+    end
+
     test "Config subagent gets middleware from config" do
       model = test_model()
 
@@ -1139,6 +1153,34 @@ defmodule Sagents.SubAgentTest do
       assert String.starts_with?(subagent.id, "test-parent-sub-")
       assert subagent.chain != nil
       assert subagent.interrupt_on == %{}
+    end
+
+    test "inherits max_runs from the configured agent" do
+      agent_config = %{test_agent() | max_runs: 7}
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config
+        )
+
+      assert subagent.max_runs == 7
+      assert Keyword.get(SubAgent.build_mode_opts(subagent), :max_runs) == 7
+    end
+
+    test "explicit max_runs overrides the configured agent" do
+      agent_config = %{test_agent() | max_runs: 7}
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          max_runs: 3
+        )
+
+      assert subagent.max_runs == 3
     end
 
     test "stores interrupt_on from agent_config middleware" do
