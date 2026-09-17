@@ -234,17 +234,19 @@ defmodule Sagents.ClusterTestHelper do
   """
   def start_agent(agent_id) do
     agent =
-      Sagents.Agent.new!(%{
-        agent_id: agent_id,
-        model:
-          ChatAnthropic.new!(%{
-            model: "claude-sonnet-4-5-20250929",
-            api_key: "test_key"
-          }),
-        base_system_prompt: "Rolling deploy test agent",
-        replace_default_middleware: true,
-        middleware: []
-      })
+      Sagents.Agent.new!(
+        %{
+          agent_id: agent_id,
+          model:
+            ChatAnthropic.new!(%{
+              model: "claude-sonnet-4-5-20250929",
+              api_key: "test_key"
+            }),
+          base_system_prompt: "Rolling deploy test agent",
+          middleware: []
+        },
+        replace_default_middleware: true
+      )
 
     Sagents.AgentsDynamicSupervisor.start_agent_sync(
       agent_id: agent_id,

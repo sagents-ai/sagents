@@ -74,17 +74,19 @@ defmodule Sagents.Horde.NodeTransferTest do
   end
 
   defp create_test_agent(agent_id) do
-    Agent.new!(%{
-      agent_id: agent_id,
-      model:
-        ChatAnthropic.new!(%{
-          model: "claude-sonnet-4-5-20250929",
-          api_key: "test_key"
-        }),
-      base_system_prompt: "Test agent for node transfer",
-      replace_default_middleware: true,
-      middleware: []
-    })
+    Agent.new!(
+      %{
+        agent_id: agent_id,
+        model:
+          ChatAnthropic.new!(%{
+            model: "claude-sonnet-4-5-20250929",
+            api_key: "test_key"
+          }),
+        base_system_prompt: "Test agent for node transfer",
+        middleware: []
+      },
+      replace_default_middleware: true
+    )
   end
 
   defp start_agent_on_cluster(node, agent_id, opts \\ []) do

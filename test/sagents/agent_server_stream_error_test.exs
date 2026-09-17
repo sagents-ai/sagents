@@ -53,14 +53,16 @@ defmodule Sagents.AgentServerStreamErrorTest do
     model = ChatAnthropic.new!(%{model: "claude-sonnet-4-6", api_key: "test_key"})
 
     agent =
-      Agent.new!(%{
-        agent_id: agent_id,
-        model: model,
-        base_system_prompt: "Test agent",
-        replace_default_middleware: true,
-        middleware: [],
-        mode: mode
-      })
+      Agent.new!(
+        %{
+          agent_id: agent_id,
+          model: model,
+          base_system_prompt: "Test agent",
+          middleware: [],
+          mode: mode
+        },
+        replace_default_middleware: true
+      )
 
     {:ok, _sup} =
       AgentSupervisor.start_link_sync(

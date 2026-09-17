@@ -119,13 +119,15 @@ defmodule PatchToolCallsIntegrationTest do
       model = ChatAnthropic.new!(%{model: "claude-sonnet-4-6", stream: false})
 
       {:ok, agent} =
-        Agent.new(%{
-          model: model,
-          replace_default_middleware: true,
-          middleware: [
-            PatchToolCalls
-          ]
-        })
+        Agent.new(
+          %{
+            model: model,
+            middleware: [
+              PatchToolCalls
+            ]
+          },
+          replace_default_middleware: true
+        )
 
       tool_call =
         ToolCall.new!(%{

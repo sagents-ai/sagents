@@ -613,15 +613,21 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
 
   describe "configuration validation" do
     test "accepts valid interrupt_on map" do
-      assert {:ok, _agent} =
-               Agent.new(%{
-                 model: create_test_model(),
-                 tools: [create_write_file_tool()],
+      assert {:ok, agent} =
+               Agent.new(
+                 %{
+                   model: create_test_model(),
+                   tools: [create_write_file_tool()]
+                 },
                  interrupt_on: %{
                    "write_file" => true,
                    "delete_file" => %{allowed_decisions: [:approve, :reject]}
                  }
-               })
+               )
+
+      assert Enum.any?(agent.middleware, fn %MiddlewareEntry{module: module} ->
+               module == HumanInTheLoop
+             end)
     end
 
     test "handles empty interrupt_on map by not adding middleware" do
@@ -642,11 +648,13 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
 
     test "handles nil interrupt_on by not adding middleware" do
       assert {:ok, agent} =
-               Agent.new(%{
-                 model: create_test_model(),
-                 tools: [create_write_file_tool()],
+               Agent.new(
+                 %{
+                   model: create_test_model(),
+                   tools: [create_write_file_tool()]
+                 },
                  interrupt_on: nil
-               })
+               )
 
       refute Enum.any?(agent.middleware, fn %MiddlewareEntry{module: module} ->
                module == HumanInTheLoop

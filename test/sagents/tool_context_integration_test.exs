@@ -30,8 +30,8 @@ defmodule Sagents.ToolContextIntegrationTest do
         })
 
       stub(ChatOpenAI, :call, fn _model, messages, _tools ->
-        case length(messages) do
-          2 ->
+        case Enum.any?(messages, &(&1.role == :tool)) do
+          false ->
             {:ok,
              [
                Message.new_assistant!(%{
@@ -45,19 +45,21 @@ defmodule Sagents.ToolContextIntegrationTest do
                })
              ]}
 
-          _other ->
+          true ->
             {:ok, [Message.new_assistant!("Done.")]}
         end
       end)
 
       {:ok, agent} =
-        Agent.new(%{
-          model: model,
-          tool_context: %{user_id: 42, tenant: "acme"},
-          tools: [check_context_tool],
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new(
+          %{
+            model: model,
+            tool_context: %{user_id: 42, tenant: "acme"},
+            tools: [check_context_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       state =
         State.new!(%{
@@ -93,8 +95,8 @@ defmodule Sagents.ToolContextIntegrationTest do
         })
 
       stub(ChatOpenAI, :call, fn _model, messages, _tools ->
-        case length(messages) do
-          2 ->
+        case Enum.any?(messages, &(&1.role == :tool)) do
+          false ->
             {:ok,
              [
                Message.new_assistant!(%{
@@ -108,18 +110,20 @@ defmodule Sagents.ToolContextIntegrationTest do
                })
              ]}
 
-          _other ->
+          true ->
             {:ok, [Message.new_assistant!("Done.")]}
         end
       end)
 
       {:ok, agent} =
-        Agent.new(%{
-          model: model,
-          tools: [check_context_tool],
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new(
+          %{
+            model: model,
+            tools: [check_context_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       state =
         State.new!(%{
@@ -149,8 +153,8 @@ defmodule Sagents.ToolContextIntegrationTest do
         })
 
       stub(ChatOpenAI, :call, fn _model, messages, _tools ->
-        case length(messages) do
-          2 ->
+        case Enum.any?(messages, &(&1.role == :tool)) do
+          false ->
             {:ok,
              [
                Message.new_assistant!(%{
@@ -164,20 +168,22 @@ defmodule Sagents.ToolContextIntegrationTest do
                })
              ]}
 
-          _other ->
+          true ->
             {:ok, [Message.new_assistant!("Done.")]}
         end
       end)
 
       {:ok, agent} =
-        Agent.new(%{
-          model: model,
-          # Caller tries to set "state" — internal must win
-          tool_context: %{state: "caller_value", user_id: 99},
-          tools: [check_context_tool],
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new(
+          %{
+            model: model,
+            # Caller tries to set "state" — internal must win
+            tool_context: %{state: "caller_value", user_id: 99},
+            tools: [check_context_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       state =
         State.new!(%{
@@ -209,8 +215,8 @@ defmodule Sagents.ToolContextIntegrationTest do
         })
 
       stub(ChatOpenAI, :call, fn _model, messages, _tools ->
-        case length(messages) do
-          2 ->
+        case Enum.any?(messages, &(&1.role == :tool)) do
+          false ->
             {:ok,
              [
                Message.new_assistant!(%{
@@ -224,18 +230,20 @@ defmodule Sagents.ToolContextIntegrationTest do
                })
              ]}
 
-          _other ->
+          true ->
             {:ok, [Message.new_assistant!("Done.")]}
         end
       end)
 
       {:ok, agent} =
-        Agent.new(%{
-          model: model,
-          tools: [check_context_tool],
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new(
+          %{
+            model: model,
+            tools: [check_context_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       state = State.new!(%{messages: [Message.new_user!("Go")]})
 
@@ -263,8 +271,8 @@ defmodule Sagents.ToolContextIntegrationTest do
         })
 
       stub(ChatOpenAI, :call, fn _model, messages, _tools ->
-        case length(messages) do
-          2 ->
+        case Enum.any?(messages, &(&1.role == :tool)) do
+          false ->
             {:ok,
              [
                Message.new_assistant!(%{
@@ -278,19 +286,21 @@ defmodule Sagents.ToolContextIntegrationTest do
                })
              ]}
 
-          _other ->
+          true ->
             {:ok, [Message.new_assistant!("Done.")]}
         end
       end)
 
       {:ok, agent} =
-        Agent.new(%{
-          model: model,
-          tool_context: %{agent_id: "caller-tried-to-set-this"},
-          tools: [check_context_tool],
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new(
+          %{
+            model: model,
+            tool_context: %{agent_id: "caller-tried-to-set-this"},
+            tools: [check_context_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       state = State.new!(%{messages: [Message.new_user!("Go")]})
 

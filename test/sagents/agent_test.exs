@@ -253,6 +253,41 @@ defmodule Sagents.AgentTest do
     end
   end
 
+  describe "new/2 options passed as attributes" do
+    test "raises when replace_default_middleware is in the attributes map" do
+      assert_raise ArgumentError, ~r/:replace_default_middleware/, fn ->
+        Agent.new(%{model: mock_model(), replace_default_middleware: true})
+      end
+    end
+
+    test "raises from new!/2 as well" do
+      assert_raise ArgumentError, ~r/:filesystem_opts/, fn ->
+        Agent.new!(%{model: mock_model(), filesystem_opts: [long_term_memory: true]})
+      end
+    end
+
+    test "raises for string keys" do
+      assert_raise ArgumentError, ~r/:interrupt_on/, fn ->
+        Agent.new(%{"model" => mock_model(), "interrupt_on" => %{"write_file" => true}})
+      end
+    end
+
+    test "names every misplaced option" do
+      error =
+        assert_raise ArgumentError, fn ->
+          Agent.new(%{model: mock_model(), todo_opts: [], subagent_opts: []})
+        end
+
+      assert error.message =~ ":todo_opts"
+      assert error.message =~ ":subagent_opts"
+    end
+
+    test "accepts the same options in the second argument" do
+      assert {:ok, %Agent{middleware: []}} =
+               Agent.new(%{model: mock_model()}, replace_default_middleware: true)
+    end
+  end
+
   describe "middleware composition - replace defaults" do
     test "uses only provided middleware when replace_default_middleware is true" do
       {:ok, agent} =
@@ -371,10 +406,12 @@ defmodule Sagents.AgentTest do
 
     test "executes with empty middleware" do
       {:ok, agent} =
-        Agent.new(%{
-          model: mock_model(),
+        Agent.new(
+          %{
+            model: mock_model()
+          },
           replace_default_middleware: true
-        })
+        )
 
       initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
 
@@ -461,11 +498,13 @@ defmodule Sagents.AgentTest do
       # Use a mode that always returns {:pause, chain} to simulate
       # infrastructure pause (e.g., node draining)
       {:ok, agent} =
-        Agent.new(%{
-          model: mock_model(),
-          mode: Sagents.Test.PauseMode,
+        Agent.new(
+          %{
+            model: mock_model(),
+            mode: Sagents.Test.PauseMode
+          },
           replace_default_middleware: true
-        })
+        )
 
       initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
 
@@ -481,11 +520,13 @@ defmodule Sagents.AgentTest do
       # The only supported shape: reason folded into custom_context (what
       # Sagents.Mode.Steps.normalize_pause/1 produces) with a 2-tuple pause
       {:ok, agent} =
-        Agent.new(%{
-          model: mock_model(),
-          mode: Sagents.Test.PauseContextMode,
+        Agent.new(
+          %{
+            model: mock_model(),
+            mode: Sagents.Test.PauseContextMode
+          },
           replace_default_middleware: true
-        })
+        )
 
       initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
 
@@ -648,7 +689,7 @@ defmodule Sagents.AgentTest do
          ]}
       end)
 
-      {:ok, agent} = Agent.new(%{model: mock_model(), replace_default_middleware: true})
+      {:ok, agent} = Agent.new(%{model: mock_model()}, replace_default_middleware: true)
       initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
 
       assert {:error, %LangChainError{type: "overloaded"}} =
@@ -670,7 +711,7 @@ defmodule Sagents.AgentTest do
          ]}
       end)
 
-      {:ok, agent} = Agent.new(%{model: mock_model(), replace_default_middleware: true})
+      {:ok, agent} = Agent.new(%{model: mock_model()}, replace_default_middleware: true)
       initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
 
       assert {:error, %LangChainError{type: "overloaded"}} =
@@ -713,7 +754,7 @@ defmodule Sagents.AgentTest do
         {:ok, [%Message{role: :assistant, content: "Partial answ", status: :length}]}
       end)
 
-      {:ok, agent} = Agent.new(%{model: mock_model(), replace_default_middleware: true})
+      {:ok, agent} = Agent.new(%{model: mock_model()}, replace_default_middleware: true)
       initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
 
       assert {:ok, %State{} = result_state} = Agent.execute(agent, initial_state)
@@ -980,11 +1021,13 @@ defmodule Sagents.AgentTest do
 
     test "agent with no middleware works correctly" do
       {:ok, agent} =
-        Agent.new(%{
-          model: mock_model(),
-          base_system_prompt: "Simple agent",
+        Agent.new(
+          %{
+            model: mock_model(),
+            base_system_prompt: "Simple agent"
+          },
           replace_default_middleware: true
-        })
+        )
 
       initial_state = State.new!(%{messages: [Message.new_user!("Hi")]})
       assert {:ok, result_state} = Agent.execute(agent, initial_state)
@@ -1725,10 +1768,10 @@ defmodule Sagents.AgentTest do
 
     test "dispatches to direct HITL when interrupt_data has action_requests" do
       {:ok, agent} =
-        Agent.new(%{
-          model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"}),
-          interrupt_on: %{"tool1" => :always}
-        })
+        Agent.new(
+          %{model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929"})},
+          interrupt_on: %{"tool1" => true}
+        )
 
       state =
         State.new!(%{

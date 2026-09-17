@@ -28,17 +28,16 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
       fallbacks: fallbacks
     ]
 
-    Agent.new!(%{
-      agent_id: agent_id,
-      model: mock_model(),
-      base_system_prompt: "Test agent",
-      replace_default_middleware: true,
-      middleware: [{ConversationTitle, middleware_config}]
-    })
+    Agent.new!(
+      %{
+        agent_id: agent_id,
+        model: mock_model(),
+        base_system_prompt: "Test agent",
+        middleware: [{ConversationTitle, middleware_config}]
+      },
+      replace_default_middleware: true
+    )
   end
-
-  # TODO: ISSUES:
-  # - replace_default_middleware: true and only the ConversationTitle middleware still adds all the file system tools.
 
   describe "middleware integration with AgentServer" do
     test "full integration: generates title after user message" do

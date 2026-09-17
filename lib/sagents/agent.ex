@@ -133,6 +133,17 @@ defmodule Sagents.Agent do
   ]
   @required_fields [:agent_id, :model]
 
+  # Keys `new/2` reads from its `opts` keyword list. Ecto's `cast/3` drops unknown
+  # keys, so one of these placed in `attrs` would be ignored without an error.
+  @option_keys [
+    :replace_default_middleware,
+    :todo_opts,
+    :filesystem_opts,
+    :summarization_opts,
+    :subagent_opts,
+    :interrupt_on
+  ]
+
   @doc """
   Create a new Agent.
 
@@ -181,6 +192,15 @@ defmodule Sagents.Agent do
   - `:summarization_opts` - Options for Summarization middleware (e.g., `[max_tokens_before_summary: 150_000, messages_to_keep: 8]`)
   - `:subagent_opts` - Options for SubAgent middleware
   - `:interrupt_on` - Map of tool names to interrupt configuration (default: nil)
+
+  Options belong in the second argument, not the attributes map. Passing one of them
+  as an attribute raises `ArgumentError`:
+
+      # Raises ArgumentError
+      Agent.new(%{model: model, replace_default_middleware: true})
+
+      # Correct
+      Agent.new(%{model: model}, replace_default_middleware: true)
 
   ### Human-in-the-loop configuration
 
@@ -268,6 +288,8 @@ defmodule Sagents.Agent do
       # end
   """
   def new(attrs \\ %{}, opts \\ []) do
+    reject_options_in_attrs!(attrs)
+
     %Agent{}
     |> cast(attrs, @create_fields)
     |> put_agent_id_if_missing()
@@ -318,6 +340,24 @@ defmodule Sagents.Agent do
     |> cast(attrs, @create_fields)
     |> validate_required(@required_fields)
   end
+
+  defp reject_options_in_attrs!(attrs) when is_map(attrs) do
+    misplaced =
+      Enum.filter(@option_keys, fn key ->
+        Map.has_key?(attrs, key) or Map.has_key?(attrs, Atom.to_string(key))
+      end)
+
+    if misplaced != [] do
+      raise ArgumentError,
+            "Agent.new/2 received #{Enum.map_join(misplaced, ", ", &inspect/1)} in the " <>
+              "attributes map. These are options and must be passed in the second " <>
+              "argument, e.g. Agent.new(%{model: model}, replace_default_middleware: true)"
+    end
+
+    :ok
+  end
+
+  defp reject_options_in_attrs!(_attrs), do: :ok
 
   defp put_agent_id_if_missing(changeset) do
     case get_field(changeset, :agent_id) do
