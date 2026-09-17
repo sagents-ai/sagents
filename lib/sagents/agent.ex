@@ -193,10 +193,11 @@ defmodule Sagents.Agent do
   - `:subagent_opts` - Options for SubAgent middleware
   - `:interrupt_on` - Map of tool names to interrupt configuration (default: nil)
 
-  Options belong in the second argument, not the attributes map. Passing one of them
-  as an attribute raises `ArgumentError`:
+  Options belong in the second argument, not the attributes map. `Ecto.Changeset.cast/3`
+  drops keys it does not recognize, so an option placed among the attributes is ignored.
+  Passing one there logs a warning and will raise in a future release:
 
-      # Raises ArgumentError
+      # Logs a warning, and replace_default_middleware has no effect
       Agent.new(%{model: model, replace_default_middleware: true})
 
       # Correct
@@ -288,7 +289,7 @@ defmodule Sagents.Agent do
       # end
   """
   def new(attrs \\ %{}, opts \\ []) do
-    reject_options_in_attrs!(attrs)
+    warn_options_in_attrs(attrs)
 
     %Agent{}
     |> cast(attrs, @create_fields)
@@ -341,23 +342,25 @@ defmodule Sagents.Agent do
     |> validate_required(@required_fields)
   end
 
-  defp reject_options_in_attrs!(attrs) when is_map(attrs) do
+  defp warn_options_in_attrs(attrs) when is_map(attrs) do
     misplaced =
       Enum.filter(@option_keys, fn key ->
         Map.has_key?(attrs, key) or Map.has_key?(attrs, Atom.to_string(key))
       end)
 
     if misplaced != [] do
-      raise ArgumentError,
-            "Agent.new/2 received #{Enum.map_join(misplaced, ", ", &inspect/1)} in the " <>
-              "attributes map. These are options and must be passed in the second " <>
-              "argument, e.g. Agent.new(%{model: model}, replace_default_middleware: true)"
+      Logger.warning(
+        "Agent.new/2 received #{Enum.map_join(misplaced, ", ", &inspect/1)} in the " <>
+          "attributes map. These are options and must be passed in the second " <>
+          "argument, e.g. Agent.new(%{model: model}, replace_default_middleware: true). " <>
+          "The values are ignored where they are and this will raise in a future release."
+      )
     end
 
     :ok
   end
 
-  defp reject_options_in_attrs!(_attrs), do: :ok
+  defp warn_options_in_attrs(_attrs), do: :ok
 
   defp put_agent_id_if_missing(changeset) do
     case get_field(changeset, :agent_id) do
