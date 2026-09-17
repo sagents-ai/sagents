@@ -34,22 +34,24 @@ defmodule Sagents.Middleware.PatchToolCalls do
   ## Usage
 
       # Add to agent with default middleware
-      {:ok, agent} = Agent.new(
+      {:ok, agent} = Agent.new(%{
         model: model,
         middleware: [PatchToolCalls]
-      )
+      })
 
       # Or with custom middleware stack
       {:ok, agent} = Agent.new(
-        model: model,
-        replace_default_middleware: true,
-        middleware: [
-          TodoList,
-          Filesystem,
-          PatchToolCalls,  # Position before HITL
-          HumanInTheLoop,
-          MyMiddleware
-        ]
+        %{
+          model: model,
+          middleware: [
+            TodoList,
+            FileSystem,
+            PatchToolCalls,  # Position before HITL
+            HumanInTheLoop,
+            MyMiddleware
+          ]
+        },
+        replace_default_middleware: true
       )
 
   ## Example

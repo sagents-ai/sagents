@@ -22,19 +22,24 @@ defmodule Sagents.Agent do
 
       # Append custom middleware to defaults
       {:ok, agent} = Agent.new(%{
+        model: model,
         middleware: [MyCustomMiddleware]
       })
 
       # Customize default middleware
-      {:ok, agent} = Agent.new(%{
+      {:ok, agent} = Agent.new(
+        %{model: model},
         filesystem_opts: [long_term_memory: true]
-      })
+      )
 
       # Provide complete middleware stack
-      {:ok, agent} = Agent.new(%{
-        replace_default_middleware: true,
-        middleware: [{MyMiddleware, []}]
-      })
+      {:ok, agent} = Agent.new(
+        %{
+          model: model,
+          middleware: [{MyMiddleware, []}]
+        },
+        replace_default_middleware: true
+      )
   """
 
   use Ecto.Schema
