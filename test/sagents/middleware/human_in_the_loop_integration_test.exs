@@ -8,6 +8,7 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
   alias Sagents.State
   alias LangChain.Message
   alias LangChain.Message.ToolCall
+  alias LangChain.Message.ToolResult
   alias LangChain.Function
   alias LangChain.ChatModels.ChatAnthropic
 
@@ -313,6 +314,58 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
       end
     end
 
+    test "agent resume completes until_tool when the approved call is the target tool" do
+      test_pid = self()
+
+      submit_tool =
+        Function.new!(%{
+          name: "submit_report",
+          description: "Submit a report",
+          parameters_schema: %{
+            type: "object",
+            properties: %{"title" => %{type: "string"}}
+          },
+          function: fn _args, _context -> {:ok, "Report submitted"} end
+        })
+
+      tool_call =
+        ToolCall.new!(%{
+          call_id: "submit_call",
+          name: "submit_report",
+          arguments: %{"title" => "Report"}
+        })
+
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        send(test_pid, :llm_called)
+        {:ok, [Message.new_assistant!(%{tool_calls: [tool_call]})]}
+      end)
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: create_test_model(),
+            tools: [submit_tool],
+            middleware: [{HumanInTheLoop, [interrupt_on: %{"submit_report" => true}]}]
+          },
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Write the report")]})
+      opts = [until_tool: "submit_report", max_runs: 1]
+
+      assert {:interrupt, interrupted_state, _interrupt_data} =
+               Agent.execute(agent, initial_state, opts)
+
+      assert_received :llm_called
+
+      assert {:ok, final_state, %ToolResult{name: "submit_report", is_error: false}} =
+               Agent.resume(agent, interrupted_state, [%{type: :approve}], opts)
+
+      assert [_user, _assistant, %Message{role: :tool}] = final_state.messages
+      refute_received :llm_called
+    end
+
     test "agent resume handles edit decision" do
       # Mock LLM to return a tool call
       tool_call =
@@ -560,15 +613,21 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
 
   describe "configuration validation" do
     test "accepts valid interrupt_on map" do
-      assert {:ok, _agent} =
-               Agent.new(%{
-                 model: create_test_model(),
-                 tools: [create_write_file_tool()],
+      assert {:ok, agent} =
+               Agent.new(
+                 %{
+                   model: create_test_model(),
+                   tools: [create_write_file_tool()]
+                 },
                  interrupt_on: %{
                    "write_file" => true,
                    "delete_file" => %{allowed_decisions: [:approve, :reject]}
                  }
-               })
+               )
+
+      assert Enum.any?(agent.middleware, fn %MiddlewareEntry{module: module} ->
+               module == HumanInTheLoop
+             end)
     end
 
     test "handles empty interrupt_on map by not adding middleware" do
@@ -589,11 +648,13 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
 
     test "handles nil interrupt_on by not adding middleware" do
       assert {:ok, agent} =
-               Agent.new(%{
-                 model: create_test_model(),
-                 tools: [create_write_file_tool()],
+               Agent.new(
+                 %{
+                   model: create_test_model(),
+                   tools: [create_write_file_tool()]
+                 },
                  interrupt_on: nil
-               })
+               )
 
       refute Enum.any?(agent.middleware, fn %MiddlewareEntry{module: module} ->
                module == HumanInTheLoop

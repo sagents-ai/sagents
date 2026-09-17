@@ -22,13 +22,15 @@ defmodule Sagents.SubAgentToolInterruptResumeTest do
   end
 
   defp test_agent do
-    Agent.new!(%{
-      model: test_model(),
-      base_system_prompt: "Test agent",
-      replace_default_middleware: true,
-      middleware: [],
-      tools: [test_tool()]
-    })
+    Agent.new!(
+      %{
+        model: test_model(),
+        base_system_prompt: "Test agent",
+        middleware: [],
+        tools: [test_tool()]
+      },
+      replace_default_middleware: true
+    )
   end
 
   defp interrupted_subagent(interrupt_data) do

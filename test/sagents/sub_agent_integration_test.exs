@@ -66,11 +66,13 @@ defmodule Sagents.SubAgentIntegrationTest do
       # Create main agent with SubAgent middleware
       # Don't replace default middleware so SubAgent middleware gets added automatically
       {:ok, agent} =
-        Agent.new(%{
-          model: test_model(),
-          system_prompt: "You delegate research",
+        Agent.new(
+          %{
+            model: test_model(),
+            system_prompt: "You delegate research"
+          },
           subagent_opts: [subagents: [researcher_config]]
-        })
+        )
 
       # Verify agent was created successfully
       assert %Agent{} = agent
@@ -141,14 +143,16 @@ defmodule Sagents.SubAgentIntegrationTest do
     test "SubAgent extracts interrupt_on configuration from middleware" do
       # Create agent with HITL middleware
       agent =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Test",
-          replace_default_middleware: true,
-          middleware: [
-            {HumanInTheLoop, [interrupt_on: %{"dangerous_tool" => true}]}
-          ]
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            system_prompt: "Test",
+            middleware: [
+              {HumanInTheLoop, [interrupt_on: %{"dangerous_tool" => true}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
 
       # Create SubAgent from this agent config
       subagent =
@@ -168,12 +172,14 @@ defmodule Sagents.SubAgentIntegrationTest do
 
     test "SubAgent without HITL has empty interrupt_on" do
       agent =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Test",
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            system_prompt: "Test",
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       subagent =
         SubAgent.new_from_config(
@@ -191,12 +197,14 @@ defmodule Sagents.SubAgentIntegrationTest do
   describe "SubAgent execution states" do
     test "SubAgent transitions through correct states" do
       agent =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Test",
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            system_prompt: "Test",
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       subagent =
         SubAgent.new_from_config(
@@ -256,12 +264,14 @@ defmodule Sagents.SubAgentIntegrationTest do
 
       # Compiled subagent
       compiled_agent =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Compiled",
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            system_prompt: "Compiled",
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       compiled_config =
         SubAgent.Compiled.new!(%{
@@ -309,12 +319,14 @@ defmodule Sagents.SubAgentIntegrationTest do
   describe "error handling" do
     test "SubAgent.execute returns error for non-idle status" do
       agent =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Test",
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            system_prompt: "Test",
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       subagent =
         SubAgent.new_from_config(
@@ -332,12 +344,14 @@ defmodule Sagents.SubAgentIntegrationTest do
 
     test "SubAgent.resume returns error for non-interrupted status" do
       agent =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Test",
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            system_prompt: "Test",
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       subagent =
         SubAgent.new_from_config(
@@ -372,12 +386,14 @@ defmodule Sagents.SubAgentIntegrationTest do
   describe "result extraction" do
     test "extract_result returns content from completed SubAgent" do
       agent =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Test",
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            system_prompt: "Test",
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       subagent =
         SubAgent.new_from_config(
@@ -407,12 +423,14 @@ defmodule Sagents.SubAgentIntegrationTest do
 
     test "extract_result returns error for non-completed SubAgent" do
       agent =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Test",
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            system_prompt: "Test",
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       subagent =
         SubAgent.new_from_config(

@@ -2,6 +2,12 @@
 Application.put_env(:langchain, :anthropic_key, System.get_env("ANTHROPIC_API_KEY", ""))
 Application.put_env(:langchain, :openai_key, System.get_env("OPENAI_API_KEY", ""))
 
+# The OpenTelemetry SDK is a test dependency, so it is loaded for every test run.
+# LocalCluster starts each loaded application on its peer nodes with this node's
+# env, so without an exporter setting the cluster tests boot the SDK on every
+# peer with its default OTLP exporter, which is not installed.
+Application.put_env(:opentelemetry, :traces_exporter, :none)
+
 # Configure Mimic for mocking in tests
 Mimic.copy(Req)
 Mimic.copy(LangChain.ChatModels.ChatAnthropic)

@@ -68,13 +68,15 @@ defmodule Sagents.AgentServerDisplayTransformTest do
     model = ChatAnthropic.new!(%{model: "claude-sonnet-4-6", api_key: "test_key"})
 
     agent =
-      Agent.new!(%{
-        agent_id: agent_id,
-        model: model,
-        base_system_prompt: "Test agent",
-        replace_default_middleware: true,
-        middleware: middleware
-      })
+      Agent.new!(
+        %{
+          agent_id: agent_id,
+          model: model,
+          base_system_prompt: "Test agent",
+          middleware: middleware
+        },
+        replace_default_middleware: true
+      )
 
     supervisor_config = [
       name: AgentSupervisor.get_name(agent_id),

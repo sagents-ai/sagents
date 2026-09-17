@@ -547,13 +547,15 @@ defmodule Sagents.ForkTest do
       model = ChatOpenAI.new!(%{model: "gpt-4", stream: false})
 
       parent =
-        Agent.new!(%{
-          agent_id: "fork-test-parent",
-          model: model,
-          base_system_prompt: "You are the parent agent.",
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new!(
+          %{
+            agent_id: "fork-test-parent",
+            model: model,
+            base_system_prompt: "You are the parent agent.",
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       start_server(parent, initial_state: State.new!(%{messages: conversation()}))
 
@@ -573,14 +575,16 @@ defmodule Sagents.ForkTest do
         })
 
       fork_agent =
-        Agent.new!(%{
-          agent_id: "fork-test-child",
-          model: model,
-          base_system_prompt: "You are the fork. Answer only about Spain.",
-          tools: [fork_tool],
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new!(
+          %{
+            agent_id: "fork-test-child",
+            model: model,
+            base_system_prompt: "You are the fork. Answer only about Spain.",
+            tools: [fork_tool],
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       {:ok, _pid} =
         AgentServer.start_link_from_state(stored,
@@ -640,13 +644,15 @@ defmodule Sagents.ForkTest do
         |> Fork.to_stored()
 
       fork_agent =
-        Agent.new!(%{
-          agent_id: "fork-test-display",
-          model: model,
-          base_system_prompt: "Fork.",
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new!(
+          %{
+            agent_id: "fork-test-display",
+            model: model,
+            base_system_prompt: "Fork.",
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       {:ok, _pid} =
         AgentServer.start_link_from_state(stored,

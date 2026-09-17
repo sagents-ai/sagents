@@ -2,7 +2,7 @@ defmodule Sagents.MixProject do
   use Mix.Project
 
   @source_url "https://github.com/sagents-ai/sagents"
-  @version "0.14.1"
+  @version "0.14.3"
 
   def project do
     [
@@ -14,6 +14,7 @@ defmodule Sagents.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
+      usage_rules: usage_rules(),
       dialyzer: [
         ignore_warnings: ".dialyzer_ignore.exs",
         plt_file: {:no_warn, "priv/plts/project.plt"},
@@ -49,7 +50,7 @@ defmodule Sagents.MixProject do
   defp deps do
     [
       # Core dependency - the LangChain library
-      {:langchain, ">= 0.8.11"},
+      {:langchain, ">= 0.14.1"},
       # {:langchain, path: "../my_langchain"},
 
       # Required dependencies
@@ -66,16 +67,26 @@ defmodule Sagents.MixProject do
 
       # Test dependencies
       {:mimic, "~> 1.8", only: :test},
+      {:opentelemetry_api, "~> 1.4", only: :test},
+      {:opentelemetry, "~> 1.5", only: :test, runtime: false},
       {:local_cluster, "~> 2.0", only: :test},
 
       # AGENTS.md file maintenance
-      {:usage_rules, "~> 0.1", only: :dev, runtime: false},
+      {:usage_rules, "~> 1.2 and >= 1.2.8", only: :dev, runtime: false},
 
       # Static analysis
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false, warn_if_outdated: true},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
+    ]
+  end
+
+  # Sources `mix usage_rules.sync` writes into AGENTS.md.
+  defp usage_rules do
+    [
+      file: "AGENTS.md",
+      usage_rules: [{:usage_rules, sub_rules: ["elixir", "otp"]}]
     ]
   end
 

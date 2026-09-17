@@ -84,6 +84,8 @@ Sub-agents inherit the parent's `:otel_attributes` and conversation id automatic
 | `gen_ai.agent.id` | The sub-agent's own id |
 | `sagents.parent_agent_id` | The parent agent's id |
 
+A sub-agent's spans belong to the parent's trace, nested under the `execute_tool` span of the tool that started it. That holds when a sub-agent is interrupted and resumed later: each run nests under the tool call that ran it.
+
 So a multi-agent trace shows which agent produced each span while still carrying the tenant context from the top. A sub-agent's own `:otel_attributes` override the parent's on collision; its identity attributes are set by Sagents and cannot be overridden.
 
 ### Enriching a span mid-run

@@ -30,12 +30,14 @@ defmodule Sagents.SubAgentTest do
 
   # Helper to create a test agent
   defp test_agent do
-    Agent.new!(%{
-      model: test_model(),
-      base_system_prompt: "Test agent",
-      replace_default_middleware: true,
-      middleware: []
-    })
+    Agent.new!(
+      %{
+        model: test_model(),
+        base_system_prompt: "Test agent",
+        middleware: []
+      },
+      replace_default_middleware: true
+    )
   end
 
   describe "SubAgentConfig.new/1" do
@@ -636,6 +638,20 @@ defmodule Sagents.SubAgentTest do
       assert agent.model == custom_model
     end
 
+    test "Config subagent preserves max_runs on the built agent" do
+      config =
+        SubAgentConfig.new!(%{
+          name: "bounded-agent",
+          description: "Bounded agent",
+          system_prompt: "Prompt",
+          tools: [test_tool()],
+          max_runs: 7
+        })
+
+      assert {:ok, registry} = SubAgent.build_agent_map([config], test_model(), [])
+      assert registry["bounded-agent"].max_runs == 7
+    end
+
     test "Config subagent gets middleware from config" do
       model = test_model()
 
@@ -1141,16 +1157,46 @@ defmodule Sagents.SubAgentTest do
       assert subagent.interrupt_on == %{}
     end
 
+    test "inherits max_runs from the configured agent" do
+      agent_config = %{test_agent() | max_runs: 7}
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config
+        )
+
+      assert subagent.max_runs == 7
+      assert Keyword.get(SubAgent.build_mode_opts(subagent), :max_runs) == 7
+    end
+
+    test "explicit max_runs overrides the configured agent" do
+      agent_config = %{test_agent() | max_runs: 7}
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          agent_config: agent_config,
+          max_runs: 3
+        )
+
+      assert subagent.max_runs == 3
+    end
+
     test "stores interrupt_on from agent_config middleware" do
       agent_config =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Test",
-          replace_default_middleware: true,
-          middleware: [
-            {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"dangerous_tool" => true}]}
-          ]
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            system_prompt: "Test",
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"dangerous_tool" => true}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
 
       subagent =
         SubAgent.new_from_config(
@@ -1187,14 +1233,16 @@ defmodule Sagents.SubAgentTest do
 
     test "stores interrupt_on from compiled_agent middleware" do
       compiled_agent =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Test",
-          replace_default_middleware: true,
-          middleware: [
-            {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"write_file" => true}]}
-          ]
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            system_prompt: "Test",
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"write_file" => true}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
 
       subagent =
         SubAgent.new_from_compiled(
@@ -1679,14 +1727,16 @@ defmodule Sagents.SubAgentTest do
 
     test "returns opts with middleware entry when HITL interrupt_on is set" do
       agent_config =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Test",
-          replace_default_middleware: true,
-          middleware: [
-            {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"dangerous_tool" => true}]}
-          ]
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            system_prompt: "Test",
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"dangerous_tool" => true}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
 
       subagent =
         SubAgent.new_from_config(
@@ -1726,14 +1776,16 @@ defmodule Sagents.SubAgentTest do
 
     test "returns opts with both middleware and until_tool when both are set" do
       agent_config =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Test",
-          replace_default_middleware: true,
-          middleware: [
-            {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"write_file" => true}]}
-          ]
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            system_prompt: "Test",
+            middleware: [
+              {Sagents.Middleware.HumanInTheLoop, [interrupt_on: %{"write_file" => true}]}
+            ]
+          },
+          replace_default_middleware: true
+        )
 
       subagent =
         SubAgent.new_from_config(

@@ -184,7 +184,11 @@ defmodule Sagents.SubAgentServer do
   @spec execute(String.t()) ::
           {:ok, String.t()} | {:ok, String.t(), term()} | {:interrupt, map()} | {:error, term()}
   def execute(sub_agent_id) when is_binary(sub_agent_id) do
-    GenServer.call(get_name(sub_agent_id), :execute, :infinity)
+    GenServer.call(
+      get_name(sub_agent_id),
+      {:with_otel_context, capture_otel_context(), :execute},
+      :infinity
+    )
   end
 
   @doc """
@@ -216,7 +220,11 @@ defmodule Sagents.SubAgentServer do
   @spec resume(String.t(), list(map())) ::
           {:ok, String.t()} | {:ok, String.t(), term()} | {:interrupt, map()} | {:error, term()}
   def resume(sub_agent_id, decisions) when is_binary(sub_agent_id) and is_list(decisions) do
-    GenServer.call(get_name(sub_agent_id), {:resume, decisions}, :infinity)
+    GenServer.call(
+      get_name(sub_agent_id),
+      {:with_otel_context, capture_otel_context(), {:resume, decisions}},
+      :infinity
+    )
   catch
     :exit, {:noproc, _info} ->
       {:error, "SubAgent process #{sub_agent_id} is no longer running"}
@@ -375,7 +383,26 @@ defmodule Sagents.SubAgentServer do
     {:ok, server_state}
   end
 
+  # `execute/1` and `resume/2` carry the caller's OpenTelemetry context. The
+  # caller is the parent's tool execution, blocked on this call, so attaching its
+  # context here nests the sub-agent's spans under the parent's `execute_tool`
+  # span in the same trace. The server outlives any one call, so its own context
+  # is restored afterwards and a later `resume/2` parents under its own caller.
   @impl true
+  def handle_call({:with_otel_context, nil, request}, from, server_state) do
+    handle_call(request, from, server_state)
+  end
+
+  def handle_call({:with_otel_context, context, request}, from, server_state) do
+    token = apply(OpenTelemetry.Ctx, :attach, [context])
+
+    try do
+      handle_call(request, from, server_state)
+    after
+      apply(OpenTelemetry.Ctx, :detach, [token])
+    end
+  end
+
   def handle_call(:execute, _from, %ServerState{subagent: subagent} = server_state) do
     # Broadcast status change to running
     broadcast_subagent_event(server_state, {:subagent_status_changed, :running})
@@ -758,6 +785,14 @@ defmodule Sagents.SubAgentServer do
       |> List.last()
     else
       "Unknown"
+    end
+  end
+
+  # Returns nil when `opentelemetry_api` is not loaded. `apply/3` keeps
+  # `OpenTelemetry.Ctx` from being a compile-time dependency.
+  defp capture_otel_context do
+    if Code.ensure_loaded?(OpenTelemetry.Ctx) do
+      apply(OpenTelemetry.Ctx, :get_current, [])
     end
   end
 end

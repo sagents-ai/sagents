@@ -27,13 +27,15 @@ defmodule Sagents.SubAgentToolContextTest do
   defp bare_agent(opts \\ []) do
     tools = Keyword.get(opts, :tools, [])
 
-    Agent.new!(%{
-      model: test_model(),
-      system_prompt: "Test",
-      tools: tools,
-      replace_default_middleware: true,
-      middleware: []
-    })
+    Agent.new!(
+      %{
+        model: test_model(),
+        system_prompt: "Test",
+        tools: tools,
+        middleware: []
+      },
+      replace_default_middleware: true
+    )
   end
 
   describe "tool_context propagation via new_from_config" do

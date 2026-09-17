@@ -37,17 +37,19 @@ defmodule Sagents do
       })
 
       # Customize default middleware
-      {:ok, agent} = Agent.new(%{
-        model: model,
+      {:ok, agent} = Agent.new(
+        %{model: model},
         filesystem_opts: [long_term_memory: true]
-      })
+      )
 
       # Provide complete middleware stack
-      {:ok, agent} = Agent.new(%{
-        model: model,
-        replace_default_middleware: true,
-        middleware: [MyMiddleware1, MyMiddleware2]
-      })
+      {:ok, agent} = Agent.new(
+        %{
+          model: model,
+          middleware: [MyMiddleware1, MyMiddleware2]
+        },
+        replace_default_middleware: true
+      )
 
   ## Creating Custom Middleware
 

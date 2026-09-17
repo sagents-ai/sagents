@@ -7,12 +7,58 @@ defmodule Sagents.Modes.AgentExecution do
 
   ## Pipeline
 
-  1. Call the LLM
-  2. Check for HITL interrupts (if HumanInTheLoop middleware present)
-  3. Execute tools
-  4. Propagate state updates from tool results
-  5. Check if target tool was called (if `until_tool` is set)
-  6. Loop if `needs_response` is true, or error if until_tool contract violated
+  1. Check the `:max_runs` budget before starting another LLM call
+  2. Expand any tool result from the previous turn that asked to arrive as
+     messages
+  3. Call the LLM
+  4. Check for HITL interrupts (if HumanInTheLoop middleware present)
+  5. Execute tools
+  6. Propagate state updates from tool results
+  7. Check if target tool was called (if `until_tool` is set)
+  8. Loop if `needs_response` is true, or error if until_tool contract violated
+
+  The budget is checked before a call, never after one, so the tools from the
+  final permitted response still execute. A target tool returned on that
+  response satisfies `until_tool` rather than ending the run with
+  `exceeded_max_runs`.
+
+  ## Resuming after human approval
+
+  A resume executes approved tool calls outside this pipeline, then hands the
+  mode a chain whose last message is that tool message.
+  `Sagents.SubAgent.resume/3` does this on the chain it kept from the
+  interrupted run. `Sagents.Middleware.HumanInTheLoop` does it for
+  `Sagents.Agent.resume/4`, which builds a fresh chain with a fresh budget.
+
+  A chain that arrives ending in a tool message has its results pass through
+  steps 6 and 7, plus the tool-interrupt check, before the loop starts. Their
+  state updates reach the chain's state, a nested interrupt surfaces, and an
+  approved target tool completes the run without another LLM call, even when
+  the budget is spent.
+
+  ## Tool results that expand into messages
+
+  A tool can return material as *messages* rather than as tool-result content,
+  choosing the role it arrives at, and have the model read them on its very next
+  LLM call. A tool asks for that with `LangChain.MessageExpansion.expand/3`;
+  step 2 applies it.
+
+  Step 2 comes at the top of the loop, not the bottom, and both halves of that
+  matter:
+
+  - **Before the LLM call**, which is the guarantee the tool is relying on. A
+    tool that says "this arrives next" while the model keeps working in the same
+    run is making a promise nothing keeps, and a model handed a description of
+    material it does not have will write the material itself.
+  - **After the loop boundary**, so every step that decides whether the run is
+    over reads a `last_message` the model produced or the tools returned. A turn
+    that interrupted or satisfied an `until_tool` contract ends without
+    expanding anything into it.
+
+  Running at the top of the loop also covers the results a resume produces.
+  When those results do not end the run, step 2 is the next thing to see them,
+  so a tool gated behind human approval expands on the same terms as one that
+  is not.
 
   ## Options
 
@@ -57,21 +103,24 @@ defmodule Sagents.Modes.AgentExecution do
   import Sagents.Mode.Steps
 
   alias LangChain.Chains.LLMChain
+  alias LangChain.Message
 
   @impl true
   def run(%LLMChain{} = chain, opts) do
     chain = ensure_mode_state(chain)
     opts = normalize_until_tool_opts(opts)
 
-    chain
-    |> do_run(opts)
+    {:continue, chain}
+    |> maybe_process_resumed_tool_results(opts)
+    |> continue_execution(opts)
     |> normalize_pause()
   end
 
   defp do_run(chain, opts) do
     {:continue, chain}
-    |> call_llm()
     |> check_max_runs(Keyword.put_new(opts, :max_runs, 50))
+    |> expand_tool_results(opts)
+    |> call_llm()
     |> check_pause(opts)
     |> check_pre_tool_hitl(opts)
     |> execute_tools()
@@ -103,6 +152,23 @@ defmodule Sagents.Modes.AgentExecution do
   defp normalize_tool_names([]), do: nil
   defp normalize_tool_names(name) when is_binary(name), do: [name]
   defp normalize_tool_names(names) when is_list(names), do: names
+
+  # A chain that arrives ending in a tool message carries results no pass of
+  # the loop has checked: tool calls a resume executed outside this pipeline.
+  defp maybe_process_resumed_tool_results(
+         {:continue, %LLMChain{last_message: %Message{role: :tool}}} = pipeline_result,
+         opts
+       ) do
+    pipeline_result
+    |> propagate_state(opts)
+    |> check_tool_interrupts(opts)
+    |> maybe_check_until_tool(opts)
+  end
+
+  defp maybe_process_resumed_tool_results(pipeline_result, _opts), do: pipeline_result
+
+  defp continue_execution({:continue, chain}, opts), do: do_run(chain, opts)
+  defp continue_execution(terminal, _opts), do: terminal
 
   defp maybe_check_until_tool(pipeline_result, opts) do
     cond do

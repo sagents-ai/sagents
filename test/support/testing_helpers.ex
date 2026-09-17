@@ -135,11 +135,11 @@ defmodule Sagents.TestingHelpers do
           agent_id: generate_test_agent_id(),
           model: mock_model(),
           base_system_prompt: "Test agent",
-          replace_default_middleware: true,
           middleware: []
         },
         Enum.into(opts, %{})
-      )
+      ),
+      replace_default_middleware: true
     )
   end
 
@@ -187,13 +187,15 @@ defmodule Sagents.TestingHelpers do
       })
 
     agent =
-      Agent.new!(%{
-        agent_id: agent_id,
-        model: model,
-        base_system_prompt: "Test agent",
-        replace_default_middleware: true,
-        middleware: []
-      })
+      Agent.new!(
+        %{
+          agent_id: agent_id,
+          model: model,
+          base_system_prompt: "Test agent",
+          middleware: []
+        },
+        replace_default_middleware: true
+      )
 
     # Build supervisor configuration (similar to Coordinator pattern)
     supervisor_name = AgentSupervisor.get_name(agent_id)
