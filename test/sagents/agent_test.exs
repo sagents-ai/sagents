@@ -254,37 +254,62 @@ defmodule Sagents.AgentTest do
   end
 
   describe "new/2 options passed as attributes" do
-    test "raises when replace_default_middleware is in the attributes map" do
-      assert_raise ArgumentError, ~r/:replace_default_middleware/, fn ->
-        Agent.new(%{model: mock_model(), replace_default_middleware: true})
-      end
+    test "warns when replace_default_middleware is in the attributes map" do
+      log =
+        capture_log(fn ->
+          assert {:ok, agent} =
+                   Agent.new(%{model: mock_model(), replace_default_middleware: true})
+
+          # The option is ignored where it is, so the defaults are still built.
+          assert agent.middleware != []
+        end)
+
+      assert log =~ ":replace_default_middleware"
+      assert log =~ "must be passed in the second argument"
     end
 
-    test "raises from new!/2 as well" do
-      assert_raise ArgumentError, ~r/:filesystem_opts/, fn ->
-        Agent.new!(%{model: mock_model(), filesystem_opts: [long_term_memory: true]})
-      end
+    test "warns from new!/2 as well" do
+      log =
+        capture_log(fn ->
+          assert %Agent{} =
+                   Agent.new!(%{model: mock_model(), filesystem_opts: [long_term_memory: true]})
+        end)
+
+      assert log =~ ":filesystem_opts"
     end
 
-    test "raises for string keys" do
-      assert_raise ArgumentError, ~r/:interrupt_on/, fn ->
-        Agent.new(%{"model" => mock_model(), "interrupt_on" => %{"write_file" => true}})
-      end
+    test "warns for string keys" do
+      log =
+        capture_log(fn ->
+          assert {:ok, %Agent{}} =
+                   Agent.new(%{
+                     "model" => mock_model(),
+                     "interrupt_on" => %{"write_file" => true}
+                   })
+        end)
+
+      assert log =~ ":interrupt_on"
     end
 
     test "names every misplaced option" do
-      error =
-        assert_raise ArgumentError, fn ->
-          Agent.new(%{model: mock_model(), todo_opts: [], subagent_opts: []})
-        end
+      log =
+        capture_log(fn ->
+          assert {:ok, %Agent{}} =
+                   Agent.new(%{model: mock_model(), todo_opts: [], subagent_opts: []})
+        end)
 
-      assert error.message =~ ":todo_opts"
-      assert error.message =~ ":subagent_opts"
+      assert log =~ ":todo_opts"
+      assert log =~ ":subagent_opts"
     end
 
-    test "accepts the same options in the second argument" do
-      assert {:ok, %Agent{middleware: []}} =
-               Agent.new(%{model: mock_model()}, replace_default_middleware: true)
+    test "options in the second argument take effect without warning" do
+      log =
+        capture_log(fn ->
+          assert {:ok, %Agent{middleware: []}} =
+                   Agent.new(%{model: mock_model()}, replace_default_middleware: true)
+        end)
+
+      refute log =~ "must be passed in the second argument"
     end
   end
 
