@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.14.2
+
+A tool can now deliver material as conversation messages, and the model reads
+them on its very next LLM call in the same run.
+
+No breaking changes, but this release requires LangChain v0.14.1 or later.
+
+### Upgrading from v0.14.1 - v0.14.2
+
+Upgrade `langchain` to v0.14.1 or later alongside `sagents`:
+
+```
+mix deps.update langchain sagents
+```
+
+### Added
+
+- **Tool results that expand into messages.** A tool that returns
+  `LangChain.MessageExpansion.expand/3` has its result expanded into messages
+  (at the roles it chooses) before the next LLM call, and its tool result is
+  trimmed to the short `result_content`. The expansion runs as the first step of
+  `Sagents.Modes.AgentExecution`, so tools approved through `HumanInTheLoop`
+  expand on resume just like ungated tools. A turn that interrupts or satisfies
+  an `until_tool` contract ends without expanding. Expanded messages are saved in
+  `Sagents.State` but fire no `:on_message_processed` callback, so they produce
+  no transcript rows.
+  [#189](https://github.com/sagents-ai/sagents/pull/189)
+- Docs and a `@spec` for `Sagents.Subscriber.subscribe_to_agent/4`.
+  [#186](https://github.com/sagents-ai/sagents/pull/186)
+
 ## v0.14.1
 
 A newly started agent is now reachable by every caller by the time
