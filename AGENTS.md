@@ -214,19 +214,9 @@ custom classes must fully style the input
    - Instead of sleeping to synchronize before the next call, **always** use a synchronous call to ensure the process has handled prior messages. For AgentServer tests, prefer `_state = AgentServer.get_state(agent_id)` over `:sys.get_state/1` since it accepts the agent_id directly and provides the same synchronization guarantee via `GenServer.call`
 
 <!-- usage-rules-start -->
-<!-- usage-rules-header -->
-# Usage Rules
-
-**IMPORTANT**: Consult these usage rules early and often when working with the packages listed below.
-Before attempting to use any of these packages or to discover if you should use them, review their
-usage rules to understand the correct patterns, conventions, and best practices.
-<!-- usage-rules-header-end -->
-
-
-
 <!-- usage_rules-start -->
 ## usage_rules usage
-_A dev tool for Elixir projects to gather LLM usage rules from dependencies_
+_A config-driven dev tool for Elixir projects to manage AGENTS.md files and agent skills from dependencies_
 
 ## Using Usage Rules
 
@@ -253,7 +243,7 @@ mix usage_rules.docs Enum.zip/1
 
 ## Searching Documentation
 
-You should also consult the documentation of any tools you are using, early and often. The best
+You should also consult the documentation of any tools you are using, early and often. The best 
 way to accomplish this is to use the `usage_rules.search_docs` mix task. Once you have
 found what you are looking for, use the links in the search results to get more detail. For example:
 

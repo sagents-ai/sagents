@@ -14,6 +14,7 @@ defmodule Sagents.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
+      usage_rules: usage_rules(),
       dialyzer: [
         ignore_warnings: ".dialyzer_ignore.exs",
         plt_file: {:no_warn, "priv/plts/project.plt"},
@@ -69,13 +70,21 @@ defmodule Sagents.MixProject do
       {:local_cluster, "~> 2.0", only: :test},
 
       # AGENTS.md file maintenance
-      {:usage_rules, "~> 0.1", only: :dev, runtime: false},
+      {:usage_rules, "~> 1.2 and >= 1.2.8", only: :dev, runtime: false},
 
       # Static analysis
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false, warn_if_outdated: true},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
+    ]
+  end
+
+  # Sources `mix usage_rules.sync` writes into AGENTS.md.
+  defp usage_rules do
+    [
+      file: "AGENTS.md",
+      usage_rules: [{:usage_rules, sub_rules: ["elixir", "otp"]}]
     ]
   end
 
