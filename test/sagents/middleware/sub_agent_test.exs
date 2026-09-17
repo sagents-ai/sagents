@@ -1583,12 +1583,14 @@ defmodule Sagents.Middleware.SubAgentTest do
       config_subagent = build_subagent_config("config_task", "Config-based task")
 
       compiled_agent =
-        Agent.new!(%{
-          model: test_model(),
-          system_prompt: "Compiled prompt",
-          replace_default_middleware: true,
-          middleware: []
-        })
+        Agent.new!(
+          %{
+            model: test_model(),
+            base_system_prompt: "Compiled prompt",
+            middleware: []
+          },
+          replace_default_middleware: true
+        )
 
       compiled_subagent =
         SubAgent.Compiled.new!(%{

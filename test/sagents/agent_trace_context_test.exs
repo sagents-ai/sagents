@@ -24,11 +24,11 @@ defmodule Sagents.AgentTraceContextTest do
         %{
           model: test_model(),
           system_prompt: "Test",
-          replace_default_middleware: true,
           middleware: []
         },
         attrs
-      )
+      ),
+      replace_default_middleware: true
     )
   end
 
