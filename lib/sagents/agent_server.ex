@@ -249,6 +249,14 @@ defmodule Sagents.AgentServer do
       receive do
         {:status_changed, :idle, nil} -> :ok
       end
+
+  ## Forking
+
+  Because agent configuration is never serialized, a conversation's history can
+  be copied into a new conversation that runs under a different `agent_id` with
+  a different prompt, tool set and middleware stack. `export_state_if_idle/1`
+  reads a snapshot safe to build on, and `Sagents.Fork` turns it into a stored
+  conversation. See `d:forking.md`.
   """
 
   use GenServer
@@ -404,12 +412,13 @@ defmodule Sagents.AgentServer do
 
   - `:agent` - The Agent struct (required)
   - `:initial_state` - Initial State (default: empty state)
-  - `:initial_subscribers` - List of `{channel, pid}` tuples to enroll as
-    subscribers before `init/1` returns. Use this to atomically start the
-    server and subscribe — every event broadcast (including the initial
-    `{:status_changed, :idle, nil}` and any `{:node_transferred, _}`
-    after a Horde restore) is delivered to listed pids. Channels are
-    `:main` and `:debug`. Default: `[]`.
+  - `:initial_subscribers` - List of `{channel, pid}` or `{channel, pid, opts}`
+    tuples to enroll as subscribers before `init/1` returns. Use this to
+    atomically start the server and subscribe — every event broadcast
+    (including the initial `{:status_changed, :idle, nil}` and any
+    `{:node_transferred, _}` after a Horde restore) is delivered to listed
+    pids. Channels are `:main` and `:debug`. `opts` accepts `:tag` /
+    `:tagged`; see `subscribe/3`. Default: `[]`.
   - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` (default: nil).
     Used **only** for presence wiring (subscribing to `Phoenix.Presence`
     diff broadcasts). Per-agent events are delivered directly to
@@ -662,11 +671,6 @@ defmodule Sagents.AgentServer do
   @doc """
   Subscribe a process to events from this AgentServer.
 
-  Events on the `:main` channel are delivered as `{:agent, event}` messages;
-  events on the `:debug` channel are delivered as `{:agent, {:debug, event}}`
-  and provide additional insight into middleware state, sub-agent activity,
-  and similar diagnostic data not surfaced on the main channel.
-
   Delivery is via direct `send/2`. The producer monitors the subscriber so
   departure is cleaned up automatically — but subscribers should also
   `Process.monitor/1` the returned `server_pid` to detect server death.
@@ -674,9 +678,14 @@ defmodule Sagents.AgentServer do
   ## Arguments
 
   - `agent_id` — the agent's id.
-  - `channel` — `:main` (default) or `:debug`.
-  - `subscriber_pid` — the pid to receive events. Defaults to `self()` when
-    `nil`.
+  - `channel_or_opts` — `:main` (default) or `:debug`, or a keyword list:
+    - `:channel` — `:main` (default) or `:debug`.
+    - `:subscriber_pid` — the pid to receive events. Defaults to `self()`.
+    - `:tag` — address this subscription's events with the given value, so
+      they arrive as `{:agent, tag, event}` instead of `{:agent, event}`.
+      `nil` is a legal tag.
+    - `:tagged` — when `true`, address them with `agent_id`.
+  - `subscriber_pid` — positional form of `:subscriber_pid`.
 
   Returns `{:ok, server_pid, monitor_ref}` on success,
   `{:error, :process_not_found}` if no AgentServer is running for `agent_id`,
@@ -684,6 +693,21 @@ defmodule Sagents.AgentServer do
 
   The third answer is distinct because it is not a statement about the agent.
   See `docs/deployment.md`.
+
+  ## Envelope
+
+  A subscription that asks for no tag receives `{:agent, event}` on `:main`
+  and `{:agent, {:debug, event}}` on `:debug`. One that asks for a tag
+  receives `{:agent, tag, event}` and `{:agent, tag, {:debug, event}}`. The
+  shape covers every delivery on that subscription, the status snapshot sent
+  at subscribe time included.
+
+  The `:debug` channel carries additional insight into middleware state,
+  sub-agent activity, and similar diagnostic data not surfaced on `:main`.
+
+  A tag is what makes several subscriptions usable from one mailbox: without
+  one, two agents streaming into the same process interleave with nothing to
+  tell them apart.
 
   ## Examples
 
@@ -695,19 +719,35 @@ defmodule Sagents.AgentServer do
 
       # Subscribe a foreign pid (e.g. a bridge GenServer that proxies events).
       {:ok, _pid, _ref} = AgentServer.subscribe("my-agent-1", :main, bridge_pid)
+
+      # Events arrive as {:agent, "my-agent-1", event}.
+      {:ok, _pid, _ref} = AgentServer.subscribe("my-agent-1", tagged: true)
+
+      # Events arrive as {:agent, card_id, event}.
+      {:ok, _pid, _ref} = AgentServer.subscribe("my-agent-1", tag: card_id)
   """
-  @spec subscribe(String.t(), :main | :debug, pid() | nil) ::
+  @spec subscribe(String.t(), :main | :debug | keyword(), pid() | nil) ::
           {:ok, pid(), reference()} | {:error, :process_not_found | :registry_unavailable}
-  def subscribe(agent_id, channel \\ :main, subscriber_pid \\ nil)
+  def subscribe(agent_id, channel_or_opts \\ [], subscriber_pid \\ nil)
+
+  def subscribe(agent_id, channel, subscriber_pid)
       when is_binary(agent_id) and channel in [:main, :debug] do
+    subscribe(agent_id, [channel: channel], subscriber_pid)
+  end
+
+  def subscribe(agent_id, opts, subscriber_pid) when is_binary(agent_id) and is_list(opts) do
+    channel = Keyword.get(opts, :channel, :main)
+    pid = subscriber_pid || Keyword.get(opts, :subscriber_pid)
+    tag = Publisher.State.resolve_tag(opts, agent_id)
+
     # Resolves the pid rather than handing Publisher a `:via` tuple.
-    # `Publisher.subscribe/3` is a `GenServer.call`, which resolves a via name
+    # `Publisher.subscribe/4` is a `GenServer.call`, which resolves a via name
     # itself, and that resolution raises `ArgumentError` from inside `:ets`
     # while this node's registry is unavailable. Publisher's `catch :exit`
     # guard does not catch a raise, so the error would escape a function whose
     # whole visible structure claims to have handled it.
     case fetch_pid(agent_id) do
-      {:ok, pid} -> Publisher.subscribe(pid, channel, subscriber_pid)
+      {:ok, server_pid} -> Publisher.subscribe(server_pid, channel, pid, tag)
       {:error, :not_running} -> {:error, :process_not_found}
       {:error, :registry_unavailable} = error -> error
     end
@@ -716,19 +756,29 @@ defmodule Sagents.AgentServer do
   @doc """
   Unsubscribe a process from events on the given channel.
 
-  Mirrors `subscribe/3`. Defaults `channel` to `:main` and `subscriber_pid`
-  to `self()` (when `nil`). Always returns `:ok`.
+  Mirrors `subscribe/3`, and accepts the same `channel_or_opts` shapes. `:tag`
+  and `:tagged` are ignored here — removal is by pid and channel. Always
+  returns `:ok`.
 
   An unavailable registry is `:ok` rather than an error: the subscription lives
   on a process this node cannot reach, the producer's own monitor cleans up the
   entry when the subscriber goes away, and there is nothing for a caller to do
   with the distinction.
   """
-  @spec unsubscribe(String.t(), :main | :debug, pid() | nil) :: :ok
-  def unsubscribe(agent_id, channel \\ :main, subscriber_pid \\ nil)
+  @spec unsubscribe(String.t(), :main | :debug | keyword(), pid() | nil) :: :ok
+  def unsubscribe(agent_id, channel_or_opts \\ [], subscriber_pid \\ nil)
+
+  def unsubscribe(agent_id, channel, subscriber_pid)
       when is_binary(agent_id) and channel in [:main, :debug] do
+    unsubscribe(agent_id, [channel: channel], subscriber_pid)
+  end
+
+  def unsubscribe(agent_id, opts, subscriber_pid) when is_binary(agent_id) and is_list(opts) do
+    channel = Keyword.get(opts, :channel, :main)
+    pid = subscriber_pid || Keyword.get(opts, :subscriber_pid)
+
     case fetch_pid(agent_id) do
-      {:ok, pid} -> Publisher.unsubscribe(pid, channel, subscriber_pid)
+      {:ok, server_pid} -> Publisher.unsubscribe(server_pid, channel, pid)
       {:error, _reason} -> :ok
     end
   end
@@ -1443,6 +1493,54 @@ defmodule Sagents.AgentServer do
   end
 
   @doc """
+  Export the conversation state, but only while the agent is idle.
+
+  Same envelope as `export_state/1`, with the status checked inside the server
+  so nothing can start a run between the check and the snapshot.
+
+  A snapshot taken mid-run can end on an assistant message whose `tool_calls`
+  have no matching results yet, because each message joins the rolling state as
+  it is processed rather than when the turn finishes. Any caller that intends to
+  build a new conversation from the payload, rather than to observe the current
+  one, wants a history that has settled on a turn boundary.
+
+  Every status other than `:idle` is refused, and each for its own reason:
+  `:interrupted` is a question the agent still intends to answer, `:cancelled`
+  and `:error` are turns that did not finish, and `:paused` is an infrastructure
+  hold whose task may still be live.
+
+  A pending message is deliberately not included. An idle server has none, since
+  one is only queued while running.
+
+  ## Returns
+
+    * `{:ok, exported}` — string-keyed payload, shaped like `export_state/1`.
+    * `{:error, {:agent_busy, status}}` — the agent is not idle.
+    * `{:error, :not_running}` — no agent is running under that id.
+    * `{:error, :registry_unavailable}` — this node cannot answer whether the
+      agent is running.
+
+  ## Examples
+
+      {:ok, exported} = AgentServer.export_state_if_idle("my-agent-1")
+
+      {:error, {:agent_busy, :running}} = AgentServer.export_state_if_idle("busy-agent")
+
+  See `Sagents.Fork` for the conversation-forking flow built on this.
+  """
+  @spec export_state_if_idle(String.t()) ::
+          {:ok, map()} | {:error, {:agent_busy, status()} | :not_running | :registry_unavailable}
+  def export_state_if_idle(agent_id) when is_binary(agent_id) do
+    case fetch_pid(agent_id) do
+      {:ok, pid} -> GenServer.call(pid, :export_state_if_idle)
+      {:error, :not_running} = error -> error
+      {:error, :registry_unavailable} = error -> error
+    end
+  catch
+    :exit, _reason -> {:error, :not_running}
+  end
+
+  @doc """
   Restore agent state from a previously exported state.
 
   This updates an already-running agent to restore its state from a
@@ -1698,11 +1796,14 @@ defmodule Sagents.AgentServer do
     # they receive every event broadcast from handle_continue (notably
     # :status_changed :idle and :node_transferred after a Horde restore).
     # This eliminates the race that PubSub's detached topics used to mask.
+    #
+    # Entries are `{channel, pid}` or `{channel, pid, opts}`, where opts carry
+    # `:tag` / `:tagged`. `tagged: true` resolves to this agent's id.
     initial_subscribers = Keyword.get(opts, :initial_subscribers, [])
 
     publisher_state =
       Publisher.State.new([:main, :debug])
-      |> Publisher.State.seed(initial_subscribers)
+      |> Publisher.State.seed(initial_subscribers, agent.agent_id)
 
     server_state = %ServerState{
       agent: updated_agent,
@@ -2230,6 +2331,20 @@ defmodule Sagents.AgentServer do
       )
 
     {:reply, serialized, server_state}
+  end
+
+  @impl true
+  def handle_call(:export_state_if_idle, _from, %ServerState{status: :idle} = server_state) do
+    # No `pending_message:` opt: an idle server has none, and omitting it keeps
+    # the key out of a payload destined to seed a different conversation.
+    serialized = StateSerializer.serialize_server_state(nil, server_state.state)
+
+    {:reply, {:ok, serialized}, server_state}
+  end
+
+  @impl true
+  def handle_call(:export_state_if_idle, _from, server_state) do
+    {:reply, {:error, {:agent_busy, server_state.status}}, server_state}
   end
 
   @impl true
@@ -4053,30 +4168,51 @@ defmodule Sagents.AgentServer do
     "Sorry, I encountered an error: #{inspect(reason)}"
   end
 
-  # Direct send/2 fan-out to main-channel subscribers. Wraps events in
-  # `{:agent, event}` so consumers can pattern-match on origin.
+  # Direct send/2 fan-out to main-channel subscribers. An untagged subscription
+  # receives `{:agent, event}`; one that supplied a tag receives
+  # `{:agent, tag, event}`, so a process holding several subscriptions can tell
+  # which agent an event came from.
   defp broadcast_event(%ServerState{} = server_state, event) do
-    Publisher.broadcast(server_state.publisher, :main, main_envelope(event))
+    Publisher.broadcast(
+      server_state.publisher,
+      :main,
+      main_envelope(event),
+      &main_envelope(&1, event)
+    )
+
     :ok
   end
 
   # Direct send/2 fan-out to debug-channel subscribers. The outer `:agent` tag
   # identifies the producer; the inner `:debug` tag distinguishes the channel.
   defp broadcast_debug_event(%ServerState{} = server_state, event) do
-    Publisher.broadcast(server_state.publisher, :debug, debug_envelope(event))
+    Publisher.broadcast(
+      server_state.publisher,
+      :debug,
+      debug_envelope(event),
+      &debug_envelope(&1, event)
+    )
+
     :ok
   end
 
   # Single-pid send used by on_subscribed/3 to deliver a snapshot to a newly
   # registered subscriber. Same envelope as broadcast_event so consumers can
   # treat snapshot and live events identically.
-  defp send_main_event_to(pid, event) when is_pid(pid) do
+  defp send_main_event_to(pid, event, :untagged) when is_pid(pid) do
     send(pid, main_envelope(event))
     :ok
   end
 
+  defp send_main_event_to(pid, event, {:tag, tag}) when is_pid(pid) do
+    send(pid, main_envelope(tag, event))
+    :ok
+  end
+
   defp main_envelope(event), do: {:agent, event}
+  defp main_envelope(tag, event), do: {:agent, tag, event}
   defp debug_envelope(event), do: {:agent, {:debug, event}}
+  defp debug_envelope(tag, event), do: {:agent, tag, {:debug, event}}
 
   # Sync a newly registered :main-channel subscriber to the current state by
   # sending it a status snapshot. Without this, a subscriber that joins after
@@ -4090,7 +4226,8 @@ defmodule Sagents.AgentServer do
   def on_subscribed(:main, subscriber_pid, %ServerState{} = server_state) do
     send_main_event_to(
       subscriber_pid,
-      {:status_changed, server_state.status, server_state.interrupt_data}
+      {:status_changed, server_state.status, server_state.interrupt_data},
+      Publisher.State.tag_for(server_state.publisher, :main, subscriber_pid)
     )
 
     server_state

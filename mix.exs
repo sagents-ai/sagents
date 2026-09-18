@@ -2,7 +2,7 @@ defmodule Sagents.MixProject do
   use Mix.Project
 
   @source_url "https://github.com/sagents-ai/sagents"
-  @version "0.14.3"
+  @version "0.15.0"
 
   def project do
     [
@@ -130,7 +130,8 @@ defmodule Sagents.MixProject do
           Sagents.AgentServer,
           Sagents.AgentSupervisor,
           Sagents.State,
-          Sagents.AgentUtils
+          Sagents.AgentUtils,
+          Sagents.Fork
         ],
         Middleware: [
           Sagents.Middleware,
@@ -201,6 +202,7 @@ defmodule Sagents.MixProject do
       "docs/middleware_messaging.md",
       "docs/observability.md",
       "docs/persistence.md",
+      "docs/forking.md",
       "docs/filesystem_setup.md",
       "docs/clustering.md",
       "docs/deployment.md"

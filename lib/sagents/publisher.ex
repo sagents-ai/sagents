@@ -140,18 +140,29 @@ defmodule Sagents.Publisher do
       @publisher_state_field unquote(state_field)
 
       @impl true
-      def handle_call({:__publisher__, channel, :subscribe, subscriber_pid}, _from, state)
+      def handle_call({:__publisher__, channel, :subscribe, subscriber_pid}, from, state)
+          when is_atom(channel) and is_pid(subscriber_pid) do
+        # A caller that predates per-subscription tags. The bare envelope is
+        # what it is built to receive.
+        handle_call(
+          {:__publisher__, channel, :subscribe, subscriber_pid, :untagged},
+          from,
+          state
+        )
+      end
+
+      def handle_call({:__publisher__, channel, :subscribe, subscriber_pid, tag}, _from, state)
           when is_atom(channel) and is_pid(subscriber_pid) do
         pub = Map.fetch!(state, @publisher_state_field)
 
-        # `add/3` is idempotent for registration, but `on_subscribed/3` is a
+        # `add/4` is idempotent for registration, but `on_subscribed/3` is a
         # *new subscriber* hook. A pid that is already registered has been
         # receiving broadcasts all along, so re-running the snapshot would
         # deliver a duplicate event, not a resync.
         already_subscribed? =
           Sagents.Publisher.State.subscribed?(pub, channel, subscriber_pid)
 
-        {ref, new_pub} = Sagents.Publisher.State.add(pub, channel, subscriber_pid)
+        {ref, new_pub} = Sagents.Publisher.State.add(pub, channel, subscriber_pid, tag)
         new_state = Map.put(state, @publisher_state_field, new_pub)
 
         new_state =
@@ -192,6 +203,12 @@ defmodule Sagents.Publisher do
   `server` may be a pid, a registered name atom, or a `:via` tuple.
   Defaults the subscriber to `self()`.
 
+  `tag` is a `t:Sagents.Publisher.State.tag/0`, already resolved. Producers
+  exposing their own `subscribe/N` shorthand accept `:tag` / `:tagged` options
+  from hosts and resolve them with `Sagents.Publisher.State.resolve_tag/2`
+  before calling here, because the identity behind `tagged: true` is the
+  producer's to supply.
+
   Returns `{:ok, server_pid, monitor_ref}` on success, where `monitor_ref`
   is the ref the producer uses to monitor this subscriber. The subscriber
   may also `Process.monitor/1` the returned `server_pid` to detect
@@ -199,17 +216,25 @@ defmodule Sagents.Publisher do
 
   Returns `{:error, :process_not_found}` if the producer is not running.
   """
-  @spec subscribe(GenServer.server(), channel(), pid() | nil) ::
+  @spec subscribe(GenServer.server(), channel(), pid() | nil, PubState.tag()) ::
           {:ok, pid(), reference()} | {:error, :process_not_found}
-  def subscribe(server, channel \\ :main, subscriber_pid \\ nil) do
+  def subscribe(server, channel \\ :main, subscriber_pid \\ nil, tag \\ :untagged) do
     pid = subscriber_pid || self()
 
     try do
-      GenServer.call(server, {:__publisher__, channel, :subscribe, pid})
+      GenServer.call(server, {:__publisher__, channel, :subscribe, pid, tag})
     catch
       :exit, _reason -> {:error, :process_not_found}
     end
   end
+
+  @doc """
+  Resolve host subscription options into a `t:Sagents.Publisher.State.tag/0`.
+
+  See `Sagents.Publisher.State.resolve_tag/2`.
+  """
+  @spec resolve_tag(keyword(), term()) :: PubState.tag()
+  defdelegate resolve_tag(opts, default_identity), to: PubState
 
   @doc """
   Unsubscribe a pid from a channel.
@@ -245,6 +270,28 @@ defmodule Sagents.Publisher do
     pub
     |> PubState.subscribers(channel)
     |> Enum.each(fn pid -> send(pid, message) end)
+
+    pub
+  end
+
+  @doc """
+  Broadcast with a per-subscription envelope.
+
+  Untagged subscriptions receive `untagged_message`, built once for all of
+  them. A tagged subscription receives `tag_fun.(tag)`, so an event names the
+  subscription it belongs to and a process holding several can route on it.
+
+  Returns the publisher state unchanged.
+  """
+  @spec broadcast(PubState.t(), channel(), term(), (term() -> term())) :: PubState.t()
+  def broadcast(%PubState{} = pub, channel, untagged_message, tag_fun)
+      when is_atom(channel) and is_function(tag_fun, 1) do
+    pub
+    |> PubState.subscriber_entries(channel)
+    |> Enum.each(fn
+      {pid, %{tag: :untagged}} -> send(pid, untagged_message)
+      {pid, %{tag: {:tag, tag}}} -> send(pid, tag_fun.(tag))
+    end)
 
     pub
   end

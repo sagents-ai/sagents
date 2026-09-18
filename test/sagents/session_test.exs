@@ -156,6 +156,19 @@ defmodule Sagents.SessionTest do
     :ok
   end
 
+  # Config and state for the tests that boot a real agent rather than stubbing
+  # the supervisor. Everything else in this file works against test doubles;
+  # these exist because the tag has to survive a real init/1 to be believed.
+  defp real_config do
+    base_config(%{presence_module: Sagents.TestPresence})
+  end
+
+  defp real_state(conversation_id) do
+    %{conversation_id: conversation_id, current_scope: :my_scope, sagents_subs: %{}}
+  end
+
+  defp unique_conversation_id, do: System.unique_integer([:positive])
+
   defp stub_supervisor_ok(captured_ref) do
     fake_pid = :erlang.list_to_pid(~c"<0.99999.0>")
     monitor_ref = make_ref()
@@ -166,7 +179,7 @@ defmodule Sagents.SessionTest do
     # producer-side monitor. We don't have a live AgentServer in these tests,
     # so stub it to return a successful subscription tuple referencing our
     # fake pid.
-    stub(AgentServer, :subscribe, fn _agent_id, _channel, _subscriber_pid ->
+    stub(AgentServer, :subscribe, fn _agent_id, _opts ->
       {:ok, fake_pid, monitor_ref}
     end)
 
@@ -363,7 +376,7 @@ defmodule Sagents.SessionTest do
       config = base_config()
 
       pending_subs = %{
-        {:agent, "conversation-1"} => %{state: :pending, server_pid: nil}
+        {:agent, "conversation-1"} => %{state: :pending, server_pid: nil, tag: :untagged}
       }
 
       state = %{
@@ -390,7 +403,8 @@ defmodule Sagents.SessionTest do
         {:agent, "conversation-1"} => %{
           state: :subscribed,
           server_pid: fake_pid,
-          monitor_ref: ref
+          monitor_ref: ref,
+          tag: :untagged
         }
       }
 
@@ -402,6 +416,197 @@ defmodule Sagents.SessionTest do
 
       assert {:ok, %{sagents_subs: new_subs}} = Session.ensure_running(config, state)
       assert new_subs == already_subbed
+    end
+
+    test "forwards :tag to both the seeded entry and the subs bookkeeping" do
+      fake_pid = stub_supervisor_ok(self())
+
+      state = %{conversation_id: 1, current_scope: :my_scope, sagents_subs: %{}}
+
+      assert {:ok, %{sagents_subs: subs}} =
+               Session.ensure_running(base_config(), state, tag: {:note, 9})
+
+      # Seeded before init/1 returns, so the boot broadcasts carry the tag.
+      assert_receive {:supervisor_config, opts}
+      assert opts[:initial_subscribers] == [{:main, self(), [tag: {:note, 9}]}]
+
+      # And recorded in the subs entry, so a revival can restore the shape.
+      assert %{{:agent, "conversation-1"} => %{tag: {:tag, {:note, 9}}, server_pid: ^fake_pid}} =
+               subs
+    end
+
+    test "forwards :tagged to both subscribe paths" do
+      _fake_pid = stub_supervisor_ok(self())
+
+      state = %{conversation_id: 1, current_scope: :my_scope, sagents_subs: %{}}
+
+      assert {:ok, %{sagents_subs: subs}} =
+               Session.ensure_running(base_config(), state, tagged: true)
+
+      assert_receive {:supervisor_config, opts}
+      assert opts[:initial_subscribers] == [{:main, self(), [tagged: true]}]
+      assert %{{:agent, "conversation-1"} => %{tag: {:tag, "conversation-1"}}} = subs
+    end
+
+    test "an entry already carrying the requested tag is left alone" do
+      fake_pid = stub_supervisor_ok(self())
+      ref = make_ref()
+
+      already_subbed = %{
+        {:agent, "conversation-1"} => %{
+          state: :subscribed,
+          server_pid: fake_pid,
+          monitor_ref: ref,
+          tag: {:tag, :card_a}
+        }
+      }
+
+      state = %{
+        conversation_id: 1,
+        current_scope: :my_scope,
+        sagents_subs: already_subbed
+      }
+
+      assert {:ok, %{sagents_subs: new_subs}} =
+               Session.ensure_running(base_config(), state, tag: :card_a)
+
+      assert new_subs == already_subbed
+    end
+
+    test "a second call with a different tag re-subscribes rather than keeping the old shape" do
+      fake_pid = stub_supervisor_ok(self())
+
+      already_subbed = %{
+        {:agent, "conversation-1"} => %{
+          state: :subscribed,
+          server_pid: fake_pid,
+          monitor_ref: make_ref(),
+          tag: {:tag, :card_a}
+        }
+      }
+
+      state = %{
+        conversation_id: 1,
+        current_scope: :my_scope,
+        sagents_subs: already_subbed
+      }
+
+      assert {:ok, %{sagents_subs: new_subs}} =
+               Session.ensure_running(base_config(), state, tag: :card_b)
+
+      assert %{{:agent, "conversation-1"} => %{tag: {:tag, :card_b}}} = new_subs
+    end
+
+    test "no tag options leave the entry untagged" do
+      _fake_pid = stub_supervisor_ok(self())
+
+      state = %{conversation_id: 1, current_scope: :my_scope, sagents_subs: %{}}
+
+      assert {:ok, %{sagents_subs: subs}} = Session.ensure_running(base_config(), state)
+
+      assert_receive {:supervisor_config, opts}
+      assert opts[:initial_subscribers] == [{:main, self(), []}]
+      assert %{{:agent, "conversation-1"} => %{tag: :untagged}} = subs
+    end
+
+    test "no tag options mean the bare envelope, end to end" do
+      # No supervisor stub: this boots a real AgentServer through the real
+      # dynamic supervisor, so the assertions are about what lands in this
+      # process's mailbox rather than what was passed along.
+      conversation_id = unique_conversation_id()
+
+      assert {:ok, %{agent_id: agent_id}} =
+               Session.ensure_running(real_config(), real_state(conversation_id))
+
+      on_exit(fn -> AgentServer.stop(agent_id) end)
+
+      assert_receive {:agent, {:status_changed, :idle, nil}}, 500
+      refute_receive {:agent, _tag, _event}, 50
+    end
+
+    test "a tag on the boot path reaches the events broadcast during init" do
+      # The seeded subscriber is the only one enrolled when handle_continue
+      # broadcasts the initial status, so a tag that fails to reach the seed
+      # shows up here and nowhere else.
+      conversation_id = unique_conversation_id()
+
+      assert {:ok, %{agent_id: agent_id, sagents_subs: subs}} =
+               Session.ensure_running(
+                 real_config(),
+                 real_state(conversation_id),
+                 tag: {:note, 42}
+               )
+
+      on_exit(fn -> AgentServer.stop(agent_id) end)
+
+      assert_receive {:agent, {:note, 42}, {:status_changed, :idle, nil}}, 500
+      assert %{tag: {:tag, {:note, 42}}} = subs[{:agent, agent_id}]
+
+      AgentServer.publish_event_from(agent_id, {:tick, 1})
+      assert_receive {:agent, {:note, 42}, {:tick, 1}}, 500
+    end
+
+    test "a tag on an already-running agent tags the subscribe-time snapshot" do
+      # The subscribe-only path: someone else started the agent, so
+      # `:initial_subscribers` is never consumed and the tag can only arrive
+      # through Subscriber.subscribe_to_agent/3. The snapshot is the first
+      # thing that subscription receives.
+      conversation_id = unique_conversation_id()
+      agent_id = "conversation-#{conversation_id}"
+
+      agent = create_test_agent(agent_id: agent_id)
+      {:ok, _pid} = AgentServer.start_link(agent: agent)
+
+      assert {:ok, %{sagents_subs: subs}} =
+               Session.ensure_running(real_config(), real_state(conversation_id), tag: :panel)
+
+      assert %{tag: {:tag, :panel}} = subs[{:agent, agent_id}]
+      assert_receive {:agent, :panel, {:status_changed, :idle, nil}}, 500
+    end
+
+    test "calling twice with the same tag keeps delivery tagged" do
+      # The seed-then-subscribe strip: the publisher keeps one entry per
+      # {channel, pid} and the later call restates its shape, so a second
+      # untagged subscribe would silently downgrade the envelope.
+      conversation_id = unique_conversation_id()
+      config = real_config()
+
+      assert {:ok, %{agent_id: agent_id, sagents_subs: subs}} =
+               Session.ensure_running(config, real_state(conversation_id), tag: :panel)
+
+      on_exit(fn -> AgentServer.stop(agent_id) end)
+      assert_receive {:agent, :panel, {:status_changed, :idle, nil}}, 500
+
+      state = real_state(conversation_id) |> Map.put(:sagents_subs, subs)
+
+      assert {:ok, %{sagents_subs: ^subs}} =
+               Session.ensure_running(config, state, tag: :panel)
+
+      AgentServer.publish_event_from(agent_id, {:tick, 1})
+      assert_receive {:agent, :panel, {:tick, 1}}, 500
+      refute_receive {:agent, {:tick, 1}}, 50
+    end
+
+    test "a second call with a different tag switches the delivered shape" do
+      conversation_id = unique_conversation_id()
+      config = real_config()
+
+      assert {:ok, %{agent_id: agent_id, sagents_subs: subs}} =
+               Session.ensure_running(config, real_state(conversation_id), tag: :old)
+
+      on_exit(fn -> AgentServer.stop(agent_id) end)
+      assert_receive {:agent, :old, {:status_changed, :idle, nil}}, 500
+
+      state = real_state(conversation_id) |> Map.put(:sagents_subs, subs)
+
+      assert {:ok, %{sagents_subs: new_subs}} =
+               Session.ensure_running(config, state, tag: :new)
+
+      assert %{tag: {:tag, :new}} = new_subs[{:agent, agent_id}]
+
+      AgentServer.publish_event_from(agent_id, {:tick, 1})
+      assert_receive {:agent, :new, {:tick, 1}}, 500
+      refute_receive {:agent, :old, {:tick, 1}}, 50
     end
 
     test "forwards explicit request_opts arg to the router" do
@@ -544,7 +749,7 @@ defmodule Sagents.SessionTest do
       # and replayed against a broadcast.
       assert_receive {:supervisor_config, opts}
       assert opts[:pending_resume] == %{type: :answer, selected: ["yes"]}
-      assert opts[:initial_subscribers] == [{:main, self()}]
+      assert opts[:initial_subscribers] == [{:main, self(), []}]
     end
 
     test "forwards :request_opts on the wake path so the woken agent is configured normally" do
@@ -608,7 +813,7 @@ defmodule Sagents.SessionTest do
       # started: false without ever reaching the supervisor.
       stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, fake_pid} end)
 
-      stub(AgentServer, :subscribe, fn _agent_id, _channel, _pid ->
+      stub(AgentServer, :subscribe, fn _agent_id, _opts ->
         {:ok, fake_pid, make_ref()}
       end)
 
@@ -621,6 +826,21 @@ defmodule Sagents.SessionTest do
 
       assert_received {:retried, "conversation-1", %{type: :answer}}
       refute_received :unexpected_start
+    end
+
+    test "forwards :tag through the wake path" do
+      # resume/4 hands its whole option list to do_ensure_running/3, so a tag
+      # passed here has to land on both subscribe paths exactly as it does for
+      # ensure_running/3.
+      _fake_pid = stub_supervisor_ok(self())
+      stub(AgentServer, :resume, fn _agent_id, _resume_data -> {:error, :agent_not_running} end)
+
+      assert {:ok, %{sagents_subs: subs}} =
+               Session.resume(base_config(), resume_state(), %{type: :answer}, tag: :card_a)
+
+      assert_receive {:supervisor_config, opts}
+      assert opts[:initial_subscribers] == [{:main, self(), [tag: :card_a]}]
+      assert %{{:agent, "conversation-1"} => %{tag: {:tag, :card_a}}} = subs
     end
 
     test "passes a start failure through" do
@@ -686,7 +906,7 @@ defmodule Sagents.SessionTest do
       # second call once the agent is up.
       assert_receive {:supervisor_config, opts}
       assert opts[:pending_resume] == nil
-      assert opts[:initial_subscribers] == [{:main, self()}]
+      assert opts[:initial_subscribers] == [{:main, self(), []}]
     end
 
     test "forwards :request_opts on the wake path so the woken agent is configured normally" do

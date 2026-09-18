@@ -155,6 +155,47 @@ defmodule Sagents.Persistence.StateSerializerTest do
     end
   end
 
+  describe "serialize_server_state/3 without an agent" do
+    setup do
+      {:ok, model} = ChatOpenAI.new(%{model: "gpt-4", api_key: "test-key"})
+
+      {:ok, agent} =
+        Agent.new(%{
+          agent_id: generate_test_agent_id(),
+          model: model,
+          base_system_prompt: "You are helpful"
+        })
+
+      state =
+        State.new!(%{
+          messages: [Message.new_user!("Hello"), Message.new_assistant!(%{content: "Hi"})],
+          todos: [Todo.new!(%{id: 1, content: "Task 1"})],
+          metadata: %{"session_id" => "session-1"}
+        })
+
+      {:ok, agent: agent, state: state}
+    end
+
+    test "a nil agent produces the same envelope as an agent does", %{
+      agent: agent,
+      state: state
+    } do
+      with_agent = StateSerializer.serialize_server_state(agent, state)
+      without_agent = StateSerializer.serialize_server_state(nil, state)
+
+      assert Map.drop(with_agent, ["serialized_at"]) ==
+               Map.drop(without_agent, ["serialized_at"])
+    end
+
+    test "a nil agent still honors :pending_message", %{state: state} do
+      pending = Message.new_user!("Queued")
+
+      result = StateSerializer.serialize_server_state(nil, state, pending_message: pending)
+
+      assert %Message{role: :user} = StateSerializer.deserialize_pending_message(result)
+    end
+  end
+
   describe "deserialize_server_state/2" do
     test "deserializes map with string keys back to agent and state" do
       # Create a serialized state with string keys (as would come from JSONB)

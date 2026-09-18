@@ -812,6 +812,94 @@ defmodule Sagents.FileSystemServerTest do
       assert_receive {:file_system, {:file_updated, "/seeded.txt"}}, 100
     end
 
+    test "an untagged subscription receives the bare envelope and nothing else",
+         %{agent_id: agent_id} do
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+      {:ok, _pid, _ref} = FileSystemServer.subscribe({:agent, agent_id})
+
+      {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, "/bare.txt", "content")
+
+      assert_receive {:file_system, {:file_updated, "/bare.txt"}}, 100
+      refute_receive {:file_system, _tag, _change}, 50
+    end
+
+    test "tagged: true addresses events with the scope key", %{agent_id: agent_id} do
+      scope_a = {:agent, agent_id <> "_a"}
+      scope_b = {:agent, agent_id <> "_b"}
+
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: scope_a)
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: scope_b)
+
+      {:ok, _pid, _ref} = FileSystemServer.subscribe(scope_a, tagged: true)
+      {:ok, _pid, _ref} = FileSystemServer.subscribe(scope_b, tagged: true)
+
+      {:ok, _entry} = FileSystemServer.write_file(scope_a, "/a.txt", "content")
+      {:ok, _entry} = FileSystemServer.write_file(scope_b, "/b.txt", "content")
+
+      assert_receive {:file_system, ^scope_a, {:file_updated, "/a.txt"}}, 100
+      assert_receive {:file_system, ^scope_b, {:file_updated, "/b.txt"}}, 100
+      refute_receive {:file_system, {:file_updated, _path}}, 50
+    end
+
+    test "tag: addresses events with the host's own routing key", %{agent_id: agent_id} do
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+      {:ok, _pid, _ref} = FileSystemServer.subscribe({:agent, agent_id}, tag: {:panel, 7})
+
+      {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, "/tagged.txt", "content")
+
+      assert_receive {:file_system, {:panel, 7}, {:file_updated, "/tagged.txt"}}, 100
+    end
+
+    test "nil is a legal tag", %{agent_id: agent_id} do
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
+      {:ok, _pid, _ref} = FileSystemServer.subscribe({:agent, agent_id}, tag: nil)
+
+      {:ok, _entry} = FileSystemServer.write_file({:agent, agent_id}, "/nil.txt", "content")
+
+      assert_receive {:file_system, nil, {:file_updated, "/nil.txt"}}, 100
+    end
+
+    test "initial_subscribers carry their tag", %{agent_id: agent_id} do
+      {:ok, _pid} =
+        FileSystemServer.start_link(
+          scope_key: {:agent, agent_id},
+          initial_subscribers: [{:main, self(), [tag: :fs_panel]}]
+        )
+
+      {:ok, _entry} =
+        FileSystemServer.write_file({:agent, agent_id}, "/seeded_tagged.txt", "content")
+
+      assert_receive {:file_system, :fs_panel, {:file_updated, "/seeded_tagged.txt"}}, 100
+    end
+
+    test "initial_subscribers with tagged: true resolve to the scope key", %{agent_id: agent_id} do
+      scope = {:agent, agent_id}
+
+      {:ok, _pid} =
+        FileSystemServer.start_link(
+          scope_key: scope,
+          initial_subscribers: [{:main, self(), [tagged: true]}]
+        )
+
+      {:ok, _entry} = FileSystemServer.write_file(scope, "/seeded_scope.txt", "content")
+
+      assert_receive {:file_system, ^scope, {:file_updated, "/seeded_scope.txt"}}, 100
+    end
+
+    test "a tagged subscription sees deletes and moves too", %{agent_id: agent_id} do
+      scope = {:agent, agent_id}
+      {:ok, _pid} = FileSystemServer.start_link(scope_key: scope)
+      {:ok, _entry} = FileSystemServer.write_file(scope, "/move_me.txt", "content")
+
+      {:ok, _pid, _ref} = FileSystemServer.subscribe(scope, tagged: true)
+
+      {:ok, _entries} = FileSystemServer.move_file(scope, "/move_me.txt", "/moved.txt")
+      :ok = FileSystemServer.delete_file(scope, "/moved.txt")
+
+      assert_receive {:file_system, ^scope, {:file_moved, "/move_me.txt", "/moved.txt"}}, 100
+      assert_receive {:file_system, ^scope, {:file_deleted, "/moved.txt"}}, 100
+    end
+
     test "subscriber crash auto-cleans subscription", %{agent_id: agent_id} do
       {:ok, _server_pid} = FileSystemServer.start_link(scope_key: {:agent, agent_id})
 

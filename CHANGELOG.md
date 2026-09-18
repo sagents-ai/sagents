@@ -1,5 +1,199 @@
 # Changelog
 
+## v0.15.0
+
+One process subscribed to two agents could not tell their events apart. Every
+main-channel event was `{:agent, event}`, and the fan-out is a direct `send/2`,
+so there was no sender, no topic, and no payload field to recover identity from.
+Two agents streaming into one mailbox interleaved with nothing to separate them.
+
+A subscription can now carry a **tag**, and every event delivered on it names
+its source:
+
+```elixir
+# Unchanged. Still {:agent, event}.
+Subscriber.subscribe_to_agent(subs, agent_id)
+
+# Library-supplied identity: {:agent, agent_id, event}
+Subscriber.subscribe_to_agent(subs, agent_id, tagged: true)
+
+# Host-supplied routing key: {:agent, card_id, event}
+Subscriber.subscribe_to_agent(subs, agent_id, tag: card_id)
+```
+
+The tag lives in the subscription rather than in the agent, so two hosts watching
+the same agent can address it differently, and a host can use a key it already
+has, a card id or a `{:note, id}` tuple, instead of keeping an
+`agent_id => element` map purely to undo the library's choice.
+
+| Channel | Untagged | Tagged |
+| --- | --- | --- |
+| `:main` | `{:agent, event}` | `{:agent, tag, event}` |
+| `:debug` | `{:agent, {:debug, event}}` | `{:agent, tag, {:debug, event}}` |
+| filesystem | `{:file_system, change_info}` | `{:file_system, tag, change_info}` |
+
+`nil` is a legal tag: the option is read as "was `:tag` given", not "is the value
+truthy". The shape covers every delivery on a subscription: live broadcasts, the
+status snapshot sent at subscribe time, events broadcast during the agent's boot
+when the subscription was seeded through `:initial_subscribers`, and the
+re-subscription that follows a producer crash. A subscription that starts
+`:pending` because its agent is not running yet comes back carrying its tag.
+
+**The tagging change breaks nothing in your application.** A subscription that
+asks for no tag receives byte-identical messages to v0.14.0 on every channel.
+Upgrade the dependency, change no host code, and every event arrives exactly as
+it did before.
+
+The release does carry one breaking change, unrelated to tagging: `Agent.new/2`
+raises on options passed in its attributes map, the deprecation v0.14.3
+announced. See
+[Agent.new/2 raises on misplaced options](#agentnew2-raises-on-misplaced-options).
+
+### Adding a tag is a breaking change *within your own app*
+
+`Phoenix.LiveView.Channel` calls `view.handle_info/2` whenever the view exports
+it at all. So a host with no catch-all raises `FunctionClauseError` on the first
+event of an unexpected shape and crashes loudly, while a host **with** a
+catch-all silently swallows every event: the app stays up, the agents run, the
+state persists, and the UI never updates, with nothing in the logs.
+
+The more defensively written host is the one that gets the silent failure.
+Anyone adding a tag to an existing subscription must update that subscription's
+`handle_info` clauses in the same change.
+
+The trap has a second edge. Every path that subscribes to a given agent must
+agree on the tag: a publisher keeps one entry per `{channel, pid}`, so whichever
+path subscribes last decides the envelope. A load path that tags and an action
+path that does not gives a conversation whose event shape changes the first time
+the user does something. In a generated app that means `AgentLiveHelpers` and the
+`Coordinator`'s `Sagents.Session` calls, which the v0.15.0 templates keep in step
+through a single `@subscribe_opts` attribute.
+
+### Which subscription an event concerns
+
+Two consumer-side helpers already computed the answer and discarded it. They now
+report it on request:
+
+```elixir
+{:matched, sub_key, new_subs} =
+  Subscriber.handle_publisher_down(subs, ref, reason, report: true)
+
+{new_subs, revived_keys} =
+  Subscriber.handle_presence_diff(subs, topic, payload, report: true)
+```
+
+`report: true` is opt-in for the same reason the tag is. Without it both return
+exactly what they returned in v0.14.0, namely `{:matched, new_subs} | :no_match`
+and a bare subs map, so an existing host keeps working untouched. That includes
+a generated `AgentSubscriberSession` that a dependency bump never touches.
+
+`subs` is now guarded as a map on every clause of `handle_presence_diff/4`,
+including the one that ignores the payload. Feeding the reporting tuple back in
+on the next diff is the mistake that guard catches, and Elixir 1.19's type checker
+rejects it at compile time rather than letting it surface as a `BadMapError`
+raised two events later from inside the library.
+
+### The generator emits the tagged shape
+
+`mix sagents.setup` now produces a host that is tagged from the start: events
+arrive as `{:agent, agent_id, event}` and the emitted `handle_info` examples
+match. That costs a single-conversation socket one wildcard per clause and means
+a host that later opens a second panel adds a subscription rather than reworking
+every clause it already wrote.
+
+Your generated files are copies. A dependency bump does not update them, so
+existing apps stay on the bare envelope until they choose otherwise.
+
+### Producer-side signature changes
+
+Only reached by a host that implemented its own producer on
+`use Sagents.Publisher`, and only if it wants tags. All three take defaults, so
+existing calls are unaffected:
+
+```elixir
+Sagents.Publisher.State.add/3      → add/4       # trailing tag, defaults :untagged
+Sagents.Publisher.State.seed/2     → seed/3      # trailing default_identity
+Sagents.Publisher.subscribe/3      → subscribe/4 # trailing tag
+Sagents.Publisher.broadcast/3      → broadcast/4 # trailing per-subscriber envelope fun
+```
+
+`Sagents.Publisher.State.resolve_tag/2` is the single interpreter of `:tag` and
+`:tagged`; `tag_to_opts/1` is its inverse, which is how a revived subscription
+round-trips its tag back through the public subscribe path.
+
+### Agent.new/2 raises on misplaced options
+
+`Agent.new/2` and `Agent.new!/2` raise `ArgumentError` when one of their options
+appears in the attributes map instead of the second argument. v0.14.3 logged a
+warning in this case and announced the raise for this release.
+
+`Ecto.Changeset.cast/3` drops keys it does not recognize, so an option placed
+among the attributes was discarded and the agent was built with a configuration
+other than the one asked for. An agent told to `replace_default_middleware`
+received the full default stack anyway, and an `interrupt_on` config never
+reached `HumanInTheLoop`, leaving tools ungated that were meant to require
+approval. Nothing failed at the call site, and the mistake surfaced later as
+behavior nobody had configured.
+
+Six keys are rejected, in either atom or string form:
+
+```
+:replace_default_middleware
+:todo_opts
+:filesystem_opts
+:summarization_opts
+:subagent_opts
+:interrupt_on
+```
+
+Move them to the second argument:
+
+```elixir
+# Raises ArgumentError
+Agent.new(%{model: model, replace_default_middleware: true, middleware: [MyMiddleware]})
+
+# Correct
+Agent.new(%{model: model, middleware: [MyMiddleware]}, replace_default_middleware: true)
+```
+
+To find the call sites in your own code:
+
+```
+grep -rnE "replace_default_middleware|todo_opts|filesystem_opts|summarization_opts|subagent_opts|interrupt_on" lib test
+```
+
+The factory generated by `mix sagents.setup` already passes its options
+correctly, so a generated factory needs no change unless it was edited by hand.
+
+Fixing a call site changes behavior, because the option takes effect once it is
+read. With `replace_default_middleware` honored, the default middleware
+(TodoList, FileSystem, SubAgent, Summarization, PatchToolCalls) is absent along
+with its tools and system prompt text, so tests that counted on them may need
+updating. With `interrupt_on` honored, invalid values such as `:always` fail
+`HumanInTheLoop` initialization; use `true`, `false`, or a config map.
+
+### Upgrading from v0.14.x to v0.15.0
+
+Read
+[MIGRATION_PROMPT_v0.14.x_TO_v0.15.0.md](https://github.com/sagents-ai/sagents/blob/main/MIGRATION_PROMPT_v0.14.x_TO_v0.15.0.md).
+It is written to be handed to a coding agent.
+
+It covers the required `Agent.new/2` fix first, then the optional work of
+adopting the tagged shape. An app that adopts no tags keeps working.
+
+### Changed
+
+- `Agent.new/2` raises `ArgumentError` when `replace_default_middleware`,
+  `todo_opts`, `filesystem_opts`, `summarization_opts`, `subagent_opts`, or
+  `interrupt_on` is passed in the attributes map. v0.14.3 logged a warning and
+  built the agent without the option.
+  [#194](https://github.com/sagents-ai/sagents/pull/194)
+- The declared `langchain` requirement is raised to `>= 0.14.1`, the floor the
+  tool result expansion added in v0.14.2 needs. Dependency resolution enforces
+  it rather than the release notes alone, so `mix deps.get` upgrades `langchain`
+  or reports the conflict.
+  [#195](https://github.com/sagents-ai/sagents/pull/195)
+
 ## v0.14.3
 
 Subagents keep their configured run budget and the caller's tracing context.

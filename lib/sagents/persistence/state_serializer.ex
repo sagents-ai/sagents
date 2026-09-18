@@ -78,10 +78,23 @@ defmodule Sagents.Persistence.StateSerializer do
   is a runtime identifier used for process registration and PubSub topics, not
   part of the conversation state. When restoring state, you must provide the
   agent_id to `deserialize_server_state/2` or `AgentServer.start_link_from_state/2`.
+
+  The first argument accepts a `Sagents.Agent` struct or `nil`. Agent
+  configuration is not part of the payload, so the agent is never read. A caller
+  that holds a `Sagents.State` but no agent — one building a fork base, for
+  instance — passes `nil` and receives the identical envelope.
   """
   def serialize_server_state(agent, state, opts \\ [])
 
   def serialize_server_state(%Agent{} = _agent, %State{} = state, opts) do
+    wrap_state(state, opts)
+  end
+
+  def serialize_server_state(nil, %State{} = state, opts) do
+    wrap_state(state, opts)
+  end
+
+  defp wrap_state(%State{} = state, opts) do
     base = %{
       # Version stays at 1, but now only contains state
       "version" => @current_version,

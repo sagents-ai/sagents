@@ -227,8 +227,43 @@ conversations.
 
 ## Event Reference
 
-All events are wrapped as `{:agent, event}` on `:main`, or
-`{:agent, {:debug, event}}` on `:debug`.
+### Envelope shapes
+
+A subscription that asks for no tag receives the bare envelope:
+
+| Channel | Envelope |
+|---------|----------|
+| `:main` | `{:agent, event}` |
+| `:debug` | `{:agent, {:debug, event}}` |
+| filesystem | `{:file_system, change_info}` |
+
+One that asks for a tag receives the three-tuple form on **every** delivery —
+live broadcasts, the status snapshot sent at subscribe time, events broadcast
+during the agent's boot when the subscription was seeded through
+`:initial_subscribers`, and the re-subscription that follows a producer crash:
+
+| Channel | Envelope |
+|---------|----------|
+| `:main` | `{:agent, tag, event}` |
+| `:debug` | `{:agent, tag, {:debug, event}}` |
+| filesystem | `{:file_system, tag, change_info}` |
+
+```elixir
+# {:agent, agent_id, event} — the library supplies the identity
+Subscriber.subscribe_to_agent(subs, agent_id, tagged: true)
+
+# {:agent, card_id, event} — the host supplies its own routing key
+Subscriber.subscribe_to_agent(subs, agent_id, tag: card_id)
+```
+
+`nil` is a legal tag: the option is read as "was `:tag` given", not "is the
+value truthy". See `Sagents.Subscriber.subscribe_to_agent/3` for the full
+option list, and [Viewing several conversations from one
+process](#viewing-several-conversations-from-one-process) for why a
+multi-subscription host needs one.
+
+The event payloads below are written in the bare form. A tagged subscription
+sees the same payloads with the tag inserted after `:agent`.
 
 ### Status events
 
@@ -485,13 +520,68 @@ same set issues no calls at all, which matters because an untrack followed by a
 track of the same conversation is a leave broadcast, and an idle agent that acts
 on it schedules the very shutdown the entry exists to prevent.
 
-One caveat for a host going down this road today: main-channel events are
-delivered as a bare `{:agent, event}` and do not name the agent that sent them,
-so two agents streaming into one mailbox are not separable. Until that changes,
-route each conversation's events through its own subscriber process (pass it to
-`Sagents.Subscriber.subscribe_to_agent/4`) or its own LiveView. Viewer presence
-has no such limit: entries are per topic and one process can hold as many as it
-likes.
+Tag every subscription when you do this. A bare `{:agent, event}` names no
+sender, so two agents streaming into one mailbox interleave with nothing to tell
+them apart, and a `:status_changed` from one satisfies a clause written for the
+other. That costs more than a misrendered panel when a status drives an action
+rather than a render.
+
+The shape that nested LiveViews cannot give you — one process, N component
+states, one routing clause:
+
+```elixir
+subs =
+  Enum.reduce(notes, %{}, fn note, acc ->
+    Subscriber.subscribe_to_agent(acc, note.agent_id, tag: {:note, note.id})
+  end)
+
+def handle_info({:agent, {:note, note_id}, event}, socket) do
+  send_update(ThreadComponent, id: note_id, agent_event: event)
+  {:noreply, socket}
+end
+```
+
+Both recovery helpers will also name the subscription they acted on, so a crash
+or a revival flips exactly one panel and leaves its siblings' in-flight state
+alone:
+
+```elixir
+def handle_info({:DOWN, ref, :process, _pid, reason}, socket) do
+  case Subscriber.handle_publisher_down(socket.assigns.sagents_subs, ref, reason,
+         report: true
+       ) do
+    {:matched, {:agent, agent_id}, subs} ->
+      {:noreply, socket |> assign(:sagents_subs, subs) |> mark_panel_offline(agent_id)}
+
+    :no_match ->
+      {:noreply, socket}
+  end
+end
+
+def handle_info(%{event: "presence_diff", topic: topic, payload: payload}, socket) do
+  {subs, revived} =
+    Subscriber.handle_presence_diff(socket.assigns.sagents_subs, topic, payload,
+      report: true
+    )
+
+  {:noreply, socket |> assign(:sagents_subs, subs) |> mark_panels_live(revived)}
+end
+```
+
+`report: true` is opt-in for the same reason the tag is: without it both helpers
+return exactly what a single-subscription host already matches on. Do not feed
+the reporting result back in on the next event — `subs` is guarded as a map on
+every clause, so the compiler's type checker rejects the mistake outright rather
+than letting it surface as a `BadMapError` two events later.
+
+Viewer presence has no addressing limit of its own: entries are per topic and
+one process can hold as many as it likes.
+
+**Render collapsed threads without an agent.** Thirty findings on a page do not
+mean thirty subscriptions. A closed thread is a plain function component over
+stored messages; open a session only when the reader opens the thread. Starting
+one per collapsed card means thirty agent processes, thirty sets of mount-time
+reads, and thirty viewer-presence entries pinning agents nobody is reading.
 
 Non-LiveView hosts use exactly these same functions on their own state map.
 

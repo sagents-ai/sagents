@@ -48,6 +48,22 @@ defmodule Sagents.TemplatesTest do
       assert {:ok, _ast} = Code.string_to_quoted(source)
     end
 
+    test "subscribes tagged so a second subscription can be added later", %{source: source} do
+      # A socket showing one conversation could take the bare `{:agent, event}`.
+      # Naming the source costs it one wildcard per clause and means a host that
+      # later opens a second panel adds a subscription rather than reworking
+      # every clause it already wrote.
+      assert source =~ "Subscriber.subscribe_to_agent(subs, agent_id, tagged: true)"
+    end
+
+    test "the emitted handle_info examples match the tagged envelope", %{source: source} do
+      # The examples are what a host copies. An untagged example against a
+      # tagged subscription is a FunctionClauseError on the first event, or
+      # worse, a silent no-op for a host that wrote a catch-all.
+      assert source =~ "{:agent, _agent_id, {:status_changed, :running, nil}}"
+      refute source =~ "handle_info({:agent, {:status_changed"
+    end
+
     test "guards the conversation-load path on registry availability", %{source: source} do
       # AgentServer.get_status/1 raises Sagents.RegistryUnavailableError on a
       # draining node, past both its own `catch :exit` and this function's
@@ -171,6 +187,25 @@ defmodule Sagents.TemplatesTest do
       refute source =~ "def maybe_track_viewer("
     end
 
+    test "the recovery helpers take the reporting return shapes", %{source: source} do
+      # Both helpers return the single-subscription shape unless asked. Asking
+      # here means the generated host is already written for the day it holds
+      # several, and it is the shape the multi-panel guidance documents.
+      assert source =~ "Subscriber.handle_publisher_down(subs, ref, reason, report: true)"
+      assert source =~ "{:matched, _sub_key, new_subs} ->"
+      assert source =~ "{new_subs, _revived} ="
+
+      assert source =~
+               "Subscriber.handle_presence_diff(subs, Subscriber.presence_topic(), payload, report: true)"
+    end
+
+    test "only the subs map goes back into state", %{source: source} do
+      # `sagents_subs` is read as a map on every path. Storing the reporting
+      # tuple instead is what makes the *next* presence diff fail, one event
+      # after the mistake.
+      refute source =~ "%{sagents_subs: {"
+    end
+
     test "the session holds a set, not a slot", %{source: source} do
       # One process can view any number of conversations at once: a split view,
       # a dashboard row per running agent, a panel of threads each backed by its
@@ -189,6 +224,25 @@ defmodule Sagents.TemplatesTest do
 
     test "renders to syntactically valid Elixir", %{source: source} do
       assert {:ok, _ast} = Code.string_to_quoted(source)
+    end
+
+    test "every path that subscribes carries the same tag policy", %{source: source} do
+      # A publisher keeps one entry per {channel, pid}, so whichever path
+      # subscribes last decides the envelope. A load path that tags and an
+      # action path that does not gives a conversation whose event shape
+      # changes the first time the user does something, with no error anywhere.
+      assert source =~ "@subscribe_opts [tagged: true]"
+
+      for call <- [
+            "Sagents.Session.ensure_running",
+            "Sagents.Session.resume",
+            "Sagents.Session.dismiss"
+          ] do
+        assert source =~ call, "expected the coordinator to still call #{call}"
+      end
+
+      # One occurrence per subscribing path.
+      assert length(String.split(source, "++ @subscribe_opts")) - 1 == 3
     end
 
     test "declares the viewer-presence contract it implements", %{source: source} do

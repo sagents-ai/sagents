@@ -127,6 +127,179 @@ defmodule Sagents.AgentServerTest do
       :ok = AgentServer.publish_debug_event_from(agent_id, :hi)
       assert_receive {:agent, {:debug, :hi}}, 200
     end
+
+    test "a seeded subscription carries its tag on the boot broadcast" do
+      # The boot :status_changed fires from handle_continue, before the caller
+      # could possibly have called subscribe/3. If the seed did not carry the
+      # tag, that first event would arrive bare while every later one arrived
+      # tagged — a mixed shape worse than either consistent choice.
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent_id),
+          initial_subscribers: [{:main, self(), [tagged: true]}]
+        )
+
+      assert_receive {:agent, ^agent_id, {:status_changed, :idle, nil}}, 200
+    end
+
+    test "a seeded subscription honours a host-supplied tag on both channels" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent_id),
+          initial_subscribers: [{:main, self(), [tag: :card_a]}, {:debug, self(), [tag: :card_a]}]
+        )
+
+      assert_receive {:agent, :card_a, {:status_changed, :idle, nil}}, 200
+
+      :ok = AgentServer.publish_debug_event_from(agent_id, :hi)
+      assert_receive {:agent, :card_a, {:debug, :hi}}, 200
+    end
+
+    test "seeded entries with and without a tag coexist" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      owner = self()
+      untagged = spawn_link(fn -> relay_loop(owner) end)
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent_id),
+          initial_subscribers: [{:main, self(), [tagged: true]}, {:main, untagged}]
+        )
+
+      assert_receive {:agent, ^agent_id, {:status_changed, :idle, nil}}, 200
+      assert_receive {:relayed, {:agent, {:status_changed, :idle, nil}}}, 200
+    end
+  end
+
+  describe "tagged subscriptions" do
+    setup do
+      agent = create_test_agent()
+
+      {:ok, _pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent.agent_id),
+          pubsub: nil
+        )
+
+      %{agent_id: agent.agent_id}
+    end
+
+    test "tagged: true addresses events with the agent id", %{agent_id: agent_id} do
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id, tagged: true)
+
+      :ok = AgentServer.publish_event_from(agent_id, {:custom_test_event, 42})
+
+      assert_receive {:agent, ^agent_id, {:custom_test_event, 42}}, 200
+    end
+
+    test "tag: value addresses events with the host's own key", %{agent_id: agent_id} do
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id, tag: :card_a)
+
+      :ok = AgentServer.publish_event_from(agent_id, {:custom_test_event, 42})
+
+      assert_receive {:agent, :card_a, {:custom_test_event, 42}}, 200
+    end
+
+    test "nil is a usable tag", %{agent_id: agent_id} do
+      # Wrapping the tag internally is what makes this distinguishable from
+      # an untagged subscription rather than collapsing into one.
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id, tag: nil)
+
+      :ok = AgentServer.publish_event_from(agent_id, {:custom_test_event, 42})
+
+      assert_receive {:agent, nil, {:custom_test_event, 42}}, 200
+    end
+
+    test "an untagged subscription receives the bare envelope", %{agent_id: agent_id} do
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id)
+
+      :ok = AgentServer.publish_event_from(agent_id, {:custom_test_event, 42})
+
+      assert_receive {:agent, {:custom_test_event, 42}}, 200
+      refute_receive {:agent, _, _}, 50
+    end
+
+    test "the subscribe-time status snapshot carries the tag", %{agent_id: agent_id} do
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id, tag: :card_a)
+
+      assert_receive {:agent, :card_a, {:status_changed, :idle, nil}}, 200
+    end
+
+    test "the debug channel carries the tag outside the :debug marker", %{agent_id: agent_id} do
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id, channel: :debug, tag: :card_a)
+
+      :ok = AgentServer.publish_debug_event_from(agent_id, :hello_debug)
+
+      assert_receive {:agent, :card_a, {:debug, :hello_debug}}, 200
+    end
+
+    test "the envelope is per channel-and-pid, not per process", %{agent_id: agent_id} do
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id, channel: :main, tag: :card_a)
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id, channel: :debug)
+
+      assert_receive {:agent, :card_a, {:status_changed, :idle, nil}}, 200
+
+      :ok = AgentServer.publish_event_from(agent_id, {:custom_test_event, 42})
+      assert_receive {:agent, :card_a, {:custom_test_event, 42}}, 200
+
+      :ok = AgentServer.publish_debug_event_from(agent_id, :hello_debug)
+      assert_receive {:agent, {:debug, :hello_debug}}, 200
+    end
+
+    test "a positional channel still works alongside the opts form", %{agent_id: agent_id} do
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id, :debug)
+
+      :ok = AgentServer.publish_debug_event_from(agent_id, :hello_debug)
+
+      assert_receive {:agent, {:debug, :hello_debug}}, 200
+    end
+
+    test "re-subscribing with a different tag restates the shape", %{agent_id: agent_id} do
+      {:ok, _pid, ref1} = AgentServer.subscribe(agent_id, tag: :card_a)
+      assert_receive {:agent, :card_a, {:status_changed, :idle, nil}}, 200
+
+      # Registration is idempotent — same monitor, no second snapshot — but the
+      # newest call is the one saying how this mailbox wants its events shaped.
+      {:ok, _pid, ref2} = AgentServer.subscribe(agent_id, tag: :card_b)
+      assert ref1 == ref2
+      refute_receive {:agent, _, {:status_changed, _, _}}, 50
+
+      :ok = AgentServer.publish_event_from(agent_id, {:custom_test_event, 42})
+      assert_receive {:agent, :card_b, {:custom_test_event, 42}}, 200
+    end
+
+    test "unsubscribe accepts the opts form", %{agent_id: agent_id} do
+      {:ok, _pid, _ref} = AgentServer.subscribe(agent_id, channel: :debug, tag: :card_a)
+
+      :ok = AgentServer.unsubscribe(agent_id, channel: :debug)
+
+      :ok = AgentServer.publish_debug_event_from(agent_id, :hello_debug)
+      refute_receive {:agent, :card_a, {:debug, :hello_debug}}, 50
+    end
+
+    test "a subscriber_pid may be given in the opts", %{agent_id: agent_id} do
+      owner = self()
+      relay = spawn_link(fn -> relay_loop(owner) end)
+
+      {:ok, _pid, _ref} =
+        AgentServer.subscribe(agent_id, subscriber_pid: relay, tag: :card_a)
+
+      :ok = AgentServer.publish_event_from(agent_id, {:custom_test_event, 42})
+
+      assert_receive {:relayed, {:agent, :card_a, {:custom_test_event, 42}}}, 200
+    end
   end
 
   describe "on_server_start middleware errors" do
@@ -2179,6 +2352,16 @@ defmodule Sagents.AgentServerTest do
     test "reset/1 returns {:error, :agent_not_running}" do
       assert {:error, :agent_not_running} =
                AgentServer.reset("nonexistent-agent-#{System.unique_integer([:positive])}")
+    end
+  end
+
+  # Forwards everything it receives to `owner`, so a test can assert on what a
+  # subscriber pid other than itself was sent.
+  defp relay_loop(owner) do
+    receive do
+      msg ->
+        send(owner, {:relayed, msg})
+        relay_loop(owner)
     end
   end
 end

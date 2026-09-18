@@ -51,6 +51,7 @@ defmodule Sagents.Session do
     AgentServer,
     AgentSupervisor,
     AgentsDynamicSupervisor,
+    Publisher,
     State,
     Subscriber
   }
@@ -89,9 +90,10 @@ defmodule Sagents.Session do
   - `:scope` — Phoenix scope (forwarded to factory + persistence).
   - `:request_opts` — keyword list passed to the router as the third
     argument. Routers commonly forward this verbatim into `factory_opts`.
-  - `:initial_subscribers` — list of `{channel, pid}` tuples seeded as
-    subscribers before the agent's `init/1` returns. Use to atomically
-    start-and-subscribe.
+  - `:initial_subscribers` — list of `{channel, pid}` or `{channel, pid, opts}`
+    tuples seeded as subscribers before the agent's `init/1` returns. Use to
+    atomically start-and-subscribe. `opts` accepts `:tag` / `:tagged`; see
+    `Sagents.AgentServer.subscribe/3`.
   - `:pending_resume` — a resume payload applied during boot, before the
     initial status broadcast. See `resume/4`, which is the supported way to
     set this.
@@ -152,6 +154,27 @@ defmodule Sagents.Session do
     to your `*Config.from_inputs/1`. Use this for per-call fields like
     `:timezone`, `:tool_context`, or anything else your Config consumes.
 
+  ## Options
+
+  - `:tag` — address this session's events with the given value, so they arrive
+    as `{:agent, tag, event}` instead of `{:agent, event}`. `nil` is a legal
+    tag.
+  - `:tagged` — when `true`, address them with the session's `agent_id`.
+
+  Tag whenever the calling process holds more than one session. The bare
+  envelope names no sender, so a `:status_changed` from one agent is
+  indistinguishable from the same event out of another sharing the mailbox —
+  which costs more than display fidelity if a status drives an action rather
+  than a render.
+
+      # A panel of note threads, each keyed by the card it renders into.
+      {:ok, changes} = Session.ensure_running(config, state, tag: {:note, note_id})
+
+      def handle_info({:agent, {:note, note_id}, event}, socket) do
+        send_update(ThreadComponent, id: note_id, agent_event: event)
+        {:noreply, socket}
+      end
+
   Returns `{:ok, %{sagents_subs: new_subs, agent_id: agent_id}}` for the
   caller to merge back into its state map.
   """
@@ -172,19 +195,33 @@ defmodule Sagents.Session do
     agent_id = config.agent_id_fun.(conversation_id)
     subs = Map.get(state, :sagents_subs, %{})
 
+    # The same pid is enrolled twice: seeded before init/1 returns so it cannot
+    # miss the boot broadcasts, then subscribed again for the subs-map
+    # bookkeeping. Both carry the tag. The publisher keeps one entry per
+    # {channel, pid} and the later call restates its shape, so a tag on only
+    # one of these paths is a tag the host does not get.
+    subscribe_opts = Keyword.take(opts, [:tag, :tagged])
+
     start_opts = [
       scope: Map.fetch!(state, :current_scope),
       request_opts: Keyword.get(opts, :request_opts, []),
-      initial_subscribers: [{:main, self()}],
+      initial_subscribers: [{:main, self(), subscribe_opts}],
       pending_resume: Keyword.get(opts, :pending_resume)
     ]
 
     case start(config, conversation_id, start_opts) do
       {:ok, %{pid: pid} = session_info} ->
+        desired_tag = Publisher.State.resolve_tag(subscribe_opts, agent_id)
+
         new_subs =
           case Map.get(subs, {:agent, agent_id}) do
-            %{state: :subscribed, server_pid: ^pid} -> subs
-            _other -> Subscriber.subscribe_to_agent(subs, agent_id)
+            # A re-subscribe restates the envelope shape, so an entry that
+            # already carries the requested tag is the only one safe to skip.
+            %{state: :subscribed, server_pid: ^pid, tag: ^desired_tag} ->
+              subs
+
+            _other ->
+              Subscriber.subscribe_to_agent(subs, agent_id, subscribe_opts)
           end
 
         {:ok, %{sagents_subs: new_subs, agent_id: agent_id}, session_info}

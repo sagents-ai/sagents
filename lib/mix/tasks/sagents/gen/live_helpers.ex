@@ -46,8 +46,8 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
         end
       end
 
-      # In handle_info/2
-      def handle_info({:agent, {:status_changed, :running, nil}}, socket) do
+      # In handle_info/2. Events carry the agent id.
+      def handle_info({:agent, _agent_id, {:status_changed, :running, nil}}, socket) do
         {:noreply, AgentLiveHelpers.handle_status_running(socket)}
       end
 
@@ -301,13 +301,14 @@ defmodule Mix.Tasks.Sagents.Gen.LiveHelpers do
              end
            end
 
-        3. Integrate event handlers:
+        3. Integrate event handlers. Events carry the agent id, so a socket
+           that later shows more than one conversation routes on it:
 
-           def handle_info({:agent, {:status_changed, :running, nil}}, socket) do
+           def handle_info({:agent, _agent_id, {:status_changed, :running, nil}}, socket) do
              {:noreply, AgentLiveHelpers.handle_status_running(socket)}
            end
 
-           def handle_info({:agent, {:llm_deltas, deltas}}, socket) do
+           def handle_info({:agent, _agent_id, {:llm_deltas, deltas}}, socket) do
              {:noreply, AgentLiveHelpers.handle_llm_deltas(socket, deltas)}
            end
 

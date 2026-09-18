@@ -21,9 +21,18 @@ defmodule <%= module %> do
        Sagents.Subscriber.presence_topic())` so `presence_diff` broadcasts
        drive auto-resubscribe on agent migration.
 
-    2. In `handle_info/2`, route `{:DOWN, ref, :process, _, _}` and
-       `%Phoenix.Socket.Broadcast{event: "presence_diff"}` to
-       `handle_publisher_down/2` and `handle_presence_diff/2` here.
+    2. In `handle_info/2`, route agent events, `{:DOWN, ref, :process, _, _}`
+       and `%Phoenix.Socket.Broadcast{event: "presence_diff"}` here. Events
+       carry the agent id, so a socket that later shows more than one
+       conversation routes on it rather than reworking every clause:
+
+           def handle_info({:agent, _agent_id, {:status_changed, :running, nil}}, socket) do
+             {:noreply, AgentLiveHelpers.handle_status_running(socket)}
+           end
+
+           def handle_info({:DOWN, ref, :process, _, reason}, socket) do
+             {:noreply, AgentLiveHelpers.handle_publisher_down(socket, ref, reason)}
+           end
 
     3. For the action path (send_message, wake_agent, etc.), call
        `<%= coordinator_alias %>.ensure_agent_session_running(socket.assigns,
@@ -347,9 +356,18 @@ defmodule <%= module %> do
     end
   end
 
+  # Every event on this subscription arrives as `{:agent, agent_id, event}`.
+  # A socket showing one conversation could match the bare `{:agent, event}`
+  # instead; naming the source means a second subscription can be added later
+  # without reworking the clauses that already exist.
+  #
+  # `<%= coordinator_alias %>` tags its session calls the same way. Both paths
+  # must agree: the publisher keeps one entry per {channel, pid}, so whichever
+  # subscribes last decides the envelope, and a tag on only one of them is an
+  # envelope that changes shape partway through a conversation.
   defp subscribe_to_agent(socket, agent_id) do
     subs = socket.assigns[:sagents_subs] || %{}
-    new_subs = Subscriber.subscribe_to_agent(subs, agent_id)
+    new_subs = Subscriber.subscribe_to_agent(subs, agent_id, tagged: true)
     assign(socket, :sagents_subs, new_subs)
   end
 

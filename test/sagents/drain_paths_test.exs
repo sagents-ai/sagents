@@ -82,14 +82,17 @@ defmodule Sagents.DrainPathsTest do
       # crash every open LiveView on a draining node.
       subs = Subscriber.subscribe_to_agent(%{}, "anything")
 
-      result =
+      {result, revived} =
         Subscriber.handle_presence_diff(
           subs,
           Subscriber.presence_topic(),
-          %{joins: %{"anything" => %{}}, leaves: %{}}
+          %{joins: %{"anything" => %{}}, leaves: %{}},
+          report: true
         )
 
       assert %{state: :pending} = result[{:agent, "anything"}]
+      # Nothing came back, so nothing is reported as revived.
+      assert revived == []
     end
 
     test "keeps entries it cannot resubscribe rather than dropping them" do

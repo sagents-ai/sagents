@@ -78,10 +78,11 @@ defmodule Sagents.FileSystemServer do
     - UUID: `"550e8400-e29b-41d4-a716-446655440000"`
     - Database ID: `12345` or `"12345"`
   - `:configs` - List of FileSystemConfig structs (optional, default: [])
-  - `:initial_subscribers` - List of `{channel, pid}` tuples seeded as
-    subscribers before `init/1` returns. The only valid channel today is
-    `:main`. Use this when the caller wants subscribe + start to be
-    atomic. Default: `[]`.
+  - `:initial_subscribers` - List of `{channel, pid}` or `{channel, pid, opts}`
+    tuples seeded as subscribers before `init/1` returns. The only valid
+    channel today is `:main`. Use this when the caller wants subscribe + start
+    to be atomic. `opts` accepts `:tag` / `:tagged`; see `subscribe/2`.
+    Default: `[]`.
 
   ## Examples
 
@@ -476,6 +477,17 @@ defmodule Sagents.FileSystemServer do
   Returns `{:error, :process_not_found}` if no FileSystemServer is running
   for the given scope.
 
+  ## Options
+
+  - `:subscriber_pid` — the pid to receive events. Defaults to `self()`.
+  - `:tag` — address this subscription's events with the given value, so they
+    arrive as `{:file_system, tag, change_info}`. `nil` is a legal tag.
+  - `:tagged` — when `true`, address them with `scope_key`.
+
+  A tag is what makes several scopes usable from one mailbox: the bare
+  envelope names no scope, so changes in two filesystems arriving at the same
+  process interleave with nothing to tell them apart.
+
   ## Examples
 
       # Subscribe to user's filesystem
@@ -486,11 +498,28 @@ defmodule Sagents.FileSystemServer do
         {:file_system, {:file_updated, path}} -> IO.puts("File updated: \#{path}")
         {:file_system, {:file_deleted, path}} -> IO.puts("File deleted: \#{path}")
       end
+
+      # Observing two scopes from one process
+      {:ok, _pid, _ref} = FileSystemServer.subscribe(scope_a, tagged: true)
+      {:ok, _pid, _ref} = FileSystemServer.subscribe(scope_b, tagged: true)
+
+      receive do
+        {:file_system, ^scope_a, {:file_updated, path}} ->
+          IO.puts("A updated: \#{path}")
+
+        {:file_system, ^scope_b, {:file_updated, path}} ->
+          IO.puts("B updated: \#{path}")
+      end
   """
-  @spec subscribe(term()) ::
+  @spec subscribe(term(), keyword()) ::
           {:ok, pid(), reference()} | {:error, :process_not_found}
-  def subscribe(scope_key) do
-    Publisher.subscribe(get_name(scope_key), :main)
+  def subscribe(scope_key, opts \\ []) when is_list(opts) do
+    Publisher.subscribe(
+      get_name(scope_key),
+      :main,
+      Keyword.get(opts, :subscriber_pid),
+      Publisher.State.resolve_tag(opts, scope_key)
+    )
   end
 
   @doc """
@@ -518,9 +547,11 @@ defmodule Sagents.FileSystemServer do
         Logger.debug("FileSystemServer started for scope #{inspect(scope_key)}")
 
         # Seed any subscribers passed at start time so they receive every
-        # subsequent event without a subscribe-after-start race.
+        # subsequent event without a subscribe-after-start race. Entries are
+        # `{channel, pid}` or `{channel, pid, opts}`; `tagged: true` resolves
+        # to this server's scope key.
         initial_subscribers = Keyword.get(opts, :initial_subscribers, [])
-        publisher = Publisher.State.seed(state.publisher, initial_subscribers)
+        publisher = Publisher.State.seed(state.publisher, initial_subscribers, scope_key)
         {:ok, %{state | publisher: publisher}}
 
       {:error, reason} ->
@@ -710,9 +741,17 @@ defmodule Sagents.FileSystemServer do
 
   # Broadcast file changes to subscribers via direct send/2.
   # change_info is a tuple like {:file_updated, path} or {:file_deleted, path}.
-  # Events are wrapped as {:file_system, change_info} for easier pattern matching.
+  # An untagged subscription receives `{:file_system, change_info}`; one that
+  # supplied a tag receives `{:file_system, tag, change_info}`, so a process
+  # observing several scopes can tell them apart.
   defp broadcast_file_change(state, change_info) do
-    Publisher.broadcast(state.publisher, :main, {:file_system, change_info})
+    Publisher.broadcast(
+      state.publisher,
+      :main,
+      {:file_system, change_info},
+      &{:file_system, &1, change_info}
+    )
+
     :ok
   end
 end
