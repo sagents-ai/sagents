@@ -45,7 +45,7 @@ Add `sagents` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:sagents, "~> 0.15.0"}
+    {:sagents, "~> 0.15.1"}
   ]
 end
 ```

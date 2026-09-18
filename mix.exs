@@ -2,7 +2,7 @@ defmodule Sagents.MixProject do
   use Mix.Project
 
   @source_url "https://github.com/sagents-ai/sagents"
-  @version "0.15.0"
+  @version "0.15.1"
 
   def project do
     [
@@ -213,7 +213,7 @@ defmodule Sagents.MixProject do
     [
       files: [
         "lib",
-        "priv",
+        "priv/templates",
         "screenshots",
         "docs",
         ".formatter.exs",
