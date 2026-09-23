@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.15.2
+
+An agent keeps running when the model narrates instead of answering.
+
+OpenAI's Responses API labels some assistant messages as commentary, a preamble
+such as "I'll check the deployment status first." GPT-5.x models on tool-heavy
+runs often send one with no tool calls attached. An agent treated that as the
+end of its turn: the run returned `{:ok, state}` on a sentence of intent, the UI
+cleared its progress indicator, and `until_tool` runs failed with
+`until_tool_not_called`. The agent now runs the model again after a message that
+is entirely narration.
+
+No breaking changes. The minimum `langchain` version is raised to `0.14.2`,
+which provides the narration label and the chain continuation this relies on.
+
+Hosts can tell narration from a reply when rendering. Each text and thinking
+item from `DisplayHelpers.extract_display_items/1` carries an `"utterance"` key
+in its `content`, holding `"narration"` or `"answer"`. The key is absent when
+the model did not label the part, so a host that ignores it renders exactly as
+before. Display rows built from `extract_display_items/1` store it with no
+migration. A host that builds its own content map should copy the key across,
+or a reloaded conversation renders every preamble as a reply.
+
+### Added
+
+- `Sagents.Message.DisplayHelpers.narration?/1` reports whether a message is
+  narration. A message holding narration and an answer is not narration.
+  [#197](https://github.com/sagents-ai/sagents/pull/197)
+- Display items carry a per-item `"utterance"` key (`"narration"` or
+  `"answer"`), and the generated display message schema documents it.
+  [#197](https://github.com/sagents-ai/sagents/pull/197)
+
+### Changed
+
+- The declared `langchain` requirement is raised to `>= 0.14.2`.
+  [#197](https://github.com/sagents-ai/sagents/pull/197)
+
+### Fixed
+
+- An assistant message made up entirely of narration no longer ends the agent's
+  turn, for both `ChatOpenAIResponses` and `ChatReqLLM`, including `until_tool`
+  runs. The narration label survives a `StateSerializer` round trip, so a
+  restored conversation classifies the same way.
+  [#197](https://github.com/sagents-ai/sagents/pull/197)
+
 ## v0.15.0
 
 One process subscribed to two agents could not tell their events apart. Every
