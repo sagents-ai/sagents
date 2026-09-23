@@ -8,6 +8,8 @@ defmodule Sagents.Message.DisplayHelpersTest do
   alias LangChain.Message.ToolResult
   alias Sagents.Message.DisplayHelpers
 
+  doctest Sagents.Message.DisplayHelpers, import: true
+
   describe "extract_display_items/1" do
     test "extracts simple text from assistant message" do
       message = Message.new_assistant!("Hello world")
@@ -466,6 +468,123 @@ defmodule Sagents.Message.DisplayHelpersTest do
       message = Message.new_assistant!(%{content: "", status: :length})
 
       assert [] == DisplayHelpers.extract_display_items(message)
+    end
+  end
+
+  describe "narration?/1" do
+    test "true when every text part is narration" do
+      message =
+        Message.new_assistant!(%{content: [ContentPart.narration!("Checking the logs.")]})
+
+      assert DisplayHelpers.narration?(message)
+    end
+
+    test "false when the message also holds an answer" do
+      message =
+        Message.new_assistant!(%{
+          content: [ContentPart.narration!("Checking."), ContentPart.answer!("Out of memory.")]
+        })
+
+      refute DisplayHelpers.narration?(message)
+    end
+
+    test "false for an unlabelled message" do
+      refute DisplayHelpers.narration?(Message.new_assistant!("Here is the answer."))
+    end
+  end
+
+  describe "extract_display_items/1 narration marking" do
+    test "a labelled part carries its label in the item content" do
+      message =
+        Message.new_assistant!(%{
+          content: [
+            ContentPart.narration!("I'll check the logs."),
+            ContentPart.answer!("Out of memory.")
+          ]
+        })
+
+      assert [narration_item, answer_item] = DisplayHelpers.extract_display_items(message)
+
+      assert narration_item.type == :text
+
+      assert narration_item.content == %{
+               "text" => "I'll check the logs.",
+               "utterance" => "narration"
+             }
+
+      assert answer_item.content == %{"text" => "Out of memory.", "utterance" => "answer"}
+    end
+
+    test "an unlabelled part carries no utterance key" do
+      message = Message.new_assistant!(%{content: [ContentPart.text!("Here is the answer.")]})
+
+      assert [item] = DisplayHelpers.extract_display_items(message)
+      assert item.content == %{"text" => "Here is the answer."}
+      refute Map.has_key?(item.content, "utterance")
+    end
+
+    test "string content carries no utterance key" do
+      assert [item] = DisplayHelpers.extract_display_items(Message.new_assistant!("plain"))
+      refute Map.has_key?(item.content, "utterance")
+    end
+
+    test "a labelled thinking part is marked too" do
+      part =
+        %{type: :thinking, content: "Checking the logs next."}
+        |> ContentPart.new!()
+        |> ContentPart.put_utterance("narration")
+
+      message = Message.new_assistant!(%{content: [part]})
+
+      assert [item] = DisplayHelpers.extract_display_items(message)
+      assert item.type == :thinking
+      assert item.content["utterance"] == "narration"
+    end
+
+    test "the label sits beside a stop reason on the same item" do
+      # stop_reason marks only the last item; the label is per item. Both land
+      # in the same content map without displacing each other.
+      message = %Message{
+        role: :assistant,
+        status: :length,
+        content: [ContentPart.narration!("I'll check the")]
+      }
+
+      assert [item] = DisplayHelpers.extract_display_items(message)
+      assert item.content["utterance"] == "narration"
+      assert item.content["stop_reason"] == "length"
+    end
+
+    test "the item content survives JSON, which is how a host stores it" do
+      message =
+        Message.new_assistant!(%{
+          content: [ContentPart.narration!("Looking."), ContentPart.answer!("Found it.")]
+        })
+
+      stored =
+        message
+        |> DisplayHelpers.extract_display_items()
+        |> Enum.map(& &1.content)
+        |> Jason.encode!()
+        |> Jason.decode!()
+
+      assert [
+               %{"text" => "Looking.", "utterance" => "narration"},
+               %{"text" => "Found it.", "utterance" => "answer"}
+             ] = stored
+    end
+
+    test "tool call items are unaffected" do
+      message =
+        Message.new_assistant!(%{
+          content: [ContentPart.narration!("Calling the tool.")],
+          tool_calls: [ToolCall.new!(%{call_id: "1", name: "search", arguments: %{}})]
+        })
+
+      assert [text_item, tool_item] = DisplayHelpers.extract_display_items(message)
+      assert text_item.content["utterance"] == "narration"
+      assert tool_item.type == :tool_call
+      refute Map.has_key?(tool_item.content, "utterance")
     end
   end
 end

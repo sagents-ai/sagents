@@ -25,10 +25,27 @@ defmodule Sagents.Message.DisplayHelpers do
 
   This gives users full control over their schema while providing
   library utilities that handle the extraction complexity.
+
+  ## Narration
+
+  Some models label an utterance as narration: the model saying what it is
+  about to do, rather than its reply. It is a status update about work in
+  progress, and it reads wrong as a chat bubble.
+
+  A text or thinking item carries the label in its `content` under
+  `"utterance"`, holding `"narration"` or `"answer"`, and the key is absent
+  when the model did not label the part. A host that wants to render narration
+  differently matches on `content["utterance"] == "narration"`; a host that
+  does not care ignores the key and renders as it always has.
+
+  The label is per item, not per message, because one message can hold a
+  narration part and an answer part. `narration?/1` answers the message-level
+  question, which is whether the model has said anything conclusive yet.
   """
 
   alias LangChain.LangChainError
   alias LangChain.Message
+  alias LangChain.Message.ContentPart
 
   @typedoc """
   Why a message stopped, normalized from `LangChain.Message.status`.
@@ -118,6 +135,39 @@ defmodule Sagents.Message.DisplayHelpers do
   def stop_details(%Message{}), do: nil
 
   @doc """
+  Returns `true` when the message is narration: the model describing work in
+  progress rather than answering.
+
+  A narration message is not the end of a turn, so an agent runs the model
+  again after one. A host reading a live conversation can use this to keep a
+  progress indicator up, and one rendering a stored conversation can use it to
+  show the message as a status line rather than a reply.
+
+  A message that holds narration **and** an answer is not narration: it
+  contains the reply. Use the per-item `"utterance"` key from
+  `extract_display_items/1` to tell those two parts apart when rendering.
+
+  ## Durability
+
+  The classification survives a state round trip. The marker lives on the
+  content part, which `Sagents.Persistence.StateSerializer` round-trips, so a
+  message restored from persisted agent state classifies the way it did in the
+  turn that produced it.
+
+  ## Examples
+
+      iex> alias LangChain.Message.ContentPart
+      iex> message = LangChain.Message.new_assistant!(%{content: [ContentPart.narration!("Checking the logs.")]})
+      iex> Sagents.Message.DisplayHelpers.narration?(message)
+      true
+
+      iex> Sagents.Message.DisplayHelpers.narration?(LangChain.Message.new_assistant!("done"))
+      false
+  """
+  @spec narration?(Message.t()) :: boolean()
+  defdelegate narration?(message), to: Message
+
+  @doc """
   Extracts all displayable items from a Message.
 
   Returns a list of maps, each representing one displayable item.
@@ -155,6 +205,18 @@ defmodule Sagents.Message.DisplayHelpers do
   The key rides in `content` rather than alongside it because hosts persist
   `item.content` verbatim into a JSONB column. Nothing has to be mapped, and no
   `content_type` whitelist or migration is involved.
+
+  ## Narration
+
+  A text or thinking item whose part is labelled carries `"utterance"` in its
+  `content`, holding `"narration"` or `"answer"`. The key is absent when the
+  model did not label the part, so a host reads it on presence and one that
+  ignores it renders as it always has. It rides in `content` for the same
+  reason `"stop_reason"` does: hosts persist that map verbatim.
+
+  Unlike `"stop_reason"`, which marks only the last item, this is per item. A
+  single response can hold a narration part and an answer part, and they are
+  two items with different labels.
 
   ## Examples
 
@@ -228,6 +290,13 @@ defmodule Sagents.Message.DisplayHelpers do
 
   defp put_stop_details(content, _details), do: content
 
+  # Absent rather than nil for an unlabelled part, matching how every other
+  # optional key here behaves, so a host reads it on presence.
+  defp put_utterance(content, utterance) when is_binary(utterance),
+    do: Map.put(content, "utterance", utterance)
+
+  defp put_utterance(content, _utterance), do: content
+
   # Extract text and thinking content from message.content
   defp extract_content_items(%Message{content: content, role: role}) do
     message_type = role_to_message_type(role)
@@ -252,7 +321,7 @@ defmodule Sagents.Message.DisplayHelpers do
           %{
             type: part.type,
             message_type: message_type,
-            content: %{"text" => part.content}
+            content: put_utterance(%{"text" => part.content}, ContentPart.utterance(part))
           }
         end)
 

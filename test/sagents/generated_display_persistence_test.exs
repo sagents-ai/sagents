@@ -107,6 +107,39 @@ defmodule Sagents.GeneratedDisplayPersistenceTest do
       assert content["stop_reason"] == "length"
     end
 
+    test "carries the narration marker through to persisted content", %{module: module} do
+      # The marker has to reach the database, not just DisplayHelpers: a
+      # reloaded conversation renders every preamble as a reply without it.
+      message =
+        Message.new_assistant!(%{
+          content: [
+            ContentPart.narration!("Checking the logs."),
+            ContentPart.answer!("Out of memory.")
+          ]
+        })
+
+      assert {:ok, saved} = module.save_message(:scope, message, %{conversation_id: 7})
+      assert length(saved) == 2
+
+      assert_receive {:appended, %{"sequence" => 0, "content" => narration_content}}
+      assert_receive {:appended, %{"sequence" => 1, "content" => answer_content}}
+
+      assert narration_content["utterance"] == "narration"
+      assert narration_content["text"] == "Checking the logs."
+      assert answer_content["utterance"] == "answer"
+      assert answer_content["text"] == "Out of memory."
+    end
+
+    test "an unlabelled message writes no utterance key", %{module: module} do
+      assert {:ok, [_row]} =
+               module.save_message(:scope, Message.new_assistant!("Plain reply."), %{
+                 conversation_id: 7
+               })
+
+      assert_receive {:appended, %{"content" => content}}
+      refute Map.has_key?(content, "utterance")
+    end
+
     test "a finished message writes no stop_reason key", %{module: module} do
       message = Message.new_assistant!("All done")
 

@@ -30,11 +30,26 @@ defmodule Sagents.TemplatesTest do
     agent_persistence_module: MyApp.Agents.AgentPersistence,
     display_message_persistence_module: MyApp.Agents.DisplayMessagePersistence,
     owner_type: "user",
-    owner_field: :user_id
+    owner_field: :user_id,
+    # sagents.gen.persistence/*
+    context_module: MyApp.Conversations,
+    owner_module: MyApp.Accounts.User,
+    scope_module: MyApp.Accounts.Scope,
+    repo: MyApp.Repo,
+    table_prefix: "sagents_"
   ]
 
   defp render(name) do
     EEx.eval_file(Path.join([__DIR__, "..", "..", "priv", "templates", name]), @bindings)
+  end
+
+  # The persistence templates read their bindings as assigns, unlike the
+  # top-level ones which take bare variables.
+  defp render_persistence(name) do
+    EEx.eval_file(
+      Path.join([__DIR__, "..", "..", "priv", "templates", "sagents.gen.persistence", name]),
+      assigns: @bindings
+    )
   end
 
   describe "agent_live_helpers.ex.eex" do
@@ -257,6 +272,46 @@ defmodule Sagents.TemplatesTest do
     case :binary.match(source, needle) do
       {start, _length} -> start
       :nomatch -> nil
+    end
+  end
+
+  describe "sagents.gen.persistence templates" do
+    # Nothing else in this suite renders these, so an edit that breaks the EEx
+    # or the Elixir underneath it would reach a host's generator run first.
+    @persistence_templates ~w(
+      agent_state.ex.eex
+      context.ex.eex
+      conversation.ex.eex
+      display_message.ex.eex
+      migration.exs.eex
+    )
+
+    for template <- @persistence_templates do
+      test "#{template} renders to syntactically valid Elixir" do
+        source = render_persistence(unquote(template))
+        assert {:ok, _ast} = Code.string_to_quoted(source)
+      end
+    end
+
+    test "the display message schema documents every content key the framework writes" do
+      # The generated schema is a copy: a host reads these docs to learn what
+      # can turn up in `content`, and a key the framework writes but the schema
+      # does not mention is a key nobody renders.
+      source = render_persistence("display_message.ex.eex")
+
+      for key <- ~w(stop_reason stop_details utterance display_text error_type) do
+        assert source =~ ~s(- `"#{key}"`),
+               "the schema template does not document the #{inspect(key)} content key"
+      end
+    end
+
+    test "the schema accepts content carrying keys beyond the per-type ones" do
+      # `utterance` and `stop_reason` ride inside `content` alongside `text`.
+      # Validation matches on the keys it requires, so it must not be written
+      # as an exact match, or the framework's own rows would be rejected.
+      source = render_persistence("display_message.ex.eex")
+
+      assert source =~ ~s|defp validate_content("text", %{"text" => _text}), do: :ok|
     end
   end
 end

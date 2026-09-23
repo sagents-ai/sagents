@@ -44,6 +44,23 @@ defmodule Sagents.DisplayMessagePersistence do
   If not configured, no display messages are persisted. The agent still
   broadcasts PubSub events for real-time streaming — LiveViews can render
   messages from events alone without persistence.
+
+  ## Narration
+
+  Some models label an utterance as narration: the model saying what it is
+  about to do, rather than its reply. An implementation that stores
+  `Sagents.Message.DisplayHelpers.extract_display_items/1` output keeps the
+  label without doing anything, because it rides inside each item's `content`
+  under `"utterance"` and that map is stored verbatim.
+
+  An implementation that builds its own content map instead should carry the
+  key across, or a reloaded conversation renders every preamble as a reply.
+  `Sagents.Message.DisplayHelpers.narration?/1` answers the same question for a
+  whole message.
+
+  Rendering is the host's call. The label is there so a host that wants to show
+  narration as a status line rather than a chat bubble can, and one that does
+  not care can ignore it.
   """
 
   @typedoc """

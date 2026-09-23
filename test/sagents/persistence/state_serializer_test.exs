@@ -6,7 +6,7 @@ defmodule Sagents.Persistence.StateSerializerTest do
   alias Sagents.Message.DisplayHelpers
   alias LangChain.LangChainError
   alias LangChain.Message
-  alias LangChain.Message.{ToolCall, ToolResult}
+  alias LangChain.Message.{ContentPart, ToolCall, ToolResult}
   alias LangChain.ChatModels.ChatOpenAI
 
   describe "serialize_server_state/2" do
@@ -1184,6 +1184,157 @@ defmodule Sagents.Persistence.StateSerializerTest do
 
       # And the JSONB-bound payload encodes cleanly
       assert {:ok, _json} = Jason.encode(serialized)
+    end
+  end
+
+  describe "narration marker round trip" do
+    # A restored conversation is replayed to the model, and a model that sees
+    # its own narration replayed as a finished reply degrades. The marker has
+    # to come back exactly as it went in, and it has to come back through JSON,
+    # because that is the boundary an integrator stores it across.
+    #
+    # It survives with no help from the serializer: the marker is a string in
+    # `ContentPart.options`, and options round-trip generically.
+
+    defp round_trip(state, agent_id) do
+      serialized = StateSerializer.serialize_state(state)
+
+      {:ok, restored} =
+        serialized
+        |> Jason.encode!()
+        |> Jason.decode!()
+        |> then(&StateSerializer.deserialize_state(agent_id, &1))
+
+      {serialized, restored}
+    end
+
+    defp assistant_at(%State{messages: messages}, index), do: Enum.at(messages, index)
+
+    test "a narration part keeps its marker across serialize, JSON and restore" do
+      agent_id = generate_test_agent_id()
+
+      state =
+        State.new!(%{
+          agent_id: agent_id,
+          messages: [
+            Message.new_user!("why did it fail"),
+            Message.new_assistant!(%{
+              content: [
+                ContentPart.narration!("I'll check the logs."),
+                ContentPart.answer!("Out of memory.")
+              ]
+            })
+          ]
+        })
+
+      {serialized, restored} = round_trip(state, agent_id)
+
+      # The stored shape, asserted directly. A serializer change that stops
+      # writing the option, or writes it under a different key or as a
+      # different type, fails here rather than somewhere downstream.
+      assert %{"content" => [narration_part, answer_part]} =
+               Enum.at(serialized["messages"], 1)
+
+      assert narration_part == %{
+               "type" => "text",
+               "content" => "I'll check the logs.",
+               "options" => %{"utterance" => "narration"}
+             }
+
+      assert answer_part == %{
+               "type" => "text",
+               "content" => "Out of memory.",
+               "options" => %{"utterance" => "answer"}
+             }
+
+      restored_message = assistant_at(restored, 1)
+
+      assert [restored_narration, restored_answer] = restored_message.content
+
+      # The raw option as well as the reader, so a change of value type is
+      # caught even if the reader is taught to tolerate it.
+      assert restored_narration.options == [utterance: "narration"]
+      assert restored_answer.options == [utterance: "answer"]
+
+      assert ContentPart.utterance(restored_narration) == "narration"
+      assert ContentPart.narration?(restored_narration)
+      assert ContentPart.utterance(restored_answer) == "answer"
+
+      assert Message.answer_content(restored_message) == "Out of memory."
+      refute Message.narration?(restored_message)
+    end
+
+    test "a narration-only message is still narration after a restore" do
+      # The loop-critical property. If this is lost, a restored conversation
+      # whose last message is narration reads as finished and the agent stops
+      # without answering, which is the failure the marker exists to prevent.
+      agent_id = generate_test_agent_id()
+
+      state =
+        State.new!(%{
+          agent_id: agent_id,
+          messages: [
+            Message.new_user!("why did it fail"),
+            Message.new_assistant!(%{content: [ContentPart.narration!("Looking into it.")]})
+          ]
+        })
+
+      {_serialized, restored} = round_trip(state, agent_id)
+
+      assert Message.narration?(assistant_at(restored, 1))
+      assert Message.answer_content(assistant_at(restored, 1)) == nil
+    end
+
+    test "an unmarked message restores unmarked" do
+      agent_id = generate_test_agent_id()
+
+      state =
+        State.new!(%{
+          agent_id: agent_id,
+          messages: [
+            Message.new_user!("hi"),
+            Message.new_assistant!(%{content: [ContentPart.text!("Here is the answer.")]})
+          ]
+        })
+
+      {serialized, restored} = round_trip(state, agent_id)
+
+      # No empty options map is written for a part that carries none.
+      assert %{"content" => [part]} = Enum.at(serialized["messages"], 1)
+      refute Map.has_key?(part, "options")
+
+      restored_message = assistant_at(restored, 1)
+      assert [restored_part] = restored_message.content
+      assert ContentPart.utterance(restored_part) == nil
+      refute Message.narration?(restored_message)
+    end
+
+    test "the marker survives beside other part options" do
+      # `options` also carries provider bookkeeping such as a thinking
+      # signature. The marker must not displace it, nor be displaced.
+      agent_id = generate_test_agent_id()
+
+      part =
+        %{type: :thinking, content: "reasoning", options: [signature: "SIG"]}
+        |> ContentPart.new!()
+        |> ContentPart.put_utterance("narration")
+
+      state =
+        State.new!(%{
+          agent_id: agent_id,
+          messages: [
+            Message.new_user!("hi"),
+            Message.new_assistant!(%{content: [part, ContentPart.answer!("Done.")]})
+          ]
+        })
+
+      {_serialized, restored} = round_trip(state, agent_id)
+
+      assert [restored_thinking, restored_answer] = assistant_at(restored, 1).content
+
+      assert Keyword.get(restored_thinking.options, :signature) == "SIG"
+      assert ContentPart.utterance(restored_thinking) == "narration"
+      assert ContentPart.utterance(restored_answer) == "answer"
     end
   end
 end
