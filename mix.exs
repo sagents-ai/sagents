@@ -50,7 +50,7 @@ defmodule Sagents.MixProject do
   defp deps do
     [
       # Core dependency - the LangChain library
-      {:langchain, ">= 0.14.1"},
+      {:langchain, ">= 0.14.2"},
       # {:langchain, path: "../my_langchain"},
 
       # Required dependencies
@@ -67,6 +67,10 @@ defmodule Sagents.MixProject do
 
       # Test dependencies
       {:mimic, "~> 1.8", only: :test},
+      # `langchain` carries req_llm as an optional dependency, so it is absent
+      # unless something asks for it. Tests that drive an agent through
+      # `LangChain.ChatModels.ChatReqLLM` need it present.
+      {:req_llm, ">= 1.11.0", only: :test},
       {:opentelemetry_api, "~> 1.4", only: :test},
       {:opentelemetry, "~> 1.5", only: :test, runtime: false},
       {:local_cluster, "~> 2.0", only: :test},

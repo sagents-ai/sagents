@@ -53,6 +53,13 @@ defmodule <%= @context_module %>.DisplayMessage do
     sends it on a refusal as
     `%{"type" => "refusal", "category" => ..., "explanation" => ...}`. Treat it
     as optional: most stops carry a reason and no detail.
+  - `"utterance"` - on `"text"` and `"thinking"` content, what kind of
+    utterance the part holds: `"narration"` when the model is saying what it is
+    about to do rather than answering, `"answer"` when it is the reply. Absent
+    when the model did not label the part, which is most providers, so render
+    on the presence of the key. Unlike `"stop_reason"`, this is per item rather
+    than only on the last: one response can hold a narration part and then the
+    reply, and they arrive as two rows.
   - `"display_text"` - on `"tool_call"` content, a human-readable label for the
     tool, taken from the `LangChain.Function` or humanized from its name.
   - `"error_type"` - on `"error"` content, the `LangChain.LangChainError` type
