@@ -747,9 +747,9 @@ defmodule Sagents.AgentTest do
                Agent.execute(agent, initial_state)
     end
 
-    test "a message that stopped for length is not an error" do
-      # :length ends the turn early but nothing failed, so the caller gets the
-      # partial message as a normal result. Only the display mark reports it.
+    test "a message that stopped for length ends the run as an error" do
+      # A response cut off by the output token cap or context window is not the
+      # model's finished turn, and any tool calls in it may be partial.
       stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
         {:ok, [%Message{role: :assistant, content: "Partial answ", status: :length}]}
       end)
@@ -757,8 +757,8 @@ defmodule Sagents.AgentTest do
       {:ok, agent} = Agent.new(%{model: mock_model()}, replace_default_middleware: true)
       initial_state = State.new!(%{messages: [Message.new_user!("Hello")]})
 
-      assert {:ok, %State{} = result_state} = Agent.execute(agent, initial_state)
-      assert %Message{status: :length} = List.last(result_state.messages)
+      assert {:error, %LangChainError{type: "response_truncated"}} =
+               Agent.execute(agent, initial_state)
     end
 
     # The partial is announced through :on_message_processed so it reaches the

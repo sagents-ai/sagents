@@ -12,6 +12,10 @@ defmodule Sagents.NarrationContinuationTest do
 
   The control in each block is what makes the rest meaningful: an unmarked
   assistant message still ends the turn after a single call.
+
+  A provider can also state the turn boundary outright with `end_turn`, which
+  decides ahead of the narration marker. A response the provider cut off ends
+  the run as an error without running its partial tool calls.
   """
   use ExUnit.Case, async: false
   use Mimic
@@ -148,6 +152,81 @@ defmodule Sagents.NarrationContinuationTest do
       assert [only] = assistant_messages(state)
       assert utterances(only) == [nil]
       refute Message.narration?(only)
+    end
+  end
+
+  # ── the provider's end_turn report ─────────────────────────────────
+
+  describe "end_turn" do
+    setup do
+      %{model: ChatOpenAIResponses.new!(%{model: "gpt-5.4", api_key: "test"})}
+    end
+
+    test "end_turn: false keeps the turn open on an unmarked message", %{model: model} do
+      expect_posts([
+        [message_item(nil, @commentary)] |> responses_body() |> Map.put("end_turn", false),
+        responses_body([message_item(nil, @answer)])
+      ])
+
+      assert {:ok, state} = run_agent(model, [])
+
+      assert [first, answer] = assistant_messages(state)
+      assert Message.end_turn(first) == false
+      refute Message.narration?(first)
+      assert Message.answer_content(answer) == @answer
+    end
+
+    test "end_turn: true ends the turn on a commentary-only message", %{model: model} do
+      expect_posts([
+        [message_item("commentary", @commentary)]
+        |> responses_body()
+        |> Map.put("end_turn", true)
+      ])
+
+      assert {:ok, state} = run_agent(model, [])
+
+      assert [only] = assistant_messages(state)
+      assert Message.narration?(only)
+      assert Message.end_turn(only) == true
+    end
+  end
+
+  # ── responses the provider cut off ─────────────────────────────────
+
+  describe "truncated responses" do
+    setup do
+      %{model: ChatOpenAIResponses.new!(%{model: "gpt-5.4", api_key: "test"})}
+    end
+
+    defp incomplete_body(items, reason) do
+      items
+      |> responses_body()
+      |> Map.put("status", "incomplete")
+      |> Map.put("incomplete_details", %{"reason" => reason})
+    end
+
+    test "running out of output tokens ends the run without running the partial call",
+         %{model: model} do
+      partial_call =
+        "inspect_resource"
+        |> function_call_item(%{})
+        |> Map.put("status", "incomplete")
+        |> Map.put("arguments", ~s({"name": "we))
+
+      expect_posts([incomplete_body([partial_call], "max_output_tokens")])
+
+      assert {:error, error} = run_agent(model, [inspect_tool(self())])
+
+      assert error.type == "response_truncated"
+      refute_received {:tool_ran, _args}
+    end
+
+    test "a content-filtered response ends the run", %{model: model} do
+      expect_posts([incomplete_body([message_item(nil, "partial")], "content_filter")])
+
+      assert {:error, error} = run_agent(model, [])
+
+      assert error.type == "content_filtered"
     end
   end
 

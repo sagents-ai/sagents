@@ -1,10 +1,12 @@
 defmodule Sagents.AgentServerStreamErrorTest do
   @moduledoc """
-  What a reader sees when the stream dies mid-response.
+  What a reader sees when a response stops early: the stream dies
+  mid-response, or the provider cuts the response off for length or by its
+  content filter.
 
   The partial text the model produced reaches the transcript, marked as having
   stopped early, and takes the place of a fabricated error row. Errors that
-  produced no partial still get the row.
+  produced no displayable partial still get the row.
   """
 
   use Sagents.BaseCase, async: false
@@ -136,5 +138,73 @@ defmodule Sagents.AgentServerStreamErrorTest do
     assert_receive {:saved_synthetic_message, _scope, attrs, _context}, 500
     assert attrs.content_type == "error"
     assert attrs.content["text"] =~ "Sorry, I encountered an error"
+  end
+
+  describe "a response the provider cut off" do
+    test "the partial is marked and no error row is written" do
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [%Message{role: :assistant, content: "Partial answ", status: :length}]}
+      end)
+
+      agent_id = start_agent(nil)
+
+      :ok = AgentServer.add_message(agent_id, Message.new_user!("Hello"))
+
+      assert_receive {:saved_message, %Message{role: :assistant, content: "Partial answ"}, items},
+                     500
+
+      assert [%{type: :text, content: content}] = items
+      assert content["stop_reason"] == "length"
+
+      assert_receive {:agent,
+                      {:status_changed, :error, %LangChainError{type: "response_truncated"}}},
+                     500
+
+      refute_received {:saved_synthetic_message, _scope, _attrs, _context}
+    end
+
+    test "a cut-off tool call is marked in its own row, with no error row" do
+      partial_call =
+        LangChain.Message.ToolCall.new!(%{
+          type: :function,
+          status: :incomplete,
+          call_id: "call_1",
+          name: "search",
+          arguments: ~s({"que)
+        })
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok,
+         [%Message{role: :assistant, content: nil, tool_calls: [partial_call], status: :length}]}
+      end)
+
+      agent_id = start_agent(nil)
+
+      :ok = AgentServer.add_message(agent_id, Message.new_user!("Hello"))
+
+      assert_receive {:saved_message, %Message{role: :assistant, status: :length}, items}, 500
+      assert [%{type: :tool_call, content: content}] = items
+      assert content["stop_reason"] == "length"
+
+      assert_receive {:agent,
+                      {:status_changed, :error, %LangChainError{type: "response_truncated"}}},
+                     500
+
+      refute_received {:saved_synthetic_message, _scope, _attrs, _context}
+    end
+
+    test "a cut-off response with nothing displayable still writes the error row" do
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [%Message{role: :assistant, content: nil, status: :length}]}
+      end)
+
+      agent_id = start_agent(nil)
+
+      :ok = AgentServer.add_message(agent_id, Message.new_user!("Hello"))
+
+      assert_receive {:saved_synthetic_message, _scope, attrs, _context}, 500
+      assert attrs.content_type == "error"
+      assert attrs.content["error_type"] == "response_truncated"
+    end
   end
 end

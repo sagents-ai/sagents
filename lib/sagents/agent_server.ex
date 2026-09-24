@@ -4046,39 +4046,50 @@ defmodule Sagents.AgentServer do
     end
   end
 
-  # A dead stream puts the partial message the model produced into the
-  # transcript, carrying `content["stop_reason"] = "stream_error"`, so the reader
-  # already sees both the text and the fact that it stopped. Adding a fabricated
-  # row underneath would say the same thing again, less precisely and in prose a
-  # host can neither style nor translate.
+  # A response that stopped early puts the partial message the model produced
+  # into the transcript, carrying a `content["stop_reason"]` of
+  # `"stream_error"` (the stream died), `"length"` (the output token cap or
+  # context window cut it off) or `"content_filtered"`. The reader already sees
+  # both the text and why it stopped. Adding a fabricated row underneath would
+  # say the same thing again, less precisely and in prose a host can neither
+  # style nor translate.
   #
   # Every other error still writes one. An error that produced no partial — a
   # request rejected before the stream opened, a tool blowing up, a delta that
   # would not convert — leaves the reader nothing at all otherwise.
   defp maybe_persist_error_as_display_message(server_state, reason) do
-    if stream_error_partial_shown?(server_state) do
+    if stopped_partial_shown?(server_state) do
       :ok
     else
       persist_error_as_display_message(server_state, reason)
     end
   end
 
-  # `Sagents.Agent` announces the partial through `:on_message_processed`, whose
-  # handler both persists the display row and casts `{:turn_state_update, ...}`.
-  # The cast and the task's result are sent by the same process, so the rolling
-  # state has already absorbed the partial by the time the error is handled, and
-  # its presence here is what says the transcript got it.
+  # The partial is announced through `:on_message_processed`: by `Sagents.Agent`
+  # for a dead stream, and by `LLMChain` for a truncated response, which it
+  # processes before ending the run. The handler both persists the display row
+  # and casts `{:turn_state_update, ...}`. The cast and the task's result are
+  # sent by the same process, so the rolling state has already absorbed the
+  # partial by the time the error is handled, and its presence here is what says
+  # the transcript got it.
   #
-  # A partial that produced nothing displayable is never announced, so it is
-  # absent here too and the error row is written, which is what should happen.
-  defp stream_error_partial_shown?(%ServerState{state: %State{messages: messages}}) do
+  # A partial that produced nothing displayable leaves the reader nothing, so the
+  # error row is written for it. `Sagents.Agent` does not announce such a dead
+  # stream partial at all, but `LLMChain` announces every truncated message, so
+  # the check is made here too. A cut-off tool call is displayable: it is shown
+  # as a tool call row carrying the stop reason.
+  defp stopped_partial_shown?(%ServerState{state: %State{messages: messages}}) do
     case List.last(messages) do
-      %Message{} = message -> DisplayHelpers.stop_reason(message) == :stream_error
-      _other -> false
+      %Message{} = message ->
+        DisplayHelpers.stop_reason(message) in [:stream_error, :length, :content_filtered] and
+          DisplayHelpers.extract_display_items(message) != []
+
+      _other ->
+        false
     end
   end
 
-  defp stream_error_partial_shown?(_server_state), do: false
+  defp stopped_partial_shown?(_server_state), do: false
 
   # Persist a row describing the error so it survives page reload.
   #

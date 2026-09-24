@@ -17,6 +17,16 @@ defmodule Sagents.Modes.AgentExecution do
   7. Check if target tool was called (if `until_tool` is set)
   8. Loop if `needs_response` is true, or error if until_tool contract violated
 
+  `LLMChain` sets `needs_response` when a message arrives. It is true after tool
+  results, and after an assistant message that leaves the model's turn open
+  (`LangChain.Message.continues_turn?/1`): the provider reported the turn is
+  not over, or the message is narration only. The loop in step 8 reads that
+  flag and does not inspect the message itself.
+
+  A response the provider cut off (status `:length` or `:content_filtered`)
+  ends the run in step 3 with a `"response_truncated"` or `"content_filtered"`
+  error. Its tool calls may be partial, so step 5 never runs them.
+
   The budget is checked before a call, never after one, so the tools from the
   final permitted response still execute. A target tool returned on that
   response satisfies `until_tool` rather than ending the run with
