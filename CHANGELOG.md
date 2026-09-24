@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.15.3
+
+Picks up `langchain` 0.14.3. A provider can now report whether the model ended
+its turn (`end_turn`), and the agent follows that report ahead of the narration
+label. A response the provider cut off now ends the run as an error instead of
+being returned as a finished turn.
+
+### Upgrading from v0.15.2 - v0.15.3
+
+No API changes. One behavior change is worth checking: when the model's
+response is cut off by the output token limit, the context window, or the
+provider's content filter, `Agent.execute/3` returns
+`{:error, %LangChainError{type: "response_truncated"}}` (or
+`"content_filtered"`) instead of `{:ok, state}`. An `AgentServer` ends in
+status `:error` rather than `:idle`. Tool calls in a cut-off response are not
+executed. The partial message still reaches the transcript, marked with its
+`"stop_reason"`, and no separate error row is written for it. Hosts that
+treated a `"length"` stop reason as a normal finished turn should expect the
+error status alongside it.
+
+### Changed
+
+- The declared `langchain` requirement is raised to `>= 0.14.3`.
+  [#199](https://github.com/sagents-ai/sagents/pull/199)
+- A response with status `:length` or `:content_filtered` ends the run with a
+  `"response_truncated"` or `"content_filtered"` error.
+  [#199](https://github.com/sagents-ai/sagents/pull/199)
+- An assistant message the provider reports as not ending the turn
+  (`end_turn: false`) keeps the agent running, and `end_turn: true` ends the
+  turn even on narration. [#199](https://github.com/sagents-ai/sagents/pull/199)
+
+### Fixed
+
+- `AgentServer` no longer writes an error row under a cut-off message that is
+  already shown in the transcript with its `"length"` or `"content_filtered"`
+  stop reason. A cut-off response with nothing displayable still gets the
+  error row. [#199](https://github.com/sagents-ai/sagents/pull/199)
+
 ## v0.15.2
 
 An agent keeps running when the model narrates instead of answering.
