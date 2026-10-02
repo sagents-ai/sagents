@@ -76,6 +76,7 @@ defmodule Sagents.AgentSupervisor do
 
   alias Sagents.Agent
   alias Sagents.AgentServer
+  alias Sagents.Closures
   alias Sagents.Persistence.StateSerializer
   alias Sagents.ProcessRegistry
   alias Sagents.SubAgentsDynamicSupervisor
@@ -159,6 +160,18 @@ defmodule Sagents.AgentSupervisor do
   - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` (optional, default: nil)
   - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` (optional, default: nil)
 
+  ## Functions the local node cannot call
+
+  Returns `:ignore`, starting nothing, when the options hold an anonymous
+  function this node cannot call. See `Sagents.Closures`.
+
+  The options travel between nodes under the `:horde` distribution, and an
+  anonymous function is only callable where the module that created it is loaded
+  at the same version. An agent started with one it cannot call would run
+  normally and fail every tool call, so it is not started. Nothing is left
+  registered for it, and the next start builds the agent from the code this node
+  is running.
+
   ## Examples
 
       {:ok, sup_pid} = AgentSupervisor.start_link(
@@ -187,7 +200,34 @@ defmodule Sagents.AgentSupervisor do
   def start_link(config) do
     {name, config} = Keyword.pop(config, :name, __MODULE__)
 
-    Supervisor.start_link(__MODULE__, config, name: name)
+    # This runs in the placing supervisor on the node that will host the agent,
+    # so it checks the functions against the code that would have to run them.
+    case Closures.stale_modules(config) do
+      [] ->
+        Supervisor.start_link(__MODULE__, config, name: name)
+
+      modules ->
+        Logger.warning(
+          "Not starting agent #{inspect(agent_id_from(config))} on #{node()}: its " <>
+            "configuration holds anonymous functions from #{inspect(modules)} that were " <>
+            "created by a different version of the code than this node runs."
+        )
+
+        :telemetry.execute(
+          [:sagents, :agent, :stale_closures],
+          %{count: 1},
+          %{agent_id: agent_id_from(config), modules: modules, node: node()}
+        )
+
+        :ignore
+    end
+  end
+
+  defp agent_id_from(config) do
+    case Keyword.get(config, :agent) do
+      %Agent{agent_id: agent_id} -> agent_id
+      _other -> nil
+    end
   end
 
   @doc """
@@ -248,6 +288,8 @@ defmodule Sagents.AgentSupervisor do
 
   - `{:ok, supervisor_pid}` - Supervisor started and AgentServer is ready
   - `{:error, {:agent_startup_timeout, agent_id}}` - AgentServer failed to become ready
+  - `{:error, :stale_closures}` - The options hold an anonymous function this
+    node cannot call, so nothing was started. See `start_link/1`.
   - `{:error, reason}` - Supervisor failed to start
   """
   @spec start_link_sync(keyword()) :: {:ok, pid()} | {:error, term()}
@@ -280,6 +322,9 @@ defmodule Sagents.AgentSupervisor do
           {:error, :timeout} ->
             {:error, {:agent_startup_timeout, agent_id}}
         end
+
+      :ignore ->
+        {:error, :stale_closures}
 
       error ->
         error

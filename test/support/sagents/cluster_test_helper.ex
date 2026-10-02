@@ -254,4 +254,64 @@ defmodule Sagents.ClusterTestHelper do
       initial_state: Sagents.State.new!(%{})
     )
   end
+
+  # ---------------------------------------------------------------------------
+  # Builds that differ between nodes
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Compile `module` on this node with a tool closure and a `build/0` marker.
+
+  Two nodes given different `build` values hold different bytecode for the same
+  module, which is what a rolling deploy leaves behind when a module that
+  defines tool closures changes.
+  """
+  def define_tool_module(module, build) do
+    Code.put_compiler_option(:ignore_module_conflict, true)
+
+    Code.compile_string("""
+    defmodule #{inspect(module)} do
+      def build, do: #{inspect(build)}
+      def tool_function, do: fn _args, _context -> {:ok, "done"} end
+    end
+    """)
+
+    # Drop the previous version outright, as a freshly booted node never had it.
+    :code.purge(module)
+    :ok
+  end
+
+  @doc """
+  Start an agent on this node whose single tool is a closure from `module`.
+  """
+  def start_agent_with_tool(agent_id, module) do
+    tool =
+      LangChain.Function.new!(%{
+        name: "noop",
+        description: "Does nothing",
+        function: module.tool_function()
+      })
+
+    agent =
+      Sagents.Agent.new!(
+        %{
+          agent_id: agent_id,
+          model:
+            ChatAnthropic.new!(%{
+              model: "claude-sonnet-4-5-20250929",
+              api_key: "test_key"
+            }),
+          base_system_prompt: "Rolling deploy test agent",
+          middleware: [],
+          tools: [tool]
+        },
+        replace_default_middleware: true
+      )
+
+    Sagents.AgentsDynamicSupervisor.start_agent_sync(
+      agent_id: agent_id,
+      agent: agent,
+      initial_state: Sagents.State.new!(%{})
+    )
+  end
 end

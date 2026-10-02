@@ -80,6 +80,9 @@ defmodule Sagents.AgentsDynamicSupervisor do
 
   - `{:ok, pid}` - Agent supervisor started successfully
   - `{:ok, pid, info}` - Agent supervisor already running (idempotent)
+  - `{:error, :stale_closures}` - The node chosen to host the agent cannot call
+    an anonymous function in `opts`, so nothing was started. See
+    `Sagents.AgentSupervisor.start_link/1`.
   - `{:error, reason}` - Failed to start
 
   ## Examples
@@ -91,7 +94,8 @@ defmodule Sagents.AgentsDynamicSupervisor do
         pubsub: {Phoenix.PubSub, :my_app_pubsub}
       )
   """
-  @spec start_agent(keyword()) :: DynamicSupervisor.on_start_child()
+  @spec start_agent(keyword()) ::
+          {:ok, pid()} | {:ok, pid(), :already_started} | {:error, term()}
   def start_agent(opts) do
     supervisor = Keyword.get(opts, :supervisor, __MODULE__)
 
@@ -126,6 +130,11 @@ defmodule Sagents.AgentsDynamicSupervisor do
         )
 
         {:ok, pid, :already_started}
+
+      :ignore ->
+        # AgentSupervisor.start_link/1 logs the modules involved on the node
+        # that refused the start.
+        {:error, :stale_closures}
 
       {:error, reason} = error ->
         if registration_timeout?(reason) do

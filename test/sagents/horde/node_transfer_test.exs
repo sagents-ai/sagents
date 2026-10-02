@@ -343,4 +343,81 @@ defmodule Sagents.Horde.NodeTransferTest do
       LocalCluster.stop(cluster)
     end
   end
+
+  describe "redistribution onto a node running a different build" do
+    test "an agent whose tool closures the survivor cannot call is dropped, not handed over" do
+      {cluster, [node1, node2]} = start_horde_cluster(2)
+
+      tool_module = :"Elixir.Sagents.NodeTransferTools#{System.unique_integer([:positive])}"
+
+      for node <- [node1, node2] do
+        :ok = :rpc.call(node, Sagents.ClusterTestHelper, :define_tool_module, [tool_module, 1])
+      end
+
+      # The control agent carries no closures. Both agents have to sit on the
+      # departing node, so place until each lands there.
+      stale_id = "stale-closure-test-#{System.unique_integer([:positive])}"
+      control_id = "stale-closure-control-#{System.unique_integer([:positive])}"
+
+      {:ok, stale_pid} =
+        :rpc.call(node1, Sagents.ClusterTestHelper, :start_agent_with_tool, [
+          stale_id,
+          tool_module
+        ])
+
+      agent_node = node(stale_pid)
+      surviving_node = if agent_node == node1, do: node2, else: node1
+
+      control_id = place_on(agent_node, node1, control_id)
+
+      assert :ok =
+               wait_for_replication(
+                 surviving_node,
+                 agent_node,
+                 [stale_id, control_id],
+                 @replication_timeout
+               )
+
+      # The survivor moves to a build where the tool module compiled differently.
+      :ok =
+        :rpc.call(surviving_node, Sagents.ClusterTestHelper, :define_tool_module, [
+          tool_module,
+          2
+        ])
+
+      LocalCluster.stop(cluster, agent_node)
+
+      # The control agent arriving shows the handoff ran for this departure.
+      assert {:ok, control_pid} =
+               wait_for_agent(surviving_node, control_id, @redistribution_timeout),
+             "Control agent was not redistributed, so the handoff never ran"
+
+      assert node(control_pid) == surviving_node
+
+      # Both specs are handed over in the same pass, so the agent that cannot
+      # run on this build has been refused by now and left no registration.
+      Process.sleep(1_000)
+
+      assert {:error, :not_found} =
+               :rpc.call(surviving_node, Sagents.AgentSupervisor, :get_pid, [stale_id])
+
+      assert {:error, :not_running} =
+               :rpc.call(surviving_node, Sagents.AgentServer, :fetch_pid, [stale_id])
+
+      LocalCluster.stop(cluster)
+    end
+  end
+
+  # Horde picks the node, so start closure-free agents until one lands on
+  # `target`, and return its id.
+  defp place_on(target, via_node, base_id, attempt \\ 1) do
+    agent_id = "#{base_id}-#{attempt}"
+    {_agent_id, pid} = start_agent_on_cluster(via_node, agent_id)
+
+    cond do
+      node(pid) == target -> agent_id
+      attempt < 20 -> place_on(target, via_node, base_id, attempt + 1)
+      true -> flunk("could not place a control agent on #{inspect(target)}")
+    end
+  end
 end

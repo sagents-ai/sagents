@@ -234,6 +234,38 @@ request as the guarantee.** Work that must happen should be driven by a request,
 a job, or a supervisor you control — never by assuming Horde kept an agent alive
 somewhere on your behalf.
 
+### It does not hand an agent to a node that cannot run it
+
+A handed-over agent is restarted from the options of its original start,
+including the `%Sagents.Agent{}` that was built on the node that started it.
+That struct holds anonymous functions: tool functions, callbacks, and anything
+closed over in middleware config. An anonymous function is a reference to a
+specific compiled version of the module that created it, so it can only be
+called on a node with that same version loaded. During a rolling deploy the
+survivor is often running the next build.
+
+An agent started with functions its node cannot call would look healthy and
+return `BadFunctionError` to the model on every tool call. So
+`Sagents.AgentSupervisor.start_link/1` checks the options on the node that is
+about to host the agent and, when it finds such a function, starts nothing:
+
+- On a handover, the agent is dropped cleanly, exactly as described above. The
+  next `Sagents.Session.ensure_running/3` builds the agent from the code the
+  handling node is running and restores its persisted state.
+- On a direct start that Horde placed on a member running a different build,
+  `Sagents.AgentsDynamicSupervisor.start_agent/1` and `start_agent_sync/1`
+  return `{:error, :stale_closures}`.
+
+Either way the refusing node logs a warning naming the modules involved and
+emits `[:sagents, :agent, :stale_closures]` with `%{count: 1}` and
+`%{agent_id: _, modules: _, node: _}`.
+
+The practical consequence is that a deploy which changes a module defining tool
+closures turns handover into a drop for the agents that use it. To keep those
+agents across such a deploy, give tools a named function capture
+(`&MyApp.Tools.search/2`) instead of an inline `fn`. A capture is resolved by
+name when it is called, so it runs whatever version the hosting node has loaded.
+
 If you want to observe this directly, the coverage is in
 `test/sagents/horde/node_transfer_test.exs`:
 

@@ -122,6 +122,91 @@ defmodule Sagents.AgentSupervisorTest do
     end
   end
 
+  describe "start_link/1 with functions this node cannot call" do
+    # Compiles `module` with a tool closure. A different `build` produces
+    # different bytecode, the way a new release does.
+    defp compile_tool_module(module, build) do
+      Code.put_compiler_option(:ignore_module_conflict, true)
+
+      Code.compile_string("""
+      defmodule #{inspect(module)} do
+        def build, do: #{inspect(build)}
+        def tool_function, do: fn _args, _context -> {:ok, "done"} end
+      end
+      """)
+    end
+
+    defp agent_with_tool_from_another_build do
+      module = :"Elixir.Sagents.AgentSupervisorTest.Tools#{System.unique_integer([:positive])}"
+      compile_tool_module(module, 1)
+
+      tool =
+        LangChain.Function.new!(%{
+          name: "noop",
+          description: "Does nothing",
+          function: module.tool_function()
+        })
+
+      compile_tool_module(module, 2)
+
+      {create_test_agent(tools: [tool]), module}
+    end
+
+    test "returns :ignore and registers nothing" do
+      {agent, _module} = agent_with_tool_from_another_build()
+
+      assert :ignore =
+               AgentSupervisor.start_link(
+                 agent: agent,
+                 name: AgentSupervisor.get_name(agent.agent_id)
+               )
+
+      assert {:error, :not_found} = AgentSupervisor.get_pid(agent.agent_id)
+      assert {:error, :not_running} = AgentServer.fetch_pid(agent.agent_id)
+    end
+
+    test "emits a telemetry event naming the modules" do
+      {agent, module} = agent_with_tool_from_another_build()
+      agent_id = agent.agent_id
+      test_pid = self()
+      handler_id = "stale-closures-#{agent_id}"
+
+      :telemetry.attach(
+        handler_id,
+        [:sagents, :agent, :stale_closures],
+        fn _event, measurements, metadata, _config ->
+          send(test_pid, {:stale_closures, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert :ignore = AgentSupervisor.start_link(agent: agent)
+
+      assert_receive {:stale_closures, %{count: 1},
+                      %{agent_id: ^agent_id, modules: [^module], node: _node}}
+    end
+
+    test "start_link_sync/1 reports it as an error" do
+      {agent, _module} = agent_with_tool_from_another_build()
+
+      assert {:error, :stale_closures} = AgentSupervisor.start_link_sync(agent: agent)
+    end
+
+    test "AgentsDynamicSupervisor.start_agent_sync/1 reports it as an error" do
+      {agent, _module} = agent_with_tool_from_another_build()
+
+      assert {:error, :stale_closures} =
+               Sagents.AgentsDynamicSupervisor.start_agent_sync(
+                 agent_id: agent.agent_id,
+                 agent: agent
+               )
+
+      assert {:error, :not_found} = AgentSupervisor.get_pid(agent.agent_id)
+    end
+  end
+
   describe "supervision strategy (:rest_for_one)" do
     test "AgentServer crash restarts SubAgentsDynamicSupervisor" do
       agent = create_test_agent()

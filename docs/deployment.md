@@ -537,6 +537,15 @@ whether state survives.
 >   agents being placed on a node that is about to leave, which is exactly the
 >   case that loses them.
 
+> #### A survivor on a newer build may refuse the handover {: .info}
+>
+> An agent's tool functions and callbacks are anonymous functions tied to the
+> build that created them. A survivor running a different build of those modules
+> cannot call them, so it does not start the agent, and the agent is dropped
+> cleanly as above. The node logs a warning and emits
+> `[:sagents, :agent, :stale_closures]`. See
+> [It does not hand an agent to a node that cannot run it](clustering.md#it-does-not-hand-an-agent-to-a-node-that-cannot-run-it).
+
 ### If the registry itself fails
 
 A node's registry process crashing is rare, but it has a defined outcome on both
