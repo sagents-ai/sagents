@@ -15,6 +15,8 @@ defmodule Sagents.Middleware.PatchToolCalls do
   2. **Agent Resets**: Agent state is restored with incomplete tool calls
   3. **Error Handling**: Tool execution fails without generating a tool result
   4. **State Corruption**: Incomplete state updates or message history corruption
+  5. **Truncated Response**: The response hit the output token limit (message
+     status `:length`), which ends the run before its tool calls execute
 
   ## Solution
 
@@ -22,7 +24,10 @@ defmodule Sagents.Middleware.PatchToolCalls do
 
   1. Scans message history for assistant messages with tool calls
   2. For each tool call, searches forward for a corresponding tool result message
-  3. Creates synthetic tool result messages for any dangling tool calls
+  3. Creates synthetic tool result messages for any dangling tool calls. A call
+     from a truncated response gets an error result telling the model its
+     output was cut off and to retry with smaller output; any other dangling
+     call is reported as cancelled
   4. Returns updated state with patched message history
 
   ## Position in Middleware Stack
@@ -151,7 +156,7 @@ defmodule Sagents.Middleware.PatchToolCalls do
   end
 
   defp build_patches_for(
-         %Message{role: :assistant, tool_calls: tool_calls},
+         %Message{role: :assistant, tool_calls: tool_calls} = message,
          messages,
          index
        )
@@ -160,7 +165,7 @@ defmodule Sagents.Middleware.PatchToolCalls do
       if has_tool_result?(messages, index, tool_call.call_id) do
         []
       else
-        [create_cancellation_message(tool_call)]
+        [create_patch_message(message, tool_call)]
       end
     end)
   end
@@ -184,18 +189,39 @@ defmodule Sagents.Middleware.PatchToolCalls do
     end)
   end
 
-  # Create a synthetic tool result message indicating the tool was cancelled
-  defp create_cancellation_message(%ToolCall{call_id: call_id, name: name}) do
+  # A response cut off at the output token limit ends the run before any of its
+  # tool calls execute, and their arguments may be a partial JSON fragment. The
+  # model is told the real cause so it can retry with smaller output, rather
+  # than guessing at a generic cancellation. Every call in the response gets
+  # this result, including any whose arguments happen to be whole, so the model
+  # never has to work out which part of a batch ran.
+  defp create_patch_message(%Message{status: :length}, %ToolCall{} = tool_call) do
     content =
-      "Tool call #{name} with id #{call_id} was cancelled - " <>
+      "Tool call #{tool_call.name} with id #{tool_call.call_id} was not executed - " <>
+        "your response hit the output token limit before this tool call's arguments " <>
+        "were complete, so none of the tool calls in that response ran. Retry with " <>
+        "fewer tool calls per response, or split large content across several " <>
+        "smaller calls."
+
+    build_tool_result_message(tool_call, content, true)
+  end
+
+  defp create_patch_message(_message, %ToolCall{} = tool_call) do
+    content =
+      "Tool call #{tool_call.name} with id #{tool_call.call_id} was cancelled - " <>
         "another message came in before it could be completed."
 
+    build_tool_result_message(tool_call, content, false)
+  end
+
+  defp build_tool_result_message(%ToolCall{call_id: call_id, name: name}, content, is_error) do
     tool_result =
       ToolResult.new!(%{
         tool_call_id: call_id,
         name: name,
         content: content,
-        type: :function
+        type: :function,
+        is_error: is_error
       })
 
     Message.new_tool_result!(%{tool_results: [tool_result]})

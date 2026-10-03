@@ -348,6 +348,49 @@ defmodule Sagents.Middleware.PatchToolCallsTest do
                "Tool call my_awesome_tool with id call_abc123 was cancelled - " <>
                  "another message came in before it could be completed."
     end
+
+    test "tells the model every call in a response cut off at the output token limit was not run" do
+      # The first call's JSON happens to be whole; the second is a fragment.
+      # Neither ran, and the model is told the same thing for both.
+      truncated =
+        Message.new!(%{
+          role: :assistant,
+          status: :length,
+          tool_calls: [
+            ToolCall.new!(%{
+              call_id: "toolu_1",
+              name: "write_file",
+              status: :complete,
+              arguments: %{"path" => "a.md", "content" => "short"}
+            }),
+            ToolCall.new!(%{
+              call_id: "toolu_2",
+              name: "write_file",
+              status: :incomplete,
+              arguments: ~s({"path": "b.md", "content": "# Notes\\n\\nThe first sec)
+            })
+          ]
+        })
+
+      state = State.new!(%{messages: [truncated, Message.new_user!("try again")]})
+      assert {:ok, %State{messages: patched_messages}} = PatchToolCalls.before_model(state, nil)
+
+      assert [
+               %Message{role: :assistant},
+               %Message{role: :tool, tool_results: [first]},
+               %Message{role: :tool, tool_results: [second]},
+               %Message{role: :user}
+             ] = patched_messages
+
+      assert %ToolResult{tool_call_id: "toolu_1", is_error: true} = first
+      assert %ToolResult{tool_call_id: "toolu_2", is_error: true} = second
+
+      for result <- [first, second] do
+        assert [%Message.ContentPart{content: content}] = result.content
+        assert content =~ "output token limit"
+        assert content =~ "none of the tool calls in that response ran"
+      end
+    end
   end
 
   describe "patch_dangling_tool_calls/1" do

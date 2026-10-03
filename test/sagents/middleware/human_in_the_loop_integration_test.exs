@@ -611,6 +611,97 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
     end
   end
 
+  describe "responses cut off at the output token limit" do
+    # The shape ChatAnthropic produces when stop_reason is "max_tokens" partway
+    # through a tool_use block: the arguments are an unparsed JSON fragment.
+    defp truncated_tool_call_message(call_id) do
+      Message.new!(%{
+        role: :assistant,
+        status: :length,
+        tool_calls: [
+          ToolCall.new!(%{
+            call_id: call_id,
+            name: "write_file",
+            type: :function,
+            status: :incomplete,
+            arguments: ~s({"path": "notes.md", "content": "# Notes\\n\\nThe first sec)
+          })
+        ]
+      })
+    end
+
+    # HumanInTheLoop is the only middleware, so nothing else (such as
+    # PatchToolCalls) answers a cut-off call before the approval check sees it.
+    defp hitl_agent do
+      Agent.new(
+        %{
+          model: create_test_model(),
+          tools: [create_write_file_tool()],
+          middleware: [{HumanInTheLoop, interrupt_on: %{"write_file" => true}}]
+        },
+        replace_default_middleware: true
+      )
+    end
+
+    test "a cut-off tool call ends the run as an error, not an approval request" do
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [truncated_tool_call_message("toolu_cut")]}
+      end)
+
+      {:ok, agent} = hitl_agent()
+      state = State.new!(%{messages: [Message.new_user!("write notes")]})
+
+      assert {:error, %LangChain.LangChainError{type: "response_truncated"}} =
+               Agent.execute(agent, state)
+    end
+
+    test "a cut-off tool call left in the history is not offered for approval on the next run" do
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!(%{content: "Splitting it into smaller writes."})]}
+      end)
+
+      {:ok, agent} = hitl_agent()
+
+      state =
+        State.new!(%{
+          messages: [
+            Message.new_user!("write notes"),
+            truncated_tool_call_message("toolu_cut"),
+            Message.new_user!("try again")
+          ]
+        })
+
+      assert {:ok, %State{}} = Agent.execute(agent, state)
+    end
+
+    test "a new tool call after a cut-off one asks approval for only the new call" do
+      new_call =
+        ToolCall.new!(%{
+          call_id: "toolu_new",
+          name: "write_file",
+          arguments: %{"path" => "notes.md", "content" => "short"}
+        })
+
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!(%{tool_calls: [new_call]})]}
+      end)
+
+      {:ok, agent} = hitl_agent()
+
+      state =
+        State.new!(%{
+          messages: [
+            Message.new_user!("write notes"),
+            truncated_tool_call_message("toolu_cut"),
+            Message.new_user!("try again")
+          ]
+        })
+
+      assert {:interrupt, _state, %{action_requests: [%{tool_call_id: "toolu_new"}]}} =
+               Agent.execute(agent, state)
+    end
+  end
+
   describe "configuration validation" do
     test "accepts valid interrupt_on map" do
       assert {:ok, agent} =
