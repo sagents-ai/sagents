@@ -1,5 +1,69 @@
 # Changelog
 
+## v0.16.0
+
+Agents moved between nodes by Horde are built by the node that runs them. During
+a rolling deploy, a handed-over agent no longer comes back with the previous
+build's configuration and tool functions it cannot call. Also, a model whose
+response was cut off is told why its tool calls did not run.
+
+No function signatures change. The minor version reflects a new requirement on
+the factory and router used with `Sagents.Session`, described below.
+
+### Upgrading from v0.15.3 - v0.16.0
+
+**Factories and routers may run outside the calling process.** `Sagents.Session`
+now starts every agent with a builder that re-runs your `Sagents.FactoryRouter`
+and `Sagents.Factory`. That builder runs on the node hosting the agent, inside a
+supervisor, whenever the agent lands somewhere other than the node run that
+built it: a Horde handover, a start Horde placed on another member, or an agent
+holding functions its node cannot call (for example after a hot code reload in
+development). A router or factory that reads the caller's process dictionary,
+uses `self()`, or relies on Logger or tracing context the caller set must build
+from its arguments instead. Pass per-request inputs through the scope and
+`:request_opts`.
+
+**New start result.** `AgentsDynamicSupervisor.start_agent/1`,
+`start_agent_sync/1`, and `AgentSupervisor.start_link_sync/1` can return
+`{:error, :stale_closures}`, and `AgentSupervisor.start_link/1` can return
+`:ignore`. This happens when the options hold an anonymous function the hosting
+node cannot call and no `:builder` is given. Agents started through `Session`
+always have a builder.
+
+### Added
+
+- `:builder` start option (`{module, function, args}`) for `AgentSupervisor`
+  and `AgentsDynamicSupervisor`, called on the hosting node to build the agent
+  when the one given cannot be trusted there. `Session` supplies one
+  automatically. Emits `[:sagents, :agent, :built]`.
+  [#204](https://github.com/sagents-ai/sagents/pull/204)
+- `Sagents.Closures.stale_modules/1` reports anonymous functions in a term that
+  the local node cannot call.
+  [#203](https://github.com/sagents-ai/sagents/pull/203)
+- `[:sagents, :agent, :stale_closures]` telemetry event when a start is refused
+  for that reason. [#203](https://github.com/sagents-ai/sagents/pull/203)
+
+### Changed
+
+- `AgentsDynamicSupervisor.start_agent/1` records the requesting node in the
+  child spec, so a start can be told apart from a handover.
+  [#204](https://github.com/sagents-ai/sagents/pull/204)
+- `PatchToolCalls` answers the tool calls of a response cut off at the output
+  token limit with an error saying none of them ran and asking for smaller
+  output, instead of the generic cancellation message.
+  [#205](https://github.com/sagents-ai/sagents/pull/205)
+- Clustering and deployment guides describe how a moved agent is rebuilt, and
+  `Sagents.Factory` documents where a factory runs.
+  [#203](https://github.com/sagents-ai/sagents/pull/203),
+  [#204](https://github.com/sagents-ai/sagents/pull/204)
+
+### Fixed
+
+- An agent handed over by Horde to a node on a different build no longer runs
+  with tool closures that raise `BadFunctionError` on every call until its
+  inactivity timeout. [#203](https://github.com/sagents-ai/sagents/pull/203),
+  [#204](https://github.com/sagents-ai/sagents/pull/204)
+
 ## v0.15.3
 
 Picks up `langchain` 0.14.3. A provider can now report whether the model ended
