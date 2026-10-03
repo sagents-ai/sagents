@@ -33,6 +33,16 @@ defmodule Sagents.Factory do
       inspect them.
   - `{:error, reason}` — propagated up the session-start path.
 
+  ## Where it runs
+
+  `Sagents.Session` calls the factory in the process that starts the session.
+  Under the `:horde` distribution it also calls it again on the node that ends
+  up hosting the agent when that is a different node, or a later run of the
+  same one, so a moved agent is built by the code that runs it. That call
+  happens inside a supervisor, so a factory must build from its arguments alone
+  and not from the calling process: its process dictionary, `self()`, or
+  context the caller set. The same applies to the `Sagents.FactoryRouter`.
+
   ## Example
 
       defmodule MyApp.Agents.Factory do

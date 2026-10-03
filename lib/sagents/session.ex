@@ -43,6 +43,15 @@ defmodule Sagents.Session do
 
   All other keys in `session_opts` are app-internal; the library plumbs
   them through but does not inspect them.
+
+  ## Rebuilding on the hosting node
+
+  Every agent is started with a `:builder` (see
+  `Sagents.AgentSupervisor.start_link/1`) that repeats the router and factory
+  calls from the scope, conversation id, and `:request_opts`. When Horde places
+  or moves the agent onto a node other than the one that built it, that node
+  builds the agent again from its own code. The router and factory therefore
+  have to work outside the calling process; see `Sagents.Factory`.
   """
 
   require Logger
@@ -514,38 +523,30 @@ defmodule Sagents.Session do
   # ===========================================================================
 
   defp do_start(config, conversation_id, agent_id, opts) do
-    scope = Keyword.get(opts, :scope)
-    request_opts = Keyword.get(opts, :request_opts, [])
-    initial_subscribers = Keyword.get(opts, :initial_subscribers, [])
-    pending_resume = Keyword.get(opts, :pending_resume)
-
     Logger.info("Starting agent session for conversation #{inspect(conversation_id)}")
 
-    with {:ok, factory_module, factory_config} <-
-           config.factory_router.resolve(scope, conversation_id, request_opts),
-         {:ok, agent, session_opts} <-
-           invoke_factory(factory_module, factory_config, agent_id) do
-      fresh_state_attrs = derive_fresh_state_attrs(session_opts)
+    build_args = %{
+      factory_router: config.factory_router,
+      agent_persistence: config.agent_persistence,
+      display_message_persistence: config.display_message_persistence,
+      pubsub: config.pubsub,
+      presence_module: config.presence_module,
+      inactivity_timeout: config.inactivity_timeout,
+      agent_id: agent_id,
+      conversation_id: conversation_id,
+      scope: Keyword.get(opts, :scope),
+      request_opts: Keyword.get(opts, :request_opts, [])
+    }
 
-      {:ok, state} =
-        State.load_or_new(
-          config.agent_persistence,
-          scope,
-          %{agent_id: agent_id, conversation_id: conversation_id},
-          fresh_state_attrs: fresh_state_attrs
-        )
-
+    # The first build runs here, in the caller, so router and factory errors
+    # reach the caller directly. The builder repeats it on the hosting node when
+    # Horde places or moves the agent onto a node this build did not come from.
+    with {:ok, start_opts} <- build_start_opts(build_args) do
       supervisor_config =
-        build_supervisor_config(
-          config,
-          agent_id,
-          conversation_id,
-          agent,
-          state,
-          initial_subscribers,
-          pending_resume,
-          Keyword.get(session_opts, :supervisor_opts, [])
-        )
+        start_opts
+        |> Keyword.put(:builder, {__MODULE__, :build_start_opts, [build_args]})
+        |> Keyword.put(:initial_subscribers, Keyword.get(opts, :initial_subscribers, []))
+        |> Keyword.put(:pending_resume, Keyword.get(opts, :pending_resume))
 
       case AgentsDynamicSupervisor.start_agent_sync(supervisor_config) do
         {:ok, _supervisor_pid} ->
@@ -555,6 +556,42 @@ defmodule Sagents.Session do
           Logger.error("Failed to start agent session: #{inspect(reason)}")
           {:error, reason}
       end
+    end
+  end
+
+  @doc false
+  # The `:builder` for `Sagents.AgentSupervisor`. Consults the router and the
+  # factory and returns the supervisor options they produce. `build_args` holds
+  # only modules and data, never `config.agent_id_fun`, because it is stored in
+  # the child spec and has to be usable by a different build.
+  @spec build_start_opts(map()) :: {:ok, keyword()} | {:error, term()}
+  def build_start_opts(build_args) do
+    %{
+      agent_id: agent_id,
+      conversation_id: conversation_id,
+      scope: scope,
+      request_opts: request_opts
+    } = build_args
+
+    with {:ok, factory_module, factory_config} <-
+           build_args.factory_router.resolve(scope, conversation_id, request_opts),
+         {:ok, agent, session_opts} <-
+           invoke_factory(factory_module, factory_config, agent_id) do
+      {:ok, state} =
+        State.load_or_new(
+          build_args.agent_persistence,
+          scope,
+          %{agent_id: agent_id, conversation_id: conversation_id},
+          fresh_state_attrs: derive_fresh_state_attrs(session_opts)
+        )
+
+      {:ok,
+       build_supervisor_config(
+         build_args,
+         agent,
+         state,
+         Keyword.get(session_opts, :supervisor_opts, [])
+       )}
     end
   end
 
@@ -617,19 +654,12 @@ defmodule Sagents.Session do
     end
   end
 
-  defp build_supervisor_config(
-         config,
-         agent_id,
-         conversation_id,
-         agent,
-         state,
-         initial_subscribers,
-         pending_resume,
-         supervisor_opts
-       ) do
+  defp build_supervisor_config(build_args, agent, state, supervisor_opts) do
+    %{agent_id: agent_id, conversation_id: conversation_id} = build_args
+
     presence_tracking = [
       enabled: true,
-      presence_module: config.presence_module,
+      presence_module: build_args.presence_module,
       topic: presence_topic(conversation_id)
     ]
 
@@ -638,15 +668,13 @@ defmodule Sagents.Session do
       name: AgentSupervisor.get_name(agent_id),
       agent: agent,
       initial_state: state,
-      pubsub: config.pubsub,
-      inactivity_timeout: config.inactivity_timeout,
+      pubsub: build_args.pubsub,
+      inactivity_timeout: build_args.inactivity_timeout,
       presence_tracking: presence_tracking,
-      presence_module: config.presence_module,
+      presence_module: build_args.presence_module,
       conversation_id: conversation_id,
-      agent_persistence: config.agent_persistence,
-      display_message_persistence: config.display_message_persistence,
-      initial_subscribers: initial_subscribers,
-      pending_resume: pending_resume
+      agent_persistence: build_args.agent_persistence,
+      display_message_persistence: build_args.display_message_persistence
     ]
     # Merge factory-supplied supervisor_opts (e.g. :message_preprocessor) last
     # so factories CAN override base defaults if they have reason to. The

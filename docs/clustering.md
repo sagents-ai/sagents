@@ -234,37 +234,62 @@ request as the guarantee.** Work that must happen should be driven by a request,
 a job, or a supervisor you control — never by assuming Horde kept an agent alive
 somewhere on your behalf.
 
-### It does not hand an agent to a node that cannot run it
+### A moved agent is built by the node that runs it
 
-A handed-over agent is restarted from the options of its original start,
-including the `%Sagents.Agent{}` that was built on the node that started it.
-That struct holds anonymous functions: tool functions, callbacks, and anything
-closed over in middleware config. An anonymous function is a reference to a
-specific compiled version of the module that created it, so it can only be
-called on a node with that same version loaded. During a rolling deploy the
-survivor is often running the next build.
+A handed-over agent is restarted from the options of its original start. Those
+options include the `%Sagents.Agent{}` built by the node that requested the
+start, and during a rolling deploy the survivor is often running the next build.
+Horde can also place a direct start on another member, so the same mismatch
+applies to a start requested during a deploy.
 
-An agent started with functions its node cannot call would look healthy and
-return `BadFunctionError` to the model on every tool call. So
-`Sagents.AgentSupervisor.start_link/1` checks the options on the node that is
-about to host the agent and, when it finds such a function, starts nothing:
+An agent built by another build is wrong in two ways:
 
-- On a handover, the agent is dropped cleanly, exactly as described above. The
-  next `Sagents.Session.ensure_running/3` builds the agent from the code the
-  handling node is running and restores its persisted state.
-- On a direct start that Horde placed on a member running a different build,
+- **Its configuration is that build's.** The system prompt, the tool list, the
+  model, and middleware config are whatever the old code produced, and they
+  stay that way for as long as the agent keeps running.
+- **Its anonymous functions may not be callable.** A tool function, callback,
+  or function closed over in middleware config is a reference to one compiled
+  version of the module that created it. On a node with a different version
+  loaded, every call raises `BadFunctionError`, which the model receives as the
+  tool result.
+
+`Sagents.Session` avoids both. It starts every agent with a `:builder` that
+re-runs your `Sagents.FactoryRouter` and `Sagents.Factory`, and
+`Sagents.AgentSupervisor.start_link/1` uses it whenever the agent is about to
+run somewhere other than the node run that built it. The moved agent is then
+built by the code that runs it, with its persisted state restored, and
+`[:sagents, :agent, :built]` is emitted with `%{count: 1}` and
+`%{agent_id: _, reason: _, node: _}`. A start that stays on the node that
+requested it uses the agent that node already built, so the factory runs once
+per start in the common case.
+
+This makes the router and factory part of the restart path. They may run inside
+a supervisor on another node rather than in the process that called
+`Sagents.Session`, so they must not depend on that process: its process
+dictionary, `self()`, or Logger and tracing context set by the caller. Inputs
+belong in the scope and `:request_opts`, which travel with the start.
+
+If you start agents with `Sagents.AgentsDynamicSupervisor.start_agent/1`
+directly, pass your own `:builder`. See `Sagents.AgentSupervisor.start_link/1`
+for its contract.
+
+#### Without a builder
+
+`Sagents.AgentSupervisor.start_link/1` still checks the options on the node
+that is about to host the agent, and when they hold a function that node cannot
+call, it starts nothing:
+
+- On a handover, the agent is dropped cleanly, exactly as described above, and
+  the next start builds it from current code.
+- On a direct start placed on a member running a different build,
   `Sagents.AgentsDynamicSupervisor.start_agent/1` and `start_agent_sync/1`
   return `{:error, :stale_closures}`.
 
-Either way the refusing node logs a warning naming the modules involved and
-emits `[:sagents, :agent, :stale_closures]` with `%{count: 1}` and
-`%{agent_id: _, modules: _, node: _}`.
-
-The practical consequence is that a deploy which changes a module defining tool
-closures turns handover into a drop for the agents that use it. To keep those
-agents across such a deploy, give tools a named function capture
-(`&MyApp.Tools.search/2`) instead of an inline `fn`. A capture is resolved by
-name when it is called, so it runs whatever version the hosting node has loaded.
+The refusing node logs a warning naming the modules involved and emits
+`[:sagents, :agent, :stale_closures]` with `%{count: 1}` and
+`%{agent_id: _, modules: _, node: _}`. Without a builder, an agent whose
+functions are all still callable is handed over with its original build's
+configuration.
 
 If you want to observe this directly, the coverage is in
 `test/sagents/horde/node_transfer_test.exs`:

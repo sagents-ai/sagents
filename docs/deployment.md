@@ -537,14 +537,15 @@ whether state survives.
 >   agents being placed on a node that is about to leave, which is exactly the
 >   case that loses them.
 
-> #### A survivor on a newer build may refuse the handover {: .info}
+> #### A moved agent is rebuilt by the survivor {: .info}
 >
-> An agent's tool functions and callbacks are anonymous functions tied to the
-> build that created them. A survivor running a different build of those modules
-> cannot call them, so it does not start the agent, and the agent is dropped
-> cleanly as above. The node logs a warning and emits
-> `[:sagents, :agent, :stale_closures]`. See
-> [It does not hand an agent to a node that cannot run it](clustering.md#it-does-not-hand-an-agent-to-a-node-that-cannot-run-it).
+> An agent's configuration and tool functions come from the build that created
+> it, and the survivor is often running the next one. Agents started through
+> `Sagents.Session` are rebuilt on the survivor by your router and factory, so
+> they come back with the new build's configuration and tools. An agent started
+> without a builder is refused instead when it holds functions the survivor
+> cannot call, and the next request starts it. See
+> [A moved agent is built by the node that runs it](clustering.md#a-moved-agent-is-built-by-the-node-that-runs-it).
 
 ### If the registry itself fails
 

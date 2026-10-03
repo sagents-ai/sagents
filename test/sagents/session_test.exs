@@ -235,6 +235,32 @@ defmodule Sagents.SessionTest do
       assert received_config.request_opts == [project_id: 123]
     end
 
+    test "passes a builder that repeats the router and factory from plain data" do
+      _fake_pid = stub_supervisor_ok(self())
+
+      Session.start(base_config(), 1, scope: :s, request_opts: [project_id: 123])
+
+      assert_receive {:router_resolve, :s, 1, [project_id: 123]}
+      assert_receive {:factory_called, "conversation-1", _config}
+      assert_receive {:supervisor_config, opts}
+
+      assert {Session, :build_start_opts, [build_args] = args} = opts[:builder]
+
+      # The builder is stored in the child spec and run by other builds, so it
+      # must not carry agent_id_fun or any other function.
+      refute inspect(args, limit: :infinity) =~ "#Function"
+
+      assert {:ok, built} = Session.build_start_opts(build_args)
+
+      assert_receive {:router_resolve, :s, 1, [project_id: 123]}
+      assert_receive {:factory_called, "conversation-1", _config}
+
+      assert %Sagents.Agent{agent_id: "conversation-1"} = built[:agent]
+      assert built[:agent_persistence] == StubPersistence
+      refute Keyword.has_key?(built, :initial_subscribers)
+      refute Keyword.has_key?(built, :pending_resume)
+    end
+
     test "raises with a clear migration error when factory uses legacy create_agent/1" do
       _fake_pid = stub_supervisor_ok(self())
 

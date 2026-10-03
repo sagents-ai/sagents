@@ -122,6 +122,138 @@ defmodule Sagents.AgentSupervisorTest do
     end
   end
 
+  describe "start_link/1 with a :builder" do
+    # Builder target. Reports the call to the test process and builds an agent
+    # with a recognizable system prompt.
+    def build_agent(test_pid, agent_id) do
+      send(test_pid, {:builder_called, agent_id})
+      {:ok, [agent: create_test_agent(agent_id: agent_id, base_system_prompt: "built")]}
+    end
+
+    def build_error(_test_pid, _agent_id), do: {:error, :nope}
+
+    defp builder(agent_id, function \\ :build_agent),
+      do: {__MODULE__, function, [self(), agent_id]}
+
+    defp prompt_of(agent_id) do
+      {:ok, agent} = AgentServer.get_agent(agent_id)
+      agent.base_system_prompt
+    end
+
+    test "builds the agent when no :agent is given" do
+      agent_id = generate_test_agent_id()
+
+      assert {:ok, _sup_pid} =
+               AgentSupervisor.start_link_sync(agent_id: agent_id, builder: builder(agent_id))
+
+      assert_received {:builder_called, ^agent_id}
+      assert "built" == prompt_of(agent_id)
+    end
+
+    test "uses :agent as given when this node and run requested the start" do
+      agent = create_test_agent(base_system_prompt: "given")
+
+      assert {:ok, _sup_pid} =
+               AgentSupervisor.start_link_sync(
+                 agent: agent,
+                 builder: builder(agent.agent_id),
+                 origin: AgentSupervisor.incarnation()
+               )
+
+      refute_received {:builder_called, _agent_id}
+      assert "given" == prompt_of(agent.agent_id)
+    end
+
+    test "builds when another node requested the start" do
+      agent = create_test_agent(base_system_prompt: "given")
+      agent_id = agent.agent_id
+
+      assert {:ok, _sup_pid} =
+               AgentSupervisor.start_link_sync(
+                 agent: agent,
+                 builder: builder(agent_id),
+                 origin: {:other@host, 1}
+               )
+
+      assert_received {:builder_called, ^agent_id}
+      assert "built" == prompt_of(agent_id)
+    end
+
+    test "builds when an earlier run of this node requested the start" do
+      agent = create_test_agent(base_system_prompt: "given")
+      agent_id = agent.agent_id
+      {this_node, creation} = AgentSupervisor.incarnation()
+
+      assert {:ok, _sup_pid} =
+               AgentSupervisor.start_link_sync(
+                 agent: agent,
+                 builder: builder(agent_id),
+                 origin: {this_node, creation + 1}
+               )
+
+      assert_received {:builder_called, ^agent_id}
+      assert "built" == prompt_of(agent_id)
+    end
+
+    test "builds when :agent holds functions this node cannot call" do
+      {agent, _module} = agent_with_tool_from_another_build()
+      agent_id = agent.agent_id
+
+      assert {:ok, _sup_pid} =
+               AgentSupervisor.start_link_sync(
+                 agent: agent,
+                 builder: builder(agent_id),
+                 origin: AgentSupervisor.incarnation()
+               )
+
+      assert_received {:builder_called, ^agent_id}
+      assert "built" == prompt_of(agent_id)
+    end
+
+    test "keeps options the builder does not return" do
+      agent_id = generate_test_agent_id()
+      initial_state = State.new!(%{messages: [Message.new_user!("kept")]})
+
+      assert {:ok, _sup_pid} =
+               AgentSupervisor.start_link_sync(
+                 agent_id: agent_id,
+                 builder: builder(agent_id),
+                 initial_state: initial_state
+               )
+
+      assert %State{messages: [%Message{role: :user}]} = AgentServer.get_state(agent_id)
+    end
+
+    test "returns the builder's error and starts nothing" do
+      agent_id = generate_test_agent_id()
+
+      assert {:error, :nope} =
+               AgentSupervisor.start_link(
+                 agent_id: agent_id,
+                 builder: builder(agent_id, :build_error),
+                 name: AgentSupervisor.get_name(agent_id)
+               )
+
+      assert {:error, :not_found} = AgentSupervisor.get_pid(agent_id)
+    end
+
+    test "AgentsDynamicSupervisor records the requesting node, so a local start keeps :agent" do
+      agent = create_test_agent(base_system_prompt: "given")
+
+      assert {:ok, _sup_pid} =
+               Sagents.AgentsDynamicSupervisor.start_agent_sync(
+                 agent_id: agent.agent_id,
+                 agent: agent,
+                 builder: builder(agent.agent_id)
+               )
+
+      refute_received {:builder_called, _agent_id}
+      assert "given" == prompt_of(agent.agent_id)
+
+      Sagents.AgentsDynamicSupervisor.stop_agent(agent.agent_id)
+    end
+  end
+
   describe "start_link/1 with functions this node cannot call" do
     # Compiles `module` with a tool closure. A different `build` produces
     # different bytecode, the way a new release does.

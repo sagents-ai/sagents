@@ -65,7 +65,9 @@ defmodule Sagents.AgentsDynamicSupervisor do
 
   - `opts` - Keyword list of options passed to AgentSupervisor.start_link/1
     - `:agent_id` - Agent identifier (required, will be extracted to set supervisor name)
-    - `:agent` - The Agent struct (required)
+    - `:agent` - The Agent struct (required unless `:builder` is given)
+    - `:builder` - `{module, function, args}` that builds the start options on
+      the node hosting the agent. See `Sagents.AgentSupervisor.start_link/1`.
     - `:initial_state` - Initial State for AgentServer (optional)
     - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple (optional, used only for `Phoenix.Presence` wiring)
     - `:inactivity_timeout` - Timeout in milliseconds (optional)
@@ -105,6 +107,11 @@ defmodule Sagents.AgentsDynamicSupervisor do
 
     # Add name to opts for AgentSupervisor
     supervisor_opts = Keyword.put(opts, :name, supervisor_name)
+
+    # Record which run of which node requested the start. The child spec keeps
+    # it, so AgentSupervisor can tell a start on the requesting node from one
+    # Horde placed or moved elsewhere, and use a `:builder` for the latter.
+    supervisor_opts = Keyword.put_new(supervisor_opts, :origin, AgentSupervisor.incarnation())
 
     # Remove :supervisor key as it's not needed by AgentSupervisor
     supervisor_opts = Keyword.delete(supervisor_opts, :supervisor)

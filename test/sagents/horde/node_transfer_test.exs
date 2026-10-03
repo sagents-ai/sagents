@@ -408,6 +408,54 @@ defmodule Sagents.Horde.NodeTransferTest do
     end
   end
 
+  describe "redistribution of an agent started with a :builder" do
+    test "the survivor builds the agent from its own code and the tool runs" do
+      {cluster, [node1, node2]} = start_horde_cluster(2)
+
+      tool_module = :"Elixir.Sagents.NodeTransferTools#{System.unique_integer([:positive])}"
+
+      for node <- [node1, node2] do
+        :ok = :rpc.call(node, Sagents.ClusterTestHelper, :define_tool_module, [tool_module, 1])
+      end
+
+      agent_id = "builder-test-#{System.unique_integer([:positive])}"
+
+      {:ok, original_pid} =
+        :rpc.call(node1, Sagents.ClusterTestHelper, :start_agent_with_tool_builder, [
+          agent_id,
+          tool_module
+        ])
+
+      agent_node = node(original_pid)
+      surviving_node = if agent_node == node1, do: node2, else: node1
+
+      assert {:ok, "build 1"} =
+               :rpc.call(agent_node, Sagents.ClusterTestHelper, :call_agent_tool, [agent_id])
+
+      assert :ok =
+               wait_for_replication(surviving_node, agent_node, [agent_id], @replication_timeout)
+
+      :ok =
+        :rpc.call(surviving_node, Sagents.ClusterTestHelper, :define_tool_module, [
+          tool_module,
+          2
+        ])
+
+      LocalCluster.stop(cluster, agent_node)
+
+      assert {:ok, new_pid} = wait_for_agent(surviving_node, agent_id, @redistribution_timeout),
+             "Agent was not redistributed to surviving node"
+
+      assert node(new_pid) == surviving_node
+
+      # The tool belongs to the survivor's build, not the departed node's.
+      assert {:ok, "build 2"} =
+               :rpc.call(surviving_node, Sagents.ClusterTestHelper, :call_agent_tool, [agent_id])
+
+      LocalCluster.stop(cluster)
+    end
+  end
+
   # Horde picks the node, so start closure-free agents until one lands on
   # `target`, and return its id.
   defp place_on(target, via_node, base_id, attempt \\ 1) do

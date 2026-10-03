@@ -272,7 +272,7 @@ defmodule Sagents.ClusterTestHelper do
     Code.compile_string("""
     defmodule #{inspect(module)} do
       def build, do: #{inspect(build)}
-      def tool_function, do: fn _args, _context -> {:ok, "done"} end
+      def tool_function, do: fn _args, _context -> {:ok, "build #{build}"} end
     end
     """)
 
@@ -285,6 +285,28 @@ defmodule Sagents.ClusterTestHelper do
   Start an agent on this node whose single tool is a closure from `module`.
   """
   def start_agent_with_tool(agent_id, module) do
+    {:ok, opts} = build_agent_with_tool(agent_id, module)
+
+    Sagents.AgentsDynamicSupervisor.start_agent_sync([agent_id: agent_id] ++ opts)
+  end
+
+  @doc """
+  Same as `start_agent_with_tool/2`, with a `:builder` that builds the agent the
+  same way on whichever node ends up hosting it.
+  """
+  def start_agent_with_tool_builder(agent_id, module) do
+    {:ok, opts} = build_agent_with_tool(agent_id, module)
+
+    Sagents.AgentsDynamicSupervisor.start_agent_sync(
+      [agent_id: agent_id, builder: {__MODULE__, :build_agent_with_tool, [agent_id, module]}] ++
+        opts
+    )
+  end
+
+  @doc """
+  Builder for `start_agent_with_tool_builder/2`.
+  """
+  def build_agent_with_tool(agent_id, module) do
     tool =
       LangChain.Function.new!(%{
         name: "noop",
@@ -308,10 +330,15 @@ defmodule Sagents.ClusterTestHelper do
         replace_default_middleware: true
       )
 
-    Sagents.AgentsDynamicSupervisor.start_agent_sync(
-      agent_id: agent_id,
-      agent: agent,
-      initial_state: Sagents.State.new!(%{})
-    )
+    {:ok, [agent: agent, initial_state: Sagents.State.new!(%{})]}
+  end
+
+  @doc """
+  Call the running agent's `noop` tool on this node and return its result.
+  """
+  def call_agent_tool(agent_id) do
+    {:ok, agent} = Sagents.AgentServer.get_agent(agent_id)
+    %LangChain.Function{function: function} = Enum.find(agent.tools, &(&1.name == "noop"))
+    function.(%{}, %{})
   end
 end

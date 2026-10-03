@@ -21,7 +21,7 @@ defmodule Sagents.AgentSupervisor do
   ## Configuration
 
   Accepts a keyword list with:
-  - `:agent` - The Agent struct (required)
+  - `:agent` - The Agent struct (required unless `:builder` is given)
   - `:initial_state` - Initial State for AgentServer (optional)
   - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` (optional, default: nil)
   - `:shutdown_delay` - Delay in milliseconds to allow the supervisor to gracefully stop all children (optional, default: 5000)
@@ -147,7 +147,7 @@ defmodule Sagents.AgentSupervisor do
 
   ## Options
 
-  - `:agent` - The Agent struct (required)
+  - `:agent` - The Agent struct (required unless `:builder` is given)
   - `:initial_state` - Initial State for AgentServer (optional)
   - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` (optional, default: nil).
     Used only for `Phoenix.Presence` `presence_diff` wiring; per-agent events are
@@ -160,17 +160,51 @@ defmodule Sagents.AgentSupervisor do
   - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` (optional, default: nil)
   - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` (optional, default: nil)
 
+  - `:builder` - `{module, function, args}` that builds the start options on the
+    node hosting the agent (optional). See "Building on the hosting node".
+
+  ## Building on the hosting node
+
+  Under the `:horde` distribution these options travel between nodes. Horde can
+  place a start on another member, and it restarts a departed node's agents on a
+  survivor from the options of the original start. During a rolling deploy those
+  nodes run different builds, so an `%Agent{}` built on one of them carries that
+  build's configuration: its system prompt, tools, and middleware config, and
+  anonymous functions that only that build can call.
+
+  A `:builder` lets the hosting node build its own. `start_link/1` calls
+  `apply(module, function, args)` instead of using `:agent` when:
+
+  - there is no `:agent`,
+  - the start was requested by a different node, or by an earlier run of this
+    node (`Sagents.AgentsDynamicSupervisor.start_agent/1` records which), or
+  - the options hold an anonymous function this node cannot call.
+
+  The builder returns `{:ok, opts}` or `{:error, reason}`. The returned options
+  replace those of the original start, and options it does not return are kept,
+  so a builder returns everything it is responsible for (normally `:agent`,
+  `:initial_state`, and any configuration derived alongside them). An error is
+  returned from `start_link/1`, and on a handover the agent is not started.
+
+  Store only modules and plain data in `args`. They travel with the options, so
+  an anonymous function in `args` has the same problem the builder exists to
+  avoid. Keep them to what identifies the agent (an id, a scope, request
+  inputs) and let the builder derive the rest, since `args` were produced by
+  whatever build requested the start.
+
+  `Sagents.Session` supplies a builder that re-runs the configured router and
+  factory.
+
   ## Functions the local node cannot call
 
-  Returns `:ignore`, starting nothing, when the options hold an anonymous
-  function this node cannot call. See `Sagents.Closures`.
+  Returns `:ignore`, starting nothing, when the options it would start with hold
+  an anonymous function this node cannot call. See `Sagents.Closures`. With a
+  `:builder` this only happens when the builder's own `args`, or options it does
+  not return, hold one.
 
-  The options travel between nodes under the `:horde` distribution, and an
-  anonymous function is only callable where the module that created it is loaded
-  at the same version. An agent started with one it cannot call would run
-  normally and fail every tool call, so it is not started. Nothing is left
-  registered for it, and the next start builds the agent from the code this node
-  is running.
+  An agent started with such a function would run normally and fail every tool
+  call, so it is not started. Nothing is left registered for it, and the next
+  start builds the agent from the code this node is running.
 
   ## Examples
 
@@ -201,10 +235,81 @@ defmodule Sagents.AgentSupervisor do
     {name, config} = Keyword.pop(config, :name, __MODULE__)
 
     # This runs in the placing supervisor on the node that will host the agent,
-    # so it checks the functions against the code that would have to run them.
+    # so the build and the check both happen against the code that will run it.
+    with {:ok, config} <- prepare_config(config),
+         :ok <- check_closures(config) do
+      Supervisor.start_link(__MODULE__, config, name: name)
+    end
+  end
+
+  @doc false
+  # Identifies this run of this node. `:creation` changes each time a node
+  # starts, so a node that restarts under the same name on a new build does not
+  # match an `:origin` recorded by its previous run.
+  @spec incarnation() :: {node(), non_neg_integer()}
+  def incarnation, do: {node(), :erlang.system_info(:creation)}
+
+  defp prepare_config(config) do
+    {builder, config} = Keyword.pop(config, :builder)
+    {origin, config} = Keyword.pop(config, :origin)
+
+    case builder do
+      nil ->
+        {:ok, config}
+
+      {module, function, args} when is_atom(module) and is_atom(function) and is_list(args) ->
+        case rebuild_reason(config, origin) do
+          nil -> {:ok, config}
+          reason -> build(builder, config, reason)
+        end
+
+      other ->
+        raise ArgumentError,
+              "`:builder` must be a {module, function, args} tuple, got: #{inspect(other)}"
+    end
+  end
+
+  # A start with no `:origin` did not come through AgentsDynamicSupervisor and
+  # was requested on this node.
+  defp rebuild_reason(config, origin) do
+    cond do
+      not Keyword.has_key?(config, :agent) -> :no_agent
+      origin not in [nil, incarnation()] -> :other_origin
+      Closures.stale_modules(config) != [] -> :stale_closures
+      true -> nil
+    end
+  end
+
+  defp build({module, function, args}, config, reason) do
+    case apply(module, function, args) do
+      {:ok, built} when is_list(built) ->
+        config = Keyword.merge(config, Keyword.delete(built, :name))
+
+        Logger.info(
+          "Built agent #{inspect(agent_id_from(config))} on #{node()} with " <>
+            "#{inspect(module)}.#{function}/#{length(args)} (#{reason})"
+        )
+
+        :telemetry.execute(
+          [:sagents, :agent, :built],
+          %{count: 1},
+          %{agent_id: agent_id_from(config), reason: reason, node: node()}
+        )
+
+        {:ok, config}
+
+      {:error, _reason} = error ->
+        error
+
+      other ->
+        {:error, {:invalid_builder_return, other}}
+    end
+  end
+
+  defp check_closures(config) do
     case Closures.stale_modules(config) do
       [] ->
-        Supervisor.start_link(__MODULE__, config, name: name)
+        :ok
 
       modules ->
         Logger.warning(
@@ -226,7 +331,7 @@ defmodule Sagents.AgentSupervisor do
   defp agent_id_from(config) do
     case Keyword.get(config, :agent) do
       %Agent{agent_id: agent_id} -> agent_id
-      _other -> nil
+      _other -> Keyword.get(config, :agent_id)
     end
   end
 
@@ -297,9 +402,12 @@ defmodule Sagents.AgentSupervisor do
     # Extract startup_timeout before passing to start_link
     {startup_timeout, config} = Keyword.pop(config, :startup_timeout, 5_000)
 
-    # Get agent_id for waiting
-    agent = Keyword.fetch!(config, :agent)
-    agent_id = agent.agent_id
+    # Get agent_id for waiting. A start that builds its agent names it up front.
+    agent_id =
+      case Keyword.fetch(config, :agent) do
+        {:ok, %Agent{agent_id: agent_id}} -> agent_id
+        :error -> Keyword.fetch!(config, :agent_id)
+      end
 
     # Start supervisor normally
     case start_link(config) do
