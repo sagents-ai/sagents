@@ -1,5 +1,69 @@
 # Changelog
 
+## v0.16.1
+
+Fixes a HITL bug that could approve the wrong tool. When an interrupt held
+several tool calls and the user decided them in an order other than first to
+last, each decision was applied to whichever tool held that position, not the
+tool the user chose. Rejecting the second tool and then approving the first ran
+the second tool and rejected the first. Hosts that only ever decide the first
+pending tool were not affected.
+
+Code that worked correctly before still works the same way.
+`AgentUtils.advance_hitl_decisions/3` gains one return value, described below.
+
+### Upgrading from v0.16.0 - v0.16.1
+
+**New return value.** `AgentUtils.advance_hitl_decisions/3` returns
+`{:error, :not_pending}` when no pending tool matches: an index outside the
+pending list, an empty list, or a `tool_call_id` that was already decided (for
+example, a repeated click). Before, those calls quietly recorded a decision for
+the wrong tool, or resumed with a made-up one. Nothing is recorded now. Add a
+clause wherever you `case` on the result, including the generated
+`handle_hitl_decision/3` helpers. Without one, the call raises
+`CaseClauseError`:
+
+```elixir
+case AgentUtils.advance_hitl_decisions(socket.assigns, tool_call_id, :approve) do
+  {:resume, decisions, changes} -> ...
+  {:more, changes} -> ...
+  {:error, :not_pending} -> {:noreply, socket}
+end
+```
+
+To pick up the matching changes in generated code, re-run the generator or copy
+the `handle_hitl_decision/3` change from `priv/templates/agent_live_helpers.ex.eex`.
+
+**Decisions carry a `:tool_call_id`.** Decisions built by
+`advance_hitl_decisions/3` now look like
+`%{type: :approve, tool_call_id: "call_1"}`. Update host tests that compare the
+accumulated `hitl_decisions` exactly.
+
+**Don't mix decisions with and without ids.** In one resume, either every
+decision carries a `:tool_call_id` or none does. A list mixing the two is
+refused.
+
+### Added
+
+- `advance_hitl_decisions/3` accepts a `tool_call_id` as well as an index. A
+  UI that shows several pending tools at once should use the id, because
+  positions shift as tools are decided.
+  [#207](https://github.com/sagents-ai/sagents/pull/207)
+- `AgentUtils.pair_decisions/2` matches each HITL decision to the tool it was
+  made for: by `:tool_call_id` when decisions carry one, by position otherwise.
+  [#207](https://github.com/sagents-ai/sagents/pull/207)
+- HITL decisions passed to `AgentServer.resume/2` or `Agent.resume/3` may name
+  their tool with `:tool_call_id` and come in any order. Duplicate, unknown, or
+  missing ids are rejected.
+  [#207](https://github.com/sagents-ai/sagents/pull/207)
+
+### Fixed
+
+- HITL decisions made out of order are applied to the tools they were made
+  for, in both `HumanInTheLoop` and `SubAgent.resume`. `allowed_decisions` is
+  checked against that same tool.
+  [#207](https://github.com/sagents-ai/sagents/pull/207)
+
 ## v0.16.0
 
 Agents moved between nodes by Horde are built by the node that runs them. During
