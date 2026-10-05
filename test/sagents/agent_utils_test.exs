@@ -642,19 +642,27 @@ defmodule Sagents.AgentUtilsTest do
       assert {:more, changes} = AgentUtils.advance_hitl_decisions(state, 1, :approve)
 
       assert changes.pending_tools == [%{tool_call_id: "a"}, %{tool_call_id: "c"}]
-      assert changes.hitl_decisions == [%{type: :approve}]
+      assert changes.hitl_decisions == [%{type: :approve, tool_call_id: "b"}]
     end
 
     test "returns :resume with all decisions when last tool is decided" do
       state = %{
-        pending_tools: [%{tool_call_id: "only"}],
-        hitl_decisions: [%{type: :approve}, %{type: :reject}]
+        pending_tools: [%{tool_call_id: "c"}],
+        hitl_decisions: [
+          %{type: :approve, tool_call_id: "a"},
+          %{type: :reject, tool_call_id: "b"}
+        ]
       }
 
       assert {:resume, accumulated, changes} =
                AgentUtils.advance_hitl_decisions(state, 0, :approve)
 
-      assert accumulated == [%{type: :approve}, %{type: :reject}, %{type: :approve}]
+      assert accumulated == [
+               %{type: :approve, tool_call_id: "a"},
+               %{type: :reject, tool_call_id: "b"},
+               %{type: :approve, tool_call_id: "c"}
+             ]
+
       assert changes == %{pending_tools: [], interrupt_data: nil, hitl_decisions: []}
     end
 
@@ -664,23 +672,93 @@ defmodule Sagents.AgentUtilsTest do
       assert {:more, changes} = AgentUtils.advance_hitl_decisions(state, 0, :reject)
 
       assert changes.pending_tools == [%{tool_call_id: "b"}]
-      assert changes.hitl_decisions == [%{type: :reject}]
+      assert changes.hitl_decisions == [%{type: :reject, tool_call_id: "a"}]
     end
 
     test "treats nil :hitl_decisions as empty" do
       state = %{pending_tools: [%{tool_call_id: "a"}], hitl_decisions: nil}
 
-      assert {:resume, [%{type: :approve}], _changes} =
+      assert {:resume, [%{type: :approve, tool_call_id: "a"}], _changes} =
                AgentUtils.advance_hitl_decisions(state, 0, :approve)
     end
 
     test "deletes the correct tool by index, preserving order of survivors" do
-      tools = [%{id: 1}, %{id: 2}, %{id: 3}, %{id: 4}]
+      tools = [
+        %{tool_call_id: "1"},
+        %{tool_call_id: "2"},
+        %{tool_call_id: "3"},
+        %{tool_call_id: "4"}
+      ]
+
       state = %{pending_tools: tools, hitl_decisions: []}
 
       assert {:more, changes} = AgentUtils.advance_hitl_decisions(state, 2, :approve)
 
-      assert changes.pending_tools == [%{id: 1}, %{id: 2}, %{id: 4}]
+      assert changes.pending_tools == [
+               %{tool_call_id: "1"},
+               %{tool_call_id: "2"},
+               %{tool_call_id: "4"}
+             ]
+    end
+
+    test "addresses a pending tool by its tool_call_id" do
+      state = %{
+        pending_tools: [%{tool_call_id: "a"}, %{tool_call_id: "b"}],
+        hitl_decisions: []
+      }
+
+      assert {:more, changes} = AgentUtils.advance_hitl_decisions(state, "b", :reject)
+
+      assert changes.pending_tools == [%{tool_call_id: "a"}]
+      assert changes.hitl_decisions == [%{type: :reject, tool_call_id: "b"}]
+    end
+
+    test "returns an error for an index outside the pending list" do
+      state = %{pending_tools: [%{tool_call_id: "a"}], hitl_decisions: []}
+
+      assert {:error, :not_pending} = AgentUtils.advance_hitl_decisions(state, 1, :approve)
+      assert {:error, :not_pending} = AgentUtils.advance_hitl_decisions(state, -1, :approve)
+    end
+
+    test "returns an error for a tool_call_id that is no longer pending" do
+      state = %{
+        pending_tools: [%{tool_call_id: "b"}],
+        hitl_decisions: [%{type: :approve, tool_call_id: "a"}]
+      }
+
+      assert {:error, :not_pending} = AgentUtils.advance_hitl_decisions(state, "a", :reject)
+    end
+
+    test "decisions made out of order resolve against the tool they were made for" do
+      all_tool_calls = [
+        create_tool_call("write_file", "call_a"),
+        create_tool_call("delete_file", "call_b")
+      ]
+
+      action_requests = [
+        %{tool_call_id: "call_a", tool_name: "write_file", arguments: %{}},
+        %{tool_call_id: "call_b", tool_name: "delete_file", arguments: %{}}
+      ]
+
+      state = %{pending_tools: action_requests, hitl_decisions: []}
+
+      # Reject the second tool first, then approve the first.
+      assert {:more, changes} = AgentUtils.advance_hitl_decisions(state, 1, :reject)
+      state = Map.merge(state, changes)
+
+      assert {:resume, decisions, _changes} =
+               AgentUtils.advance_hitl_decisions(state, 0, :approve)
+
+      assert [
+               %{type: :approve, tool_call_id: "call_a"},
+               %{type: :reject, tool_call_id: "call_b"}
+             ] =
+               AgentUtils.build_full_decisions(
+                 all_tool_calls,
+                 ["call_a", "call_b"],
+                 decisions,
+                 action_requests
+               )
     end
   end
 

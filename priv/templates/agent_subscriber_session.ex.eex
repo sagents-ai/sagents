@@ -301,7 +301,12 @@ defmodule <%= module %> do
   Returns `{:resume, accumulated, changes}` when this decision settles all
   pending tools (the host should call `AgentServer.resume(agent_id, accumulated)`
   and then merge `changes` plus `hitl_resume_running_changes/0` on success),
-  or `{:more, changes}` when there are still tools to decide.
+  `{:more, changes}` when there are still tools to decide, or
+  `{:error, :not_pending}` when no pending tool is at `index`.
+
+  Each decision records the `tool_call_id` of the tool it was made for, so
+  tools may be decided in any order. See
+  `Sagents.AgentUtils.advance_hitl_decisions/3`.
   """
   def handle_hitl_decision(state, index, decision_type) do
     AgentUtils.advance_hitl_decisions(state, index, decision_type)

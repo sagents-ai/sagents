@@ -119,8 +119,12 @@ defmodule Sagents.Middleware.HumanInTheLoop do
 
   ## Resume Structure
 
-  Resume execution by providing decisions that correspond to each action request
-  in order.
+  Resume execution by providing one decision per action request. A decision
+  answers an action request either by naming its `:tool_call_id`, or by
+  position when no decision names one (see `Sagents.AgentUtils.pair_decisions/2`).
+  Naming the id is the safer form for a UI that lets the user decide tools
+  in any order: `Sagents.AgentUtils.advance_hitl_decisions/3` builds decisions
+  this way.
 
   ### Decision Types
 
@@ -142,9 +146,12 @@ defmodule Sagents.Middleware.HumanInTheLoop do
       # Reject decision
       %{type: :reject}
 
+  Any decision may also carry the `:tool_call_id` of the action request it
+  answers. Either every decision carries one or none does.
+
   ### Complete Resume Example
 
-  The decisions list must match the order and count of action_requests:
+  Positional decisions must match the order and count of action_requests:
 
       # Given interrupt with 3 action requests
       {:interrupt, state, %{action_requests: [req1, req2, req3], ...}}
@@ -158,6 +165,14 @@ defmodule Sagents.Middleware.HumanInTheLoop do
 
       # Resume execution
       {:ok, final_state} = Agent.resume(agent, state, decisions)
+
+  Decisions keyed by `:tool_call_id` may come in any order:
+
+      decisions = [
+        %{type: :reject, tool_call_id: req3.tool_call_id},
+        %{type: :approve, tool_call_id: req1.tool_call_id},
+        %{type: :edit, tool_call_id: req2.tool_call_id, arguments: %{"path" => "other.txt"}}
+      ]
 
   ## Position in Middleware Stack
 
@@ -187,6 +202,7 @@ defmodule Sagents.Middleware.HumanInTheLoop do
   @behaviour Sagents.Middleware
 
   alias Sagents.Agent
+  alias Sagents.AgentUtils
   alias Sagents.State
   alias Sagents.AgentServer
   alias LangChain.Message
@@ -215,7 +231,8 @@ defmodule Sagents.Middleware.HumanInTheLoop do
 
   @type decision :: %{
           required(:type) => :approve | :edit | :reject,
-          optional(:arguments) => map()
+          optional(:arguments) => map(),
+          optional(:tool_call_id) => String.t()
         }
 
   @default_decisions [:approve, :edit, :reject]
@@ -462,21 +479,12 @@ defmodule Sagents.Middleware.HumanInTheLoop do
   # Build full decisions array matching ALL tool calls.
   # Auto-approve non-HITL tools, use human decisions for HITL tools.
   defp build_full_decisions(all_tool_calls, decisions, interrupt_data) do
-    hitl_tool_call_ids = Map.get(interrupt_data, :hitl_tool_call_ids, [])
-    action_requests = Map.get(interrupt_data, :action_requests, [])
-
-    decisions_by_id =
-      action_requests
-      |> Enum.zip(decisions)
-      |> Map.new(fn {action_req, decision} -> {action_req.tool_call_id, decision} end)
-
-    Enum.map(all_tool_calls, fn tc ->
-      if tc.call_id in hitl_tool_call_ids do
-        Map.fetch!(decisions_by_id, tc.call_id)
-      else
-        %{type: :approve}
-      end
-    end)
+    AgentUtils.build_full_decisions(
+      all_tool_calls,
+      Map.get(interrupt_data, :hitl_tool_call_ids, []),
+      decisions,
+      Map.get(interrupt_data, :action_requests, [])
+    )
   end
 
   # Private functions
@@ -592,15 +600,19 @@ defmodule Sagents.Middleware.HumanInTheLoop do
   end
 
   defp validate_decisions_against_action_requests(action_requests, decisions, interrupt_data) do
-    # Pair action requests with decisions and add index
-    paired =
-      Enum.zip(action_requests, decisions)
-      |> Enum.with_index()
+    case AgentUtils.pair_decisions(action_requests, decisions) do
+      {:ok, pairs} -> validate_decision_pairs(pairs, interrupt_data)
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
+  defp validate_decision_pairs(pairs, interrupt_data) do
     review_configs = Map.get(interrupt_data, :review_configs, %{})
 
     # Validate each decision
-    Enum.reduce_while(paired, :ok, fn {{action_req, decision}, index}, _acc ->
+    pairs
+    |> Enum.with_index()
+    |> Enum.reduce_while(:ok, fn {{action_req, decision}, index}, _acc ->
       tool_name = action_req.tool_name
       tool_config = Map.get(review_configs, tool_name, %{allowed_decisions: @default_decisions})
       allowed = tool_config.allowed_decisions || @default_decisions

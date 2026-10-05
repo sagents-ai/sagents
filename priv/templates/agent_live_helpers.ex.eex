@@ -576,46 +576,41 @@ defmodule <%= module %> do
   worst case is a slower round trip.
   """
   def handle_hitl_decision(socket, index, decision_type) do
-    if (socket.assigns[:pending_tools] || []) == [] do
-      # Nothing pending: a duplicate event for a batch that is already settled.
-      # Falling through would hand `advance_hitl_decisions/3` an empty list, and
-      # it would happily report the batch complete and resume with a fabricated
-      # decision.
-      socket
-    else
-      do_handle_hitl_decision(socket, index, decision_type)
-    end
-  end
-
-  defp do_handle_hitl_decision(socket, index, decision_type) do
-    decision_label = if decision_type == :approve, do: "approved", else: "rejected"
-
-    <%= subscriber_session_alias %>.persist_hitl_decision(
-      socket.assigns,
-      socket.assigns.pending_tools,
-      index,
-      decision_label
-    )
-
-    Logger.info("#{String.capitalize(decision_label)} tool at index #{index}")
-
     case <%= subscriber_session_alias %>.handle_hitl_decision(socket.assigns, index, decision_type) do
-      {:resume, accumulated, changes} ->
-        resume_or_flash(
-          socket,
-          accumulated,
-          changes,
-          <%= subscriber_session_alias %>.hitl_resume_running_changes(),
-          log_label: "HITL resume failed",
-          user_message: "That decision could not be submitted. Please try again."
+      # Nothing pending at that index: a duplicate or stale event for a tool
+      # that is already decided. Record nothing and leave the batch alone.
+      {:error, :not_pending} ->
+        socket
+
+      result ->
+        decision_label = if decision_type == :approve, do: "approved", else: "rejected"
+
+        <%= subscriber_session_alias %>.persist_hitl_decision(
+          socket.assigns,
+          socket.assigns.pending_tools,
+          index,
+          decision_label
         )
 
-      # Intermediate decisions in a multi-tool batch settle nothing, so they
-      # need no agent at all. Deliberately must not wake one.
-      {:more, changes} ->
-        assign(socket, changes)
+        Logger.info("#{String.capitalize(decision_label)} tool at index #{index}")
+        apply_hitl_result(socket, result)
     end
   end
+
+  defp apply_hitl_result(socket, {:resume, accumulated, changes}) do
+    resume_or_flash(
+      socket,
+      accumulated,
+      changes,
+      <%= subscriber_session_alias %>.hitl_resume_running_changes(),
+      log_label: "HITL resume failed",
+      user_message: "That decision could not be submitted. Please try again."
+    )
+  end
+
+  # Intermediate decisions in a multi-tool batch settle nothing, so they
+  # need no agent at all. Deliberately must not wake one.
+  defp apply_hitl_result(socket, {:more, changes}), do: assign(socket, changes)
 
   # ===========================================================================
   # Ask-user-question handlers

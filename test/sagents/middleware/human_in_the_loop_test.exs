@@ -632,6 +632,73 @@ defmodule Sagents.Middleware.HumanInTheLoopTest do
       assert reason =~ "Decision at index 0 is not a map"
     end
 
+    test "matches decisions keyed by tool_call_id regardless of order", %{
+      state: state,
+      config: config
+    } do
+      # :edit is allowed for write_file (call_1) but not delete_file (call_2).
+      # Listed first, it must still be checked against call_1.
+      decisions = [
+        %{type: :edit, tool_call_id: "call_1", arguments: %{"path" => "new.txt"}},
+        %{type: :reject, tool_call_id: "call_2"}
+      ]
+
+      assert {:ok, ^state} =
+               HumanInTheLoop.process_decisions(state, Enum.reverse(decisions), config)
+    end
+
+    test "validates a keyed decision against the tool it names", %{state: state, config: config} do
+      decisions = [
+        %{type: :edit, tool_call_id: "call_2", arguments: %{}},
+        %{type: :approve, tool_call_id: "call_1"}
+      ]
+
+      assert {:error, reason} = HumanInTheLoop.process_decisions(state, decisions, config)
+      assert reason =~ "Decision type 'edit' not allowed"
+      assert reason =~ "delete_file"
+    end
+
+    test "returns error when a keyed decision names an unknown tool call", %{
+      state: state,
+      config: config
+    } do
+      decisions = [
+        %{type: :approve, tool_call_id: "call_1"},
+        %{type: :approve, tool_call_id: "call_999"}
+      ]
+
+      assert {:error, reason} = HumanInTheLoop.process_decisions(state, decisions, config)
+      assert reason =~ "not awaiting approval"
+      assert reason =~ "call_999"
+    end
+
+    test "returns error when one tool call gets two keyed decisions", %{
+      state: state,
+      config: config
+    } do
+      decisions = [
+        %{type: :approve, tool_call_id: "call_1"},
+        %{type: :reject, tool_call_id: "call_1"}
+      ]
+
+      assert {:error, reason} = HumanInTheLoop.process_decisions(state, decisions, config)
+      assert reason =~ "More than one decision"
+      assert reason =~ "call_1"
+    end
+
+    test "returns error when keyed and positional decisions are mixed", %{
+      state: state,
+      config: config
+    } do
+      decisions = [
+        %{type: :approve, tool_call_id: "call_2"},
+        %{type: :approve}
+      ]
+
+      assert {:error, reason} = HumanInTheLoop.process_decisions(state, decisions, config)
+      assert reason =~ "all include a :tool_call_id or none may"
+    end
+
     test "returns error when no tool calls found in state", %{agent_id: agent_id} do
       messages = [
         Message.new_user!("Hello"),

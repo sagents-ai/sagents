@@ -87,7 +87,8 @@ defmodule Sagents.AgentUtils do
   ## Parameters
   - all_tool_calls: All tool calls from assistant message (HITL + non-HITL)
   - hitl_tool_call_ids: List of tool_call_ids that needed human approval
-  - human_decisions: List of decisions from human (same order as action_requests)
+  - human_decisions: List of decisions from human, paired with action_requests
+    as described in `pair_decisions/2`
   - action_requests: List of action_requests (to map decisions to tool_call_ids)
 
   ## Returns
@@ -104,13 +105,14 @@ defmodule Sagents.AgentUtils do
       # First is human decision, others are auto-approved
   """
   def build_full_decisions(all_tool_calls, hitl_tool_call_ids, human_decisions, action_requests) do
-    # Build decisions map indexed by tool_call_id
     decisions_by_id =
-      action_requests
-      |> Enum.zip(human_decisions)
-      |> Map.new(fn {action_req, decision} ->
-        {action_req.tool_call_id, decision}
-      end)
+      case pair_decisions(action_requests, human_decisions) do
+        {:ok, pairs} ->
+          Map.new(pairs, fn {action_req, decision} -> {action_req.tool_call_id, decision} end)
+
+        {:error, reason} ->
+          raise ArgumentError, reason
+      end
 
     # Build full decisions list matching ALL tool calls
     Enum.map(all_tool_calls, fn tc ->
@@ -122,6 +124,83 @@ defmodule Sagents.AgentUtils do
         %{type: :approve}
       end
     end)
+  end
+
+  @doc """
+  Pair each HITL action request with the human decision that answers it.
+
+  Decisions are matched in one of two ways:
+
+  - **By `:tool_call_id`.** When every decision carries a `:tool_call_id`,
+    each one is matched to the action request with that id, so the order of
+    `decisions` does not matter. Every action request must be answered
+    exactly once. `advance_hitl_decisions/3` produces decisions in this form.
+  - **By position.** When no decision carries a `:tool_call_id`, decision N
+    answers action request N.
+
+  A list mixing keyed and unkeyed decisions is rejected, because there is no
+  safe way to tell which request an unkeyed decision was meant for.
+
+  Returns `{:ok, [{action_request, decision}]}` in `action_requests` order,
+  or `{:error, reason}`.
+
+  ## Example
+
+      action_requests = [%{tool_call_id: "a", ...}, %{tool_call_id: "b", ...}]
+
+      AgentUtils.pair_decisions(action_requests, [
+        %{type: :reject, tool_call_id: "b"},
+        %{type: :approve, tool_call_id: "a"}
+      ])
+      # => {:ok, [
+      #      {%{tool_call_id: "a", ...}, %{type: :approve, tool_call_id: "a"}},
+      #      {%{tool_call_id: "b", ...}, %{type: :reject, tool_call_id: "b"}}
+      #    ]}
+  """
+  @spec pair_decisions([map()], [term()]) :: {:ok, [{map(), term()}]} | {:error, String.t()}
+  def pair_decisions(action_requests, decisions)
+      when is_list(action_requests) and is_list(decisions) do
+    keyed_count = Enum.count(decisions, &keyed_decision?/1)
+
+    cond do
+      keyed_count == 0 ->
+        {:ok, Enum.zip(action_requests, decisions)}
+
+      keyed_count != length(decisions) ->
+        {:error,
+         "Decisions must either all include a :tool_call_id or none may. " <>
+           "Got #{keyed_count} of #{length(decisions)} with a :tool_call_id."}
+
+      true ->
+        pair_decisions_by_id(action_requests, decisions)
+    end
+  end
+
+  defp keyed_decision?(%{tool_call_id: id}) when is_binary(id), do: true
+  defp keyed_decision?(_decision), do: false
+
+  defp pair_decisions_by_id(action_requests, decisions) do
+    decision_ids = Enum.map(decisions, & &1.tool_call_id)
+    request_ids = Enum.map(action_requests, & &1.tool_call_id)
+    decisions_by_id = Map.new(decisions, &{&1.tool_call_id, &1})
+
+    duplicates = Enum.uniq(decision_ids -- Enum.uniq(decision_ids))
+    unknown = Enum.reject(decision_ids, &(&1 in request_ids))
+    missing = Enum.reject(request_ids, &Map.has_key?(decisions_by_id, &1))
+
+    cond do
+      duplicates != [] ->
+        {:error, "More than one decision given for tool calls #{inspect(duplicates)}"}
+
+      unknown != [] ->
+        {:error, "Decisions given for tool calls not awaiting approval: #{inspect(unknown)}"}
+
+      missing != [] ->
+        {:error, "No decision given for tool calls #{inspect(missing)}"}
+
+      true ->
+        {:ok, Enum.map(action_requests, &{&1, Map.fetch!(decisions_by_id, &1.tool_call_id)})}
+    end
   end
 
   @doc """
@@ -376,51 +455,89 @@ defmodule Sagents.AgentUtils do
   in a host's pending-tool list.
 
   Reads `:pending_tools` and `:hitl_decisions` from `state` (treating
-  missing keys as empty list / empty list), records `decision_type` for
-  the tool at `index`, and returns:
+  missing keys as empty lists) and records `decision_type` for one pending
+  tool. The tool is identified by either:
 
-  - `{:resume, accumulated_decisions, changes}` — all pending tools have
+  - its `tool_call_id` (a string), or
+  - its current position in `:pending_tools` (an integer). Positions shift as
+    tools are decided, so a UI that shows several pending tools at once
+    should address them by `tool_call_id`.
+
+  Each recorded decision carries the `:tool_call_id` of the tool it was made
+  for, and `Sagents.Middleware.HumanInTheLoop` matches decisions to tools by
+  that id on resume. Tools may therefore be decided in any order.
+
+  Returns:
+
+  - `{:resume, accumulated_decisions, changes}`: all pending tools have
     been decided. The host should call
     `Sagents.AgentServer.resume(agent_id, accumulated_decisions)` and then
     merge `changes` (which clears `:pending_tools`, `:interrupt_data`, and
     `:hitl_decisions`).
-  - `{:more, changes}` — tools still pending. Merge `changes` (which
+  - `{:more, changes}`: tools still pending. Merge `changes` (which
     advances `:pending_tools` and `:hitl_decisions`).
+  - `{:error, :not_pending}`: no pending tool matches. The index is out of
+    range, or the `tool_call_id` was already decided (for example, a repeated
+    click). Nothing is recorded.
 
   ## Example
 
-      case AgentUtils.advance_hitl_decisions(socket.assigns, idx, :approve) do
+      case AgentUtils.advance_hitl_decisions(socket.assigns, tool_call_id, :approve) do
         {:resume, decisions, changes} ->
           AgentServer.resume(agent_id, decisions)
           {:noreply, assign(socket, changes)}
 
         {:more, changes} ->
           {:noreply, assign(socket, changes)}
+
+        {:error, :not_pending} ->
+          {:noreply, socket}
       end
 
   """
-  @spec advance_hitl_decisions(map(), non_neg_integer(), atom()) ::
-          {:resume, [map()], map()} | {:more, map()}
-  def advance_hitl_decisions(state, index, decision_type)
-      when is_map(state) and is_integer(index) and is_atom(decision_type) do
+  @spec advance_hitl_decisions(map(), non_neg_integer() | String.t(), atom()) ::
+          {:resume, [map()], map()} | {:more, map()} | {:error, :not_pending}
+  def advance_hitl_decisions(state, tool_ref, decision_type)
+      when is_map(state) and (is_integer(tool_ref) or is_binary(tool_ref)) and
+             is_atom(decision_type) do
     pending_tools = Map.get(state, :pending_tools, []) || []
-    accumulated = (Map.get(state, :hitl_decisions, []) || []) ++ [%{type: decision_type}]
-    remaining_tools = List.delete_at(pending_tools, index)
 
-    if remaining_tools == [] do
-      {:resume, accumulated,
-       %{
-         pending_tools: [],
-         interrupt_data: nil,
-         hitl_decisions: []
-       }}
-    else
-      {:more,
-       %{
-         pending_tools: remaining_tools,
-         hitl_decisions: accumulated
-       }}
+    case find_pending_tool(pending_tools, tool_ref) do
+      nil ->
+        {:error, :not_pending}
+
+      {%{tool_call_id: tool_call_id}, index} ->
+        decision = %{type: decision_type, tool_call_id: tool_call_id}
+        accumulated = (Map.get(state, :hitl_decisions, []) || []) ++ [decision]
+        remaining_tools = List.delete_at(pending_tools, index)
+
+        if remaining_tools == [] do
+          {:resume, accumulated,
+           %{
+             pending_tools: [],
+             interrupt_data: nil,
+             hitl_decisions: []
+           }}
+        else
+          {:more,
+           %{
+             pending_tools: remaining_tools,
+             hitl_decisions: accumulated
+           }}
+        end
     end
+  end
+
+  defp find_pending_tool(pending_tools, index) when is_integer(index) do
+    if index >= 0 and index < length(pending_tools) do
+      {Enum.at(pending_tools, index), index}
+    end
+  end
+
+  defp find_pending_tool(pending_tools, tool_call_id) when is_binary(tool_call_id) do
+    pending_tools
+    |> Enum.with_index()
+    |> Enum.find(fn {tool, _index} -> Map.get(tool, :tool_call_id) == tool_call_id end)
   end
 
   # Private helpers

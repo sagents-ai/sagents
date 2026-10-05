@@ -952,6 +952,14 @@ in the session state and only call `resume/2` on the last one.
 approvals — it returns `{:more, changes}` while decisions remain and
 `{:resume, decisions, changes}` when the set is complete.
 
+A client that shows several pending tools at once can let the user decide
+them in any order. Identify each tool by its `tool_call_id` rather than its
+position in the list: positions shift as tools are decided, while ids do not.
+`advance_hitl_decisions/3` accepts either, records the `tool_call_id` on every
+decision, and returns `{:error, :not_pending}` for a tool that is no longer
+pending (for example, a repeated click). On resume, `HumanInTheLoop` matches
+each decision to its tool by that id.
+
 The mirror-image pattern for questions:
 
 ```elixir

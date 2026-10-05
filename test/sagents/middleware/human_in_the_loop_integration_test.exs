@@ -609,6 +609,53 @@ defmodule Sagents.Middleware.HumanInTheLoopIntegrationTest do
       assert [%Message.ContentPart{content: content2}] = result2.content
       assert content2 =~ "File written: modified.txt"
     end
+
+    test "tools decided out of order through advance_hitl_decisions resume correctly" do
+      [tool_call1, tool_call2] =
+        mock_llm_with_multiple_tool_calls([
+          {"write_file", %{"path" => "file1.txt", "content" => "Data 1"}},
+          {"write_file", %{"path" => "file2.txt", "content" => "Data 2"}}
+        ])
+
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: create_test_model(),
+            tools: [create_write_file_tool()],
+            middleware: [{HumanInTheLoop, [interrupt_on: %{"write_file" => true}]}]
+          },
+          interrupt_on: %{"write_file" => true},
+          replace_default_middleware: true
+        )
+
+      initial_state = State.new!(%{messages: [Message.new_user!("Write both files")]})
+
+      {:interrupt, interrupted_state, interrupt_data} = Agent.execute(agent, initial_state)
+
+      host = Sagents.AgentUtils.interrupt_session_changes(interrupt_data)
+
+      # Reject the second tool while both are shown, then approve the first.
+      assert {:more, changes} = Sagents.AgentUtils.advance_hitl_decisions(host, 1, :reject)
+      host = Map.merge(host, changes)
+
+      assert {:resume, decisions, _changes} =
+               Sagents.AgentUtils.advance_hitl_decisions(host, 0, :approve)
+
+      assert {:ok, resumed_state} = Agent.resume(agent, interrupted_state, decisions)
+
+      assert [_user, _assistant, %Message{role: :tool} = tool_msg, _final] =
+               resumed_state.messages
+
+      assert [result1, result2] = tool_msg.tool_results
+
+      assert result1.tool_call_id == tool_call1.call_id
+      assert [%Message.ContentPart{content: content1}] = result1.content
+      assert content1 =~ "File written: file1.txt"
+
+      assert result2.tool_call_id == tool_call2.call_id
+      assert [%Message.ContentPart{content: content2}] = result2.content
+      assert content2 =~ "was rejected"
+    end
   end
 
   describe "responses cut off at the output token limit" do
