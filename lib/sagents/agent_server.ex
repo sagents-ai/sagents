@@ -354,7 +354,7 @@ defmodule Sagents.AgentServer do
       # Holds whatever `resume/2` accepts. That term is middleware-owned, so the
       # shape depends on what asked the question:
       #
-      #     AskUserQuestion  %{type: :answer, tool_call_id: "call_1", selected: ["pg"]}
+      #     AskUserQuestion  %{type: :answer, tool_call_id: "call_1", selected: ["PostgreSQL"]}
       #                      (a list of those when several questions are pending)
       #     HumanInTheLoop   [%{type: :approve}, %{type: :reject}]
       #
