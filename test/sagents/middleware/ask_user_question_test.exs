@@ -419,7 +419,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
 
       response = %{type: :answer, selected: ["postgresql", "redis"]}
       assert {:ok, text} = AskUserQuestion.process_response(response, question_data)
-      assert text == "User selected: postgresql, redis"
+      assert text == "User selected:\n- postgresql\n- redis"
     end
 
     test "valid freeform answer formats correctly" do
@@ -962,7 +962,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
       assert attrs.content == %{"text" => "Other Brand"}
     end
 
-    test "multi_select joins labels with ', '" do
+    test "multi_select renders labels as a bullet list" do
       q =
         question(%{
           response_type: :multi_select,
@@ -976,7 +976,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
       response = %{type: :answer, selected: ["auth", "notif"]}
 
       assert {:ok, attrs} = AskUserQuestion.user_facing_attrs(response, q)
-      assert attrs.content == %{"text" => "Auth, Notifications"}
+      assert attrs.content == %{"text" => "- Auth\n- Notifications"}
     end
 
     test "multi_select with 'other' appends a new line + typed text" do
@@ -997,7 +997,7 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
       }
 
       assert {:ok, attrs} = AskUserQuestion.user_facing_attrs(response, q)
-      assert attrs.content == %{"text" => "Auth  \nOther:  \naudit logging"}
+      assert attrs.content == %{"text" => "- Auth\n\nOther:  \naudit logging"}
     end
 
     test "multi_select 'other' alone (no regular selections) renders without leading CSV" do
@@ -1074,6 +1074,328 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
       refute AskUserQuestion.restorable_interrupt?(%{type: :subagent_hitl})
       refute AskUserQuestion.restorable_interrupt?(%{type: :multiple_interrupts, interrupts: []})
       refute AskUserQuestion.restorable_interrupt?(%{})
+    end
+  end
+
+  describe "options without a value" do
+    setup do
+      {:ok, config} = AskUserQuestion.init([])
+      [tool] = AskUserQuestion.tools(config)
+      %{tool: tool, config: config}
+    end
+
+    defp ask(tool, response_type, options, extra \\ %{}) do
+      args =
+        Map.merge(
+          %{"question" => "Q?", "response_type" => response_type, "options" => options},
+          extra
+        )
+
+      tool.function.(args, %{})
+    end
+
+    # Questions from `ask/4` have no tool_call_id until the framework adds one.
+    defp resolve(config, question_data, response) do
+      resolved_result(config, Map.put(question_data, :tool_call_id, "call_1"), response)
+    end
+
+    test "an option with no value uses its label as the value", %{tool: tool} do
+      assert {:interrupt, _msg, q} =
+               ask(tool, "single_select", [%{"label" => "Yes"}, %{"label" => "No"}])
+
+      assert Enum.map(q.options, & &1.value) == ["Yes", "No"]
+      assert Enum.all?(q.options, &(&1.value == &1.label))
+    end
+
+    test "nil, empty, and non-string values fall back to the label", %{tool: tool} do
+      options = [
+        %{"label" => "A", "value" => nil},
+        %{"label" => "B", "value" => ""},
+        %{"label" => "C", "value" => 3},
+        %{"label" => "D", "value" => %{"x" => 1}}
+      ]
+
+      assert {:interrupt, _msg, q} = ask(tool, "single_select", options)
+      assert Enum.map(q.options, & &1.value) == ["A", "B", "C", "D"]
+    end
+
+    test "mixed options keep supplied values", %{tool: tool} do
+      options = [%{"label" => "PostgreSQL", "value" => "pg"}, %{"label" => "MongoDB"}]
+
+      assert {:interrupt, _msg, q} = ask(tool, "single_select", options)
+      assert Enum.map(q.options, & &1.value) == ["pg", "MongoDB"]
+    end
+
+    test "a label equal to another option's explicit value is a duplicate", %{tool: tool} do
+      options = [%{"label" => "Yes"}, %{"label" => "Sure", "value" => "Yes"}]
+
+      assert {:error, msg} = ask(tool, "single_select", options)
+      assert msg =~ ~s|Duplicate option value: "Yes"|
+    end
+
+    test "duplicate labels are refused and named", %{tool: tool} do
+      options = [%{"label" => "Same", "value" => "a"}, %{"label" => "Same", "value" => "b"}]
+
+      assert {:error, msg} = ask(tool, "single_select", options)
+      assert msg =~ ~s|Duplicate option label: "Same"|
+    end
+
+    test "labels differing only in line breaks are duplicates", %{tool: tool} do
+      options = [%{"label" => "Use the\nloan"}, %{"label" => "Use the loan"}]
+
+      assert {:error, msg} = ask(tool, "single_select", options)
+      assert msg =~ ~s|Duplicate option label: "Use the loan"|
+    end
+
+    test "line breaks in a label collapse to a single space", %{tool: tool} do
+      options = [%{"label" => "  First line\r\n   second line \n"}, %{"label" => "Other choice"}]
+
+      assert {:interrupt, _msg, q} = ask(tool, "single_select", options)
+      assert hd(q.options).label == "First line second line"
+      assert hd(q.options).value == "First line second line"
+    end
+
+    test "option-shape refusals include an example", %{tool: tool} do
+      assert {:error, missing} =
+               ask(tool, "single_select", [%{"value" => "a"}, %{"label" => "B"}])
+
+      assert missing =~ "non-empty 'label'"
+      assert missing =~ ~s|{"label": "Yes"|
+
+      assert {:error, blank} =
+               ask(tool, "single_select", [%{"label" => " \n "}, %{"label" => "B"}])
+
+      assert blank =~ "non-empty 'label'"
+
+      assert {:error, not_object} = ask(tool, "single_select", ["Yes", "No"])
+      assert not_object =~ "must be an object"
+      assert not_object =~ ~s|{"label": "Yes"|
+    end
+
+    test "single_select result names the chosen label", %{tool: tool, config: config} do
+      label = "$170 is the loan, the other $28 is something else"
+
+      {:interrupt, _msg, q} =
+        ask(tool, "single_select", [%{"label" => label}, %{"label" => "All $198 is the loan"}])
+
+      tool_result = resolve(config, q, %{type: :answer, selected: [label]})
+      assert content_text(tool_result.content) == "User selected: #{label}"
+    end
+
+    test "multi_select result keeps labels with commas intact", %{tool: tool, config: config} do
+      {:interrupt, _msg, q} =
+        ask(tool, "multi_select", [
+          %{"label" => "Yellow, Red, and Blue"},
+          %{"label" => "Blue, Purple, and Green"},
+          %{"label" => "Black"}
+        ])
+
+      response = %{
+        type: :answer,
+        selected: ["Yellow, Red, and Blue", "Blue, Purple, and Green"]
+      }
+
+      tool_result = resolve(config, q, response)
+
+      assert content_text(tool_result.content) ==
+               "User selected:\n- Yellow, Red, and Blue\n- Blue, Purple, and Green"
+    end
+
+    test "user_facing_attrs renders labels for options with no supplied value", %{tool: tool} do
+      {:interrupt, _msg, q} =
+        ask(tool, "multi_select", [%{"label" => "Auth"}, %{"label" => "Billing, invoices"}])
+
+      response = %{type: :answer, selected: ["Billing, invoices", "Auth"]}
+
+      assert {:ok, attrs} = AskUserQuestion.user_facing_attrs(response, q)
+      assert attrs.content == %{"text" => "- Billing, invoices\n- Auth"}
+    end
+
+    test "a label of exactly 'other' is a regular option", %{tool: tool, config: config} do
+      {:interrupt, _msg, q} =
+        ask(tool, "single_select", [%{"label" => "yes"}, %{"label" => "other"}])
+
+      tool_result = resolve(config, q, %{type: :answer, selected: ["other"]})
+      assert content_text(tool_result.content) == "User selected: other"
+      refute content_text(tool_result.content) =~ "Additional input"
+      assert tool_result.processed_content.selected == [%{label: "other", value: "other"}]
+    end
+
+    test "a label of 'Other' leaves the special other selection working", %{
+      tool: tool,
+      config: config
+    } do
+      {:interrupt, _msg, q} =
+        ask(tool, "single_select", [%{"label" => "Yes"}, %{"label" => "Other"}], %{
+          "allow_other" => true
+        })
+
+      response = %{type: :answer, selected: ["other"], other_text: "Something custom"}
+      tool_result = resolve(config, q, response)
+
+      assert content_text(tool_result.content) ==
+               "User selected: other\nAdditional input: \"Something custom\""
+
+      assert tool_result.processed_content == %{
+               type: :answer,
+               selected: [],
+               other_text: "Something custom"
+             }
+    end
+  end
+
+  describe "processed_content on the resolved tool result" do
+    setup do
+      {:ok, config} = AskUserQuestion.init([])
+      %{config: config}
+    end
+
+    defp resolved_result(config, question_data, response) do
+      tool_msg =
+        LangChain.Message.new_tool_result!(%{
+          content: nil,
+          tool_results: [
+            LangChain.Message.ToolResult.new!(%{
+              tool_call_id: "call_1",
+              content: "Waiting for user response...",
+              name: "ask_user",
+              is_interrupt: true
+            })
+          ]
+        })
+
+      state = State.new!(%{messages: [tool_msg], interrupt_data: question_data})
+      {:ok, updated} = AskUserQuestion.handle_resume(nil, state, response, config, [])
+      [tool_result] = List.last(updated.messages).tool_results
+      tool_result
+    end
+
+    # The shape of a question persisted from an LLM that supplied slug values.
+    defp slug_question(response_type) do
+      %{
+        type: :ask_user_question,
+        question: "Which stores?",
+        response_type: response_type,
+        options: [
+          %{label: "PostgreSQL", value: "postgresql", description: nil},
+          %{label: "Redis", value: "redis", description: nil}
+        ],
+        allow_other: true,
+        allow_cancel: true,
+        context: nil,
+        tool_call_id: "call_1"
+      }
+    end
+
+    test "single_select with slug values reports as before", %{config: config} do
+      response = %{type: :answer, selected: ["postgresql"]}
+      tool_result = resolved_result(config, slug_question(:single_select), response)
+
+      assert content_text(tool_result.content) == "User selected: postgresql"
+
+      assert tool_result.processed_content == %{
+               type: :answer,
+               selected: [%{label: "PostgreSQL", value: "postgresql"}],
+               other_text: nil
+             }
+    end
+
+    test "multi_select lists labels and values, with other_text", %{config: config} do
+      response = %{type: :answer, selected: ["redis", "other"], other_text: "SQLite"}
+      tool_result = resolved_result(config, slug_question(:multi_select), response)
+
+      assert tool_result.processed_content == %{
+               type: :answer,
+               selected: [%{label: "Redis", value: "redis"}],
+               other_text: "SQLite"
+             }
+    end
+
+    test "freeform carries the text with no selections", %{config: config} do
+      q = %{slug_question(:freeform) | options: []}
+      response = %{type: :answer, other_text: "Call it Cache"}
+      tool_result = resolved_result(config, q, response)
+
+      assert tool_result.processed_content == %{
+               type: :answer,
+               selected: [],
+               other_text: "Call it Cache"
+             }
+    end
+
+    test "cancel is recorded", %{config: config} do
+      tool_result = resolved_result(config, slug_question(:single_select), %{type: :cancel})
+      assert tool_result.processed_content == %{type: :cancel}
+    end
+
+    test "each question in a multiple_interrupts resume gets its own answer", %{config: config} do
+      q1 = %{slug_question(:single_select) | tool_call_id: "call_a"}
+      q2 = %{slug_question(:single_select) | tool_call_id: "call_b"}
+
+      tool_results =
+        Enum.map(["call_a", "call_b"], fn id ->
+          LangChain.Message.ToolResult.new!(%{
+            tool_call_id: id,
+            content: "Waiting for user response...",
+            name: "ask_user",
+            is_interrupt: true
+          })
+        end)
+
+      tool_msg = LangChain.Message.new_tool_result!(%{content: nil, tool_results: tool_results})
+
+      state =
+        State.new!(%{
+          messages: [tool_msg],
+          interrupt_data: %{type: :multiple_interrupts, interrupts: [q1, q2]}
+        })
+
+      responses = [
+        %{type: :answer, tool_call_id: "call_a", selected: ["postgresql"]},
+        %{type: :answer, tool_call_id: "call_b", selected: ["redis"]}
+      ]
+
+      assert {:ok, updated} = AskUserQuestion.handle_resume(nil, state, responses, config, [])
+
+      selected_by_id =
+        Map.new(List.last(updated.messages).tool_results, fn r ->
+          {r.tool_call_id, r.processed_content.selected}
+        end)
+
+      assert selected_by_id == %{
+               "call_a" => [%{label: "PostgreSQL", value: "postgresql"}],
+               "call_b" => [%{label: "Redis", value: "redis"}]
+             }
+    end
+  end
+
+  describe "model-facing instructions" do
+    test "option schema requires only label and describes value as optional" do
+      {:ok, config} = AskUserQuestion.init([])
+      [tool] = AskUserQuestion.tools(config)
+      items = tool.parameters_schema.properties.options.items
+
+      assert items.required == ["label"]
+      assert Map.has_key?(items.properties, :value)
+      assert items.properties.label.description =~ "single line"
+      assert items.properties.label.description =~ "returned to you"
+      assert items.properties.value.description =~ "Optional"
+      assert items.properties.value.description =~ "the label is used"
+    end
+
+    test "system prompt guides option labels for select types without naming value" do
+      {:ok, config} = AskUserQuestion.init([])
+      prompt = AskUserQuestion.system_prompt(config)
+
+      assert prompt =~ "Write each option label as the answer itself, on one line"
+      refute prompt =~ "value"
+    end
+
+    test "system prompt omits option guidance when only freeform is enabled" do
+      {:ok, config} = AskUserQuestion.init(response_types: [:freeform])
+      prompt = AskUserQuestion.system_prompt(config)
+
+      refute prompt =~ "option label"
     end
   end
 end

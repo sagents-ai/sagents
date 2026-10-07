@@ -38,8 +38,8 @@ defmodule Sagents.Middleware.AskUserQuestion do
         question: "Which database should we use?",
         response_type: :single_select,
         options: [
-          %{label: "PostgreSQL", value: "postgresql", description: "Relational DB"},
-          %{label: "MongoDB", value: "mongodb", description: "Document store"}
+          %{label: "PostgreSQL", value: "PostgreSQL", description: "Relational DB"},
+          %{label: "MongoDB", value: "MongoDB", description: "Document store"}
         ],
         allow_other: false,
         allow_cancel: true,
@@ -47,22 +47,44 @@ defmodule Sagents.Middleware.AskUserQuestion do
         tool_call_id: "call_123"
       }}
 
+  Every option has a `:value`. The LLM may supply one, but usually omits it, and
+  then the value is the option's label. Labels are single-line: line breaks
+  inside a label are collapsed to a space.
+
   ## Resume Data
 
-  Resume with a response map:
+  Resume with a response map. `selected` holds option values, posted back
+  unchanged from the interrupt's `options`:
 
       # Answer
-      AgentServer.resume(agent_id, %{type: :answer, selected: ["postgresql"]})
+      AgentServer.resume(agent_id, %{type: :answer, selected: ["PostgreSQL"]})
 
       # Answer with additional text
       AgentServer.resume(agent_id, %{
         type: :answer,
-        selected: ["postgresql"],
+        selected: ["PostgreSQL"],
         other_text: "Use jsonb columns"
       })
 
       # Cancel
       AgentServer.resume(agent_id, %{type: :cancel})
+
+  ## Result
+
+  The LLM receives the selected option values as text: one line for
+  `:single_select`, a Markdown bullet list for `:multi_select`. When the LLM
+  omitted `value`, that text is the label the user chose.
+
+  The resolved tool result also carries the answer in `processed_content`,
+  which is not sent to the LLM:
+
+      %{type: :answer, selected: [%{label: "PostgreSQL", value: "PostgreSQL"}], other_text: nil}
+      %{type: :cancel}
+
+  `selected` lists the chosen regular options. The special `"other"` selection
+  is not included; its typed text is in `other_text`. A `:freeform` answer has
+  `selected: []` and the text in `other_text`. `processed_content` is a virtual
+  field and is not persisted with the state.
   """
 
   @behaviour Sagents.Middleware
@@ -188,14 +210,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
   defp resolve_single_question(agent, state, question_data, response) do
     case process_response(response, question_data) do
       {:ok, tool_result_content} ->
-        new_tool_result =
-          ToolResult.new!(%{
-            tool_call_id: question_data.tool_call_id,
-            content: tool_result_content,
-            name: "ask_user",
-            is_interrupt: false
-          })
-
+        new_tool_result = answered_tool_result(question_data, response, tool_result_content)
         save_user_facing_message(agent, question_data, response)
 
         {:ok, State.replace_tool_result(state, question_data.tool_call_id, new_tool_result)}
@@ -218,14 +233,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
       else
         case process_response(response, question_data) do
           {:ok, tool_result_content} ->
-            new_tool_result =
-              ToolResult.new!(%{
-                tool_call_id: question_data.tool_call_id,
-                content: tool_result_content,
-                name: "ask_user",
-                is_interrupt: false
-              })
-
+            new_tool_result = answered_tool_result(question_data, response, tool_result_content)
             save_user_facing_message(agent, question_data, response)
 
             {:cont,
@@ -237,6 +245,38 @@ defmodule Sagents.Middleware.AskUserQuestion do
         end
       end
     end)
+  end
+
+  defp answered_tool_result(question_data, response, content) do
+    ToolResult.new!(%{
+      tool_call_id: question_data.tool_call_id,
+      content: content,
+      processed_content: answer_data(response, question_data),
+      name: "ask_user",
+      is_interrupt: false
+    })
+  end
+
+  # The structured answer carried in the tool result's `processed_content`.
+  # Only called after `process_response/2` accepted the response.
+  defp answer_data(%{type: :cancel}, _question_data), do: %{type: :cancel}
+
+  defp answer_data(%{type: :answer} = response, question_data) do
+    selected =
+      response
+      |> Map.get(:selected, [])
+      |> Enum.reject(&special_other?(&1, question_data.options))
+      |> Enum.map(fn value ->
+        %{label: lookup_label(question_data.options, value), value: value}
+      end)
+
+    other_text =
+      case Map.get(response, :other_text) do
+        text when is_binary(text) and text != "" -> text
+        _other -> nil
+      end
+
+    %{type: :answer, selected: selected, other_text: other_text}
   end
 
   # Fire a synthetic display message so the user's answer (or cancellation)
@@ -301,14 +341,24 @@ defmodule Sagents.Middleware.AskUserQuestion do
         items: %{
           type: "object",
           properties: %{
-            label: %{type: "string", description: "Display label for the option"},
-            value: %{type: "string", description: "Machine-readable value"},
+            label: %{
+              type: "string",
+              description:
+                "The answer as the user would say it, on a single line. If the user picks " <>
+                  "this option, this text is returned to you as their answer, unless you set value."
+            },
+            value: %{
+              type: "string",
+              description:
+                "Optional. Omit it unless you need a clear, short key for this option. " <>
+                  "When omitted, the label is used."
+            },
             description: %{
               type: "string",
               description: "Optional description with tradeoffs or details"
             }
           },
-          required: ["label", "value"]
+          required: ["label"]
         }
       },
       context: %{
@@ -436,41 +486,73 @@ defmodule Sagents.Middleware.AskUserQuestion do
     end
   end
 
+  @option_example ~s|{"label": "Yes", "description": "Optional details"}|
+
+  # Normalizes each option and checks that labels and values are unique. Both
+  # checks run on the normalized form, so labels that differ only in line
+  # breaks, or a label that equals another option's explicit value, collide.
   defp validate_option_items(options) do
-    # Validate each option has non-empty label and value, and values are unique
     result =
-      Enum.reduce_while(options, {:ok, MapSet.new()}, fn opt, {:ok, seen_values} ->
-        label = Map.get(opt, "label", "")
-        value = Map.get(opt, "value", "")
-
-        cond do
-          not is_binary(label) or byte_size(label) == 0 ->
-            {:halt, {:error, "Each option must have a non-empty 'label'"}}
-
-          not is_binary(value) or byte_size(value) == 0 ->
-            {:halt, {:error, "Each option must have a non-empty 'value'"}}
-
-          MapSet.member?(seen_values, value) ->
-            {:halt, {:error, "Duplicate option value: #{value}"}}
-
-          true ->
-            {:cont, {:ok, MapSet.put(seen_values, value)}}
+      Enum.reduce_while(options, {:ok, [], MapSet.new(), MapSet.new()}, fn opt,
+                                                                           {:ok, acc, labels,
+                                                                            values} ->
+        with {:ok, option} <- normalize_option(opt),
+             :ok <- check_unique(labels, option.label, "label"),
+             :ok <- check_unique(values, option.value, "value") do
+          {:cont,
+           {:ok, [option | acc], MapSet.put(labels, option.label),
+            MapSet.put(values, option.value)}}
+        else
+          {:error, _reason} = error -> {:halt, error}
         end
       end)
 
     case result do
-      {:ok, _seen} ->
-        {:ok,
-         Enum.map(options, fn opt ->
-           %{
-             label: Map.fetch!(opt, "label"),
-             value: Map.fetch!(opt, "value"),
-             description: Map.get(opt, "description")
-           }
-         end)}
+      {:ok, normalized, _labels, _values} -> {:ok, Enum.reverse(normalized)}
+      {:error, _reason} = error -> error
+    end
+  end
 
-      {:error, _reason} = error ->
-        error
+  defp normalize_option(%{} = opt) do
+    case normalize_label(Map.get(opt, "label")) do
+      "" ->
+        {:error, "Each option needs a non-empty 'label', e.g. #{@option_example}"}
+
+      label ->
+        {:ok,
+         %{
+           label: label,
+           value: option_value(Map.get(opt, "value"), label),
+           description: Map.get(opt, "description")
+         }}
+    end
+  end
+
+  defp normalize_option(_opt) do
+    {:error, "Each option must be an object, e.g. #{@option_example}"}
+  end
+
+  # A label is one line. A line break and the whitespace around it become a
+  # single space, so the label stays one line in the result text and the UI.
+  defp normalize_label(label) when is_binary(label) do
+    label
+    |> String.replace(~r/\s*[\r\n]+\s*/, " ")
+    |> String.trim()
+  end
+
+  defp normalize_label(_label), do: ""
+
+  # The LLM's value is used when it is a non-empty string. Otherwise the label
+  # is the value, so the label is what the LLM gets back as the answer.
+  defp option_value(value, _label) when is_binary(value) and value != "", do: value
+  defp option_value(_value, label), do: label
+
+  defp check_unique(seen, item, field) do
+    if MapSet.member?(seen, item) do
+      {:error,
+       "Duplicate option #{field}: #{inspect(item)}. Each option needs a distinct #{field}."}
+    else
+      :ok
     end
   end
 
@@ -584,7 +666,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
         {:error, "Invalid selections: #{inspect(invalid)}. Valid: #{inspect(valid_values)}"}
 
       true ->
-        text = "User selected: #{Enum.join(selected, ", ")}"
+        text = "User selected:\n" <> Enum.map_join(selected, "\n", &"- #{&1}")
 
         case Map.get(response, :other_text) do
           nil -> {:ok, text}
@@ -613,8 +695,9 @@ defmodule Sagents.Middleware.AskUserQuestion do
   # -- User-facing display formatting --
   #
   # Produces synthetic display message attrs from a user response. Uses option
-  # *labels* (what the user saw), unlike `process_response/2` which builds the
-  # LLM-facing text from option *values*.
+  # *labels* (what the user saw). `process_response/2` builds the LLM-facing
+  # text from option *values*, which are the labels unless the LLM supplied its
+  # own.
 
   @doc false
   @spec user_facing_attrs(map(), map()) :: {:ok, map()} | {:error, term()}
@@ -672,15 +755,17 @@ defmodule Sagents.Middleware.AskUserQuestion do
       {:error, :other_not_allowed}
     else
       regular = Enum.reject(selected, &special_other?(&1, q.options))
-      labels_csv = Enum.map_join(regular, ", ", &lookup_label(q.options, &1))
+      labels_list = Enum.map_join(regular, "\n", &"- #{lookup_label(q.options, &1)}")
       other_text = if has_other?, do: Map.get(response, :other_text, ""), else: nil
-      {:ok, user_text_attrs(format_multi_select(labels_csv, other_text))}
+      {:ok, user_text_attrs(format_multi_select(labels_list, other_text))}
     end
   end
 
-  defp format_multi_select(labels_csv, nil), do: labels_csv
+  # A blank line ends the Markdown list, so "Other:" renders as its own
+  # paragraph rather than continuing the last list item.
+  defp format_multi_select(labels_list, nil), do: labels_list
   defp format_multi_select("", other_text), do: "Other:  \n#{other_text}"
-  defp format_multi_select(csv, other_text), do: "#{csv}  \nOther:  \n#{other_text}"
+  defp format_multi_select(list, other_text), do: "#{list}\n\nOther:  \n#{other_text}"
 
   defp lookup_label(options, value) do
     case Enum.find(options, &(&1.value == value)) do
@@ -760,8 +845,18 @@ defmodule Sagents.Middleware.AskUserQuestion do
     - Keep questions concise and focused on the decision at hand
     - Provide 2-5 distinct options with brief descriptions of tradeoffs
     - Include relevant context to help the user make an informed decision
-    #{flag_guidance(config)}
+    #{option_guidance(config)}#{flag_guidance(config)}
     """
+  end
+
+  # Option-label guidance applies only when a select type is enabled. A
+  # freeform-only configuration has no options.
+  defp option_guidance(config) do
+    if Enum.any?(config.response_types, &(&1 in [:single_select, :multi_select])) do
+      "- Write each option label as the answer itself, on one line, the way the user would say it\n"
+    else
+      ""
+    end
   end
 
   # Only guide the LLM about a flag it actually controls. A forced flag is
