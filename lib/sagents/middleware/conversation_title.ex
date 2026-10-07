@@ -25,6 +25,8 @@ defmodule Sagents.Middleware.ConversationTitle do
   - `:fallbacks` - List of fallback models if primary fails (default: [])
   - `:prompt_template` - Custom prompt template (default: uses TextToTitleChain defaults)
   - `:examples` - List of example titles to guide LLM (default: provided examples)
+  - `:callbacks` - LangChain callback maps attached to the title chain, e.g. to
+    meter the title model's token usage (default: `[]`)
   - `:id` - Custom middleware ID for multiple instances (default: module name)
 
   ## Events
@@ -68,6 +70,11 @@ defmodule Sagents.Middleware.ConversationTitle do
   - `:fallbacks` - List of fallback ChatModels if primary fails (default: `[]`)
   - `:prompt_template` - Custom prompt template for title generation (default: uses TextToTitleChain defaults)
   - `:examples` - List of example titles to guide the LLM (default: provided examples)
+  - `:callbacks` - List of LangChain callback maps for the title chain. Title
+    generation runs in its own chain, outside the agent's, so the agent's
+    callbacks never see it; this is how a caller observes it, for example
+    `on_message_processed` to record the title model's token usage
+    (default: `[]`)
   - `:id` - Custom middleware ID for multiple instances (default: module name)
 
   ## Returns
@@ -90,6 +97,7 @@ defmodule Sagents.Middleware.ConversationTitle do
     fallbacks = Keyword.get(opts, :fallbacks, [])
     prompt_template = Keyword.get(opts, :prompt_template)
     examples = Keyword.get(opts, :examples, @default_examples)
+    callbacks = Keyword.get(opts, :callbacks, [])
     middleware_id = Keyword.get(opts, :id)
 
     # Validate required options
@@ -98,7 +106,8 @@ defmodule Sagents.Middleware.ConversationTitle do
         chat_model: chat_model,
         fallbacks: fallbacks,
         prompt_template: prompt_template,
-        examples: examples
+        examples: examples,
+        callbacks: callbacks
       }
 
       # Add custom ID if provided
@@ -330,7 +339,8 @@ defmodule Sagents.Middleware.ConversationTitle do
     chain_config = %{
       llm: config.chat_model,
       input_text: user_text,
-      examples: config.examples
+      examples: config.examples,
+      callbacks: Map.get(config, :callbacks, [])
     }
 
     # Add custom prompt template if provided

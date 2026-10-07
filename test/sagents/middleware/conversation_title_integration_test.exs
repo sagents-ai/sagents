@@ -25,7 +25,8 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
 
     middleware_config = [
       chat_model: chat_model,
-      fallbacks: fallbacks
+      fallbacks: fallbacks,
+      callbacks: Keyword.get(opts, :callbacks, [])
     ]
 
     Agent.new!(
@@ -96,6 +97,46 @@ defmodule Sagents.Middleware.ConversationTitleIntegrationTest do
       # Verify title was generated and stored
       state = AgentServer.get_state(agent_id)
       assert State.get_metadata(state, "conversation_title") == "Asking about the weather"
+    end
+
+    test "the title chain's callbacks see the title model's finished message" do
+      test_pid = self()
+
+      handler = %{
+        on_message_processed: fn _chain, message -> send(test_pid, {:title_message, message}) end
+      }
+
+      agent = create_agent_with_title_middleware(callbacks: [handler])
+      agent_id = agent.agent_id
+
+      {:ok, _server_pid} =
+        AgentServer.start_link(
+          agent: agent,
+          name: AgentServer.get_name(agent_id),
+          pubsub: {Phoenix.PubSub, :langchain_pubsub}
+        )
+
+      AgentServer.subscribe(agent_id)
+
+      expect(ChatAnthropic, :call, 2, fn _model, messages, _tools ->
+        case List.last(messages) do
+          %Message{content: [%ContentPart{content: "What's the weather today?"}]} ->
+            {:ok, [Message.new_assistant!("The weather is balmy and icky.")]}
+
+          _title_request ->
+            {:ok, [Message.new_assistant!("Asking about the weather")]}
+        end
+      end)
+
+      :ok = AgentServer.add_message(agent_id, Message.new_user!("What's the weather today?"))
+
+      assert_receive {:agent, {:conversation_title_generated, _title, _agent_id}}, 500
+
+      # Only the title chain carries the handler, so the agent's own reply never
+      # reaches it.
+      assert_received {:title_message, %Message{role: :assistant} = message}
+      assert ContentPart.parts_to_string(message.content) == "Asking about the weather"
+      refute_received {:title_message, _}
     end
 
     test "title generation failure doesn't break agent" do

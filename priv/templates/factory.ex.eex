@@ -310,6 +310,9 @@ defmodule <%= module %> do
       # ConversationTitle - auto-generate titles after the first exchange.
       # Positioned early because it's async and should start as soon as possible.
       # Uses a lighter/faster model (Haiku) for cost efficiency.
+      # The title runs in its own chain, so the agent's callbacks never see it.
+      # Add `callbacks: [%{on_message_processed: ...}]` to observe it, e.g. to
+      # record the title model's token usage.
       {ConversationTitle,
        [
          chat_model: get_title_model(c),
