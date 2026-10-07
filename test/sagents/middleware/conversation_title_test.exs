@@ -50,6 +50,15 @@ defmodule Sagents.Middleware.ConversationTitleTest do
       assert config.examples == examples
     end
 
+    test "callbacks default to none and are kept when given" do
+      assert {:ok, %{callbacks: []}} = ConversationTitle.init(chat_model: mock_model())
+
+      handler = %{on_message_processed: fn _chain, _message -> :ok end}
+
+      assert {:ok, %{callbacks: [^handler]}} =
+               ConversationTitle.init(chat_model: mock_model(), callbacks: [handler])
+    end
+
     test "accepts optional custom id for multiple instances" do
       assert {:ok, config} =
                ConversationTitle.init(chat_model: mock_model(), id: "custom_title_gen")
