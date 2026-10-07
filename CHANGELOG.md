@@ -1,5 +1,72 @@
 # Changelog
 
+## v0.16.2
+
+The `ask_user` tool no longer requires a `value` on each option. Some models
+leave it out, and the tool refused those calls until the turn failed with
+"Exceeded max failure count". The label is now used as the value when one is
+missing, so the model gets back the answer the user actually picked.
+`ConversationTitle` also accepts `:callbacks`, so title generation can be
+observed and metered like the agent's own LLM calls.
+
+No code changes are required. One result format changes, described below.
+
+### Upgrading from v0.16.1 - v0.16.2
+
+**Multi-select answers are a bullet list.** Labels can contain commas, so a
+comma-joined answer could not be split back apart. The tool result for a
+`multi_select` question, and the transcript message from `user_facing_attrs/2`,
+now list one selection per line:
+
+```
+User selected:
+- postgresql
+- redis
+```
+
+instead of `User selected: postgresql, redis`. Single-select and freeform
+answers are unchanged. Update any host tests or parsing that match the old
+comma-joined text. Code that needs the answer should read the new structured
+`processed_content` (see Added) instead of parsing the text.
+
+Hosts that render options and post back `option.value` need no changes: every
+normalized option still has a `:value`, and persisted interrupts with the old
+shape still restore and resume.
+
+### Added
+
+- `ConversationTitle` accepts a `:callbacks` option, a list of LangChain
+  callback maps attached to the title chain. Use it to record token usage or
+  observe the title model's calls, which the agent's callbacks never see. The
+  generated factory shows how to set it.
+  [#210](https://github.com/sagents-ai/sagents/pull/210)
+- A resolved `ask_user` tool result carries the answer in `processed_content`
+  for host code (not sent to the LLM):
+  `%{type: :answer, selected: [%{label:, value:}], other_text:}` or
+  `%{type: :cancel}`.
+  [#209](https://github.com/sagents-ai/sagents/pull/209)
+
+### Changed
+
+- `ask_user` option `value` is optional. When omitted (or `nil`, empty, or not
+  a string), the label is used, and the tool schema and system prompt no longer
+  prompt the model to invent one.
+  [#209](https://github.com/sagents-ai/sagents/pull/209)
+- `ask_user` multi-select results and transcript messages are a Markdown bullet
+  list instead of a comma-joined string.
+  [#209](https://github.com/sagents-ai/sagents/pull/209)
+- `ask_user` labels are normalized to a single trimmed line rather than
+  refused, and labels and values must both be unique after normalization.
+  [#209](https://github.com/sagents-ai/sagents/pull/209)
+
+### Fixed
+
+- `ask_user` calls whose options lacked a `value` were refused until the turn
+  failed with "Exceeded max failure count". Refusals for genuinely bad options
+  (missing label, plain strings instead of objects) now include a correct
+  example the model can follow.
+  [#209](https://github.com/sagents-ai/sagents/pull/209)
+
 ## v0.16.1
 
 Fixes a HITL bug that could approve the wrong tool. When an interrupt held
