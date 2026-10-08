@@ -70,7 +70,7 @@ defmodule Sagents.MixProject do
       # `langchain` carries req_llm as an optional dependency, so it is absent
       # unless something asks for it. Tests that drive an agent through
       # `LangChain.ChatModels.ChatReqLLM` need it present.
-      {:req_llm, ">= 1.11.0", only: :test},
+      {:req_llm, ">= 1.25.0", only: :test},
       {:opentelemetry_api, "~> 1.4", only: :test},
       {:opentelemetry, "~> 1.5", only: :test, runtime: false},
       {:local_cluster, "~> 2.0", only: :test},
