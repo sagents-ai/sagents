@@ -8,6 +8,25 @@ defmodule Sagents.Horde.MembershipManagerTest do
 
   setup :set_mimic_global
 
+  # What Horde answers for `members/1`, and a mailbox record of every
+  # `set_members/2` it receives. The real Horde instances are not running under
+  # `:horde` distribution in this suite, so both sides are stubbed.
+  defp stub_horde(member_nodes) do
+    test_pid = self()
+
+    stub(Horde.Cluster, :members, fn horde -> Enum.map(member_nodes, &{horde, &1}) end)
+
+    stub(Horde.Cluster, :set_members, fn horde, members ->
+      send(test_pid, {:set_members, horde, members})
+      :ok
+    end)
+  end
+
+  defp start_manager! do
+    start_supervised!(MembershipManager.pg_scope_spec())
+    start_supervised!(MembershipManager)
+  end
+
   describe "member_nodes/1" do
     test "dedups and sorts the nodes hosting participation markers" do
       assert MembershipManager.member_nodes([self(), self()]) == [node()]
@@ -42,16 +61,9 @@ defmodule Sagents.Horde.MembershipManagerTest do
       :ok
     end
 
-    test "joins the partition group and sets members from it" do
-      test_pid = self()
-
-      stub(Horde.Cluster, :set_members, fn horde, members ->
-        send(test_pid, {:set_members, horde, members})
-        :ok
-      end)
-
-      start_supervised!(MembershipManager.pg_scope_spec())
-      start_supervised!(MembershipManager)
+    test "joins the partition group and adds its members" do
+      stub_horde([])
+      start_manager!()
 
       # The manager joined this node into the "ord" group, so membership is the
       # self-node and a marker pid is present in the partitioned group.
@@ -66,46 +78,71 @@ defmodule Sagents.Horde.MembershipManagerTest do
   end
 
   describe "membership application on startup" do
-    test "sets members on all three Horde clusters scoped to participating nodes" do
-      test_pid = self()
+    test "adds the nodes in view that the Horde clusters do not hold yet" do
+      stub_horde([])
+      start_manager!()
 
-      stub(Horde.Cluster, :set_members, fn horde, members ->
-        send(test_pid, {:set_members, horde, members})
-        :ok
-      end)
-
-      start_supervised!(MembershipManager.pg_scope_spec())
-      start_supervised!(MembershipManager)
-
-      # Only this node participates, so each cluster's members is the self-node.
+      # Only this node participates, so each cluster gains the self-node.
       for horde <- MembershipManager.hordes() do
         assert_receive {:set_members, ^horde, members}
         assert members == [{horde, node()}]
       end
     end
 
-    test "re-applies membership when the participation group changes" do
-      test_pid = self()
+    test "leaves the Horde clusters alone when the view adds nothing" do
+      # Horde already holds this node from its own initial members.
+      stub_horde([node()])
+      start_manager!()
 
-      stub(Horde.Cluster, :set_members, fn horde, members ->
-        send(test_pid, {:set_members, horde, members})
-        :ok
-      end)
+      refute_receive {:set_members, _horde, _members}, 200
+    end
 
-      start_supervised!(MembershipManager.pg_scope_spec())
-      start_supervised!(MembershipManager)
+    test "never removes members a partial view does not show" do
+      # :pg discovery is asynchronous: at init the group can show only this
+      # node while Horde, through replication, already holds a peer. Handing
+      # that view to Horde as the member set would remove the peer and drop
+      # every registration it owns, cluster-wide.
+      stub_horde([node(), :"peer@127.0.0.1"])
+      start_manager!()
 
-      # Drain the startup set_members messages.
-      for horde <- MembershipManager.hordes() do
-        assert_receive {:set_members, ^horde, _members}
-      end
+      refute_receive {:set_members, _horde, _members}, 200
+    end
+  end
 
-      # A second marker pid on this same node must NOT change the node set, so no
-      # further set_members calls should fire (membership is by node, not pid).
+  describe "membership changes" do
+    test "a second marker pid on the same node changes nothing" do
+      stub_horde([node()])
+      start_manager!()
+
+      # Membership is by node, not pid, so another marker here adds no member.
       extra = spawn(fn -> Process.sleep(:infinity) end)
       :ok = :pg.join(MembershipManager.scope(), MembershipManager.group(), extra)
 
       refute_receive {:set_members, _horde, _members}, 200
+    end
+
+    test "a marker pid leaving while another remains removes nothing" do
+      stub_horde([node(), :"peer@127.0.0.1"])
+      start_manager!()
+
+      extra = spawn(fn -> Process.sleep(:infinity) end)
+      :ok = :pg.join(MembershipManager.scope(), MembershipManager.group(), extra)
+      :ok = :pg.leave(MembershipManager.scope(), MembershipManager.group(), extra)
+
+      refute_receive {:set_members, _horde, _members}, 200
+    end
+
+    test "a node whose last marker pid left is removed, and only that node" do
+      stub_horde([node(), :"peer@127.0.0.1"])
+      manager = start_manager!()
+
+      # The manager's own marker is this node's last one.
+      :ok = :pg.leave(MembershipManager.scope(), MembershipManager.group(), manager)
+
+      for horde <- MembershipManager.hordes() do
+        assert_receive {:set_members, ^horde, members}
+        assert members == [{horde, :"peer@127.0.0.1"}]
+      end
     end
   end
 end

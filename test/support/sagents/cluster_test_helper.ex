@@ -110,6 +110,40 @@ defmodule Sagents.ClusterTestHelper do
   end
 
   # ---------------------------------------------------------------------------
+  # Registrations
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Register `{:membership_test, key}` in the Sagents registry from a process
+  that outlives the `:rpc` call, the way an agent holds its `:via` name.
+  Returns the owning pid.
+  """
+  def register_marker(key) do
+    caller = self()
+
+    pid =
+      spawn(fn ->
+        {:ok, _registry} = Horde.Registry.register(Sagents.Registry, {:membership_test, key}, nil)
+        send(caller, {:registered, self()})
+        Process.sleep(:infinity)
+      end)
+
+    receive do
+      {:registered, ^pid} -> {:ok, pid}
+    after
+      5_000 -> {:error, :timeout}
+    end
+  end
+
+  @doc "The pid holding `{:membership_test, key}` as seen from this node, or `nil`."
+  def marker_owner(key) do
+    case Horde.Registry.lookup(Sagents.Registry, {:membership_test, key}) do
+      [{pid, _value}] -> pid
+      [] -> nil
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Lookup probes
   # ---------------------------------------------------------------------------
 
