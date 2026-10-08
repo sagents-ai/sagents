@@ -1,4 +1,4 @@
-# Migration Guide: v0.16.x → next release (user request tracking)
+# Migration Guide: v0.16.x → v0.17.0
 
 ## What changed and why
 
@@ -80,7 +80,7 @@ searches.
 ## Prerequisites
 
 1. Start from a clean, committed workspace.
-2. Update the `sagents` dependency and run `mix deps.get`.
+2. Update the dependency to `~> 0.17.0` and run `mix deps.get`.
 3. Run `mix compile`. It will be clean. That is expected, not evidence that
    there is nothing to do.
 4. Find your generated persistence modules and your table prefix. The defaults
@@ -697,7 +697,8 @@ no template covers.
 
 **If your generated modules are close to stock,** start from a clean workspace,
 re-run `mix sagents.setup` with the same options used originally, accept the
-overwrites, and diff your customizations back in. **Then delete the migration
+overwrites, and diff your customizations back in. The v0.17.0 templates
+contain steps 2 through 5. **Then delete the migration
 the generator just wrote.** It creates every persistence table from scratch and
 fails against an existing database. Step 1's upgrade migration is the one you
 want.
@@ -708,6 +709,7 @@ want.
 so the exact upstream delta is two commands away:
 
 ```
+# Use the version you are upgrading from.
 mix hex.package fetch sagents 0.16.2 --unpack --output /tmp/sagents-old
 diff -u /tmp/sagents-old/priv/templates/display_message_persistence.ex.eex \
         deps/sagents/priv/templates/display_message_persistence.ex.eex
