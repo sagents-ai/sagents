@@ -24,6 +24,13 @@ defmodule Mix.Sagents.Gen.Persistence.Schema do
     path
   end
 
+  def generate_user_request(config) do
+    path = schema_path(config, "user_request")
+    content = Template.render("user_request.ex", config)
+    File.write!(path, content)
+    path
+  end
+
   defp schema_path(config, filename) do
     context_dir =
       config.context_module

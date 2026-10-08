@@ -1,0 +1,57 @@
+defmodule <%= @context_module %>.UserRequest do
+  @moduledoc """
+  One row per finished user request: one human message and the work done for
+  it. Written from `Sagents.DisplayMessagePersistence.complete_user_request/3`.
+
+  The same user request can be reported more than once (a run continued without
+  a new human message), so rows are upserted by conversation and `seq`.
+  `classification` is never written by sagents; set it to bill by outcome.
+  """
+  use Ecto.Schema
+  import Ecto.Changeset
+
+  alias __MODULE__
+  alias <%= @context_module %>.Conversation
+
+  @primary_key {:id, :binary_id, autogenerate: true}
+  @foreign_key_type :binary_id
+
+  @statuses ~w(completed error cancelled superseded)
+
+  schema "<%= @table_prefix %>user_requests" do
+    belongs_to :conversation, Conversation
+
+    field :seq, :integer
+    # "completed", "error", "cancelled", or "superseded"
+    field :status, :string
+    field :completed_at, :utc_datetime_usec
+    field :assistant_message_count, :integer, default: 0
+    # %{"tool_name" => count}
+    field :tool_calls, :map, default: %{}
+    # %{"input" => integer, "output" => integer}
+    field :token_usage, :map, default: %{}
+    # Set by the host, for billing by outcome. Not written by sagents.
+    field :classification, :string
+
+    timestamps(type: :utc_datetime_usec)
+  end
+
+  @doc false
+  def changeset(%UserRequest{} = user_request, attrs) do
+    user_request
+    |> cast(attrs, [
+      :seq,
+      :status,
+      :completed_at,
+      :assistant_message_count,
+      :tool_calls,
+      :token_usage,
+      :classification
+    ])
+    |> validate_required([:conversation_id, :seq, :status, :completed_at])
+    |> validate_number(:seq, greater_than: 0)
+    |> validate_inclusion(:status, @statuses)
+    |> unique_constraint([:conversation_id, :seq])
+    |> foreign_key_constraint(:conversation_id)
+  end
+end

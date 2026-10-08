@@ -152,6 +152,8 @@ defmodule MyApp.Conversations.DisplayMessage do
     field :sequence, :integer, default: 0
     field :status, :string, default: "completed"
     field :metadata, :map, default: %{}
+    field :user_request_seq, :integer  # the user request the row belongs to
+    field :user_request_final, :boolean, default: false  # part of its final answer
 
     timestamps(type: :utc_datetime_usec, updated_at: false)
   end
@@ -161,6 +163,43 @@ end
 DisplayMessages are multi-content-type: one logical assistant turn can produce several rows (thinking + text + tool_call), ordered by `(inserted_at, sequence)`. See the schema's moduledoc for the valid `content_type` values and their expected `content` shapes.
 
 For `tool_call` and `tool_result` rows the call/result id is pulled out of the `content` JSONB into the top-level `tool_call_id` column (populated at insert time). It's the linking key between a tool call and its result, and the tool-call lifecycle queries (`mark_tool_executing/2`, `complete_tool_call/3`, etc.) use a plain indexed equality on it. The id still lives in `content` as well; the column is an additional indexed copy.
+
+### UserRequest
+
+```elixir
+defmodule MyApp.Conversations.UserRequest do
+  use Ecto.Schema
+
+  schema "sagents_user_requests" do
+    belongs_to :conversation, MyApp.Conversations.Conversation
+
+    field :seq, :integer
+    field :status, :string                 # "completed", "error", "cancelled", "superseded"
+    field :completed_at, :utc_datetime_usec
+    field :assistant_message_count, :integer, default: 0
+    field :tool_calls, :map, default: %{}  # %{"tool_name" => count}
+    field :token_usage, :map, default: %{} # %{"input" => n, "output" => n}
+    field :classification, :string         # set by the host; never written by sagents
+
+    timestamps(type: :utc_datetime_usec)
+  end
+end
+```
+
+A user request is one human message and all the work done for it: every model
+turn, tool call, queued follow-up run, sub-agent and summarization it caused,
+including the user's answers to questions and approvals along the way.
+User requests are numbered per conversation from 1 (see `Sagents.UserRequest`).
+Each display row stores the number it belongs to, so a transcript can be
+grouped by request, and the rows of the final answer are flagged
+`user_request_final` so a UI can fold the rest of the work away.
+
+The ledger holds one row per finished user request, unique on
+`(conversation_id, seq)`. It is written by the generated
+`complete_user_request/3` and upserted, because a run continued without a new
+human message reports the same user request again. `token_usage` includes
+sub-agent and summarization usage, which makes the table a per-request billing
+record.
 
 ## Context Module
 
@@ -187,6 +226,11 @@ defmodule MyApp.Conversations do
   def append_display_message(scope, conversation_id, attrs)
   def append_text_message(scope, conversation_id, message_type, text)
   def load_display_messages(scope, conversation_id, opts \\ [])
+
+  # User requests
+  def complete_user_request(scope, conversation_id, attrs, final_row_ids)
+  def trailing_answer_row_ids(scope, conversation_id, seq)
+  def user_requests_by_seq(scope, conversation_id)
 
   # Tool-call lifecycle
   def mark_tool_executing(scope, call_id)
@@ -251,8 +295,9 @@ From that point, AgentServer invokes the callbacks automatically at the right li
 | New message produced (user, assistant, tool) | `DisplayMessagePersistence.save_message(scope, message, context)` |
 | Tool execution starts / completes / fails / interrupts / cancels | `DisplayMessagePersistence.update_tool_status(scope, status, tool_info, context)` |
 | Sub-agent resumes and produces the final tool result | `DisplayMessagePersistence.resolve_tool_result(scope, tool_call_id, content, context)` |
+| A user request ends (clean finish, error, cancel, dismissed halt, or a new message sent instead of answering an interrupt) | `DisplayMessagePersistence.complete_user_request(scope, report, context)` (optional) |
 
-In every callback, `scope` is the first positional argument — sourced from `server_state.agent.scope`. The `context` map carries `:agent_id`, `:conversation_id`, and (for `persist_state`) `:lifecycle`.
+In every callback, `scope` is the first positional argument — sourced from `server_state.agent.scope`. The `context` map carries `:agent_id`, `:conversation_id`, and (for `persist_state`) `:lifecycle`. Display-message callbacks also receive `:user_request_seq`, the user request the row belongs to (0 before the first human message).
 
 See the moduledocs of `Sagents.AgentPersistence` and `Sagents.DisplayMessagePersistence` for the full behaviour contract.
 

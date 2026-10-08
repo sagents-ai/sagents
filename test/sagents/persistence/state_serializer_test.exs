@@ -6,6 +6,7 @@ defmodule Sagents.Persistence.StateSerializerTest do
   alias Sagents.Message.DisplayHelpers
   alias LangChain.LangChainError
   alias LangChain.Message
+  alias LangChain.TokenUsage
   alias LangChain.Message.{ContentPart, ToolCall, ToolResult}
   alias LangChain.ChatModels.ChatOpenAI
 
@@ -565,8 +566,8 @@ defmodule Sagents.Persistence.StateSerializerTest do
   end
 
   describe "message metadata projection" do
-    # `Message.metadata` holds arbitrary terms, so only the two keys the
-    # framework reads from restored history cross the boundary. Everything here
+    # `Message.metadata` holds arbitrary terms, so only the keys the framework
+    # reads from restored history cross the boundary. Everything here
     # is about a message read back from persisted agent state answering the same
     # way it did in the turn that produced it.
 
@@ -659,9 +660,9 @@ defmodule Sagents.Persistence.StateSerializerTest do
     end
 
     test "metadata outside the projection is dropped and writes no key" do
-      # Token usage and anything else a caller stashed lives for the turn that
-      # set it. A message whose metadata projects to nothing serializes exactly
-      # as it did before the projection existed.
+      # Anything a caller stashed outside the projection lives for the turn
+      # that set it. A message whose metadata projects to nothing serializes
+      # with no "metadata" key at all.
       {restored, serialized} =
         round_trip_message(%Message{
           role: :assistant,
@@ -673,6 +674,45 @@ defmodule Sagents.Persistence.StateSerializerTest do
 
       [message_data] = serialized["state"]["messages"]
       refute Map.has_key?(message_data, "metadata")
+    end
+
+    test "user request keys survive a round trip and unrelated keys are dropped" do
+      usage = TokenUsage.new!(%{input: 10, output: 5, raw: %{"x" => 1}})
+      subagent_usage = TokenUsage.new!(%{input: 100, output: 50})
+
+      {restored, _serialized} =
+        round_trip_message(%Message{
+          role: :assistant,
+          content: "Summary of earlier work",
+          metadata: %{
+            user_request_seq: 3,
+            usage: usage,
+            subagent_usage: subagent_usage,
+            summary: true,
+            foo: :bar
+          }
+        })
+
+      assert %{
+               user_request_seq: 3,
+               usage: %TokenUsage{input: 10, output: 5, raw: %{"x" => 1}},
+               subagent_usage: %TokenUsage{input: 100, output: 50, raw: %{}},
+               summary: true
+             } = restored.metadata
+
+      refute Map.has_key?(restored.metadata, :foo)
+    end
+
+    test "a summary flag other than true is not projected" do
+      {restored, serialized} =
+        round_trip_message(%Message{
+          role: :assistant,
+          content: "Hi",
+          metadata: %{summary: false}
+        })
+
+      assert restored.metadata == nil
+      refute Map.has_key?(List.first(serialized["state"]["messages"]), "metadata")
     end
 
     test "history written without the key restores unchanged" do
@@ -690,6 +730,38 @@ defmodule Sagents.Persistence.StateSerializerTest do
 
       {:ok, restored} = StateSerializer.deserialize_server_state("agent-meta", serialized)
       assert %Message{content: [_part], metadata: nil} = List.last(restored.messages)
+    end
+  end
+
+  describe "user_request_seq" do
+    test "the state's number round-trips" do
+      serialized =
+        StateSerializer.serialize_server_state(nil, State.new!(%{user_request_seq: 7}))
+
+      assert serialized["state"]["user_request_seq"] == 7
+
+      assert {:ok, %State{user_request_seq: 7}} =
+               StateSerializer.deserialize_server_state("agent-seq", serialized)
+    end
+
+    test "a payload without the key restores as 0" do
+      serialized = StateSerializer.serialize_server_state(nil, State.new!())
+      state_data = Map.delete(serialized["state"], "user_request_seq")
+
+      assert {:ok, %State{user_request_seq: 0}} =
+               StateSerializer.deserialize_state("agent-seq", state_data)
+    end
+
+    test "a pending message keeps its number" do
+      pending = Sagents.UserRequest.put_seq(Message.new_user!("next"), 2)
+
+      serialized =
+        StateSerializer.serialize_server_state(nil, State.new!(%{user_request_seq: 1}),
+          pending_message: pending
+        )
+
+      assert %Message{role: :user, metadata: %{user_request_seq: 2}} =
+               StateSerializer.deserialize_pending_message(serialized)
     end
   end
 

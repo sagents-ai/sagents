@@ -25,6 +25,7 @@ defmodule <%= @context_module %> do
   alias <%= @context_module %>.AgentState
   alias <%= @context_module %>.Conversation
   alias <%= @context_module %>.DisplayMessage
+  alias <%= @context_module %>.UserRequest
   alias <%= @scope_module %>, as: Scope
 
   #
@@ -270,6 +271,99 @@ defmodule <%= @context_module %> do
 
       {:error, :not_found} ->
         []
+    end
+  end
+
+  #
+  # User requests
+  #
+
+  @doc """
+  Records a finished user request and marks its final answer's display rows.
+
+  Upserts by conversation and `seq`, because a user request can be reported
+  more than once. `final_row_ids` replaces any rows marked final for this
+  user request before. A `classification` the host set on the row survives a
+  repeated report.
+  """
+  def complete_user_request(%Scope{} = scope, conversation_id, attrs, final_row_ids) do
+    with :ok <- authorize_conversation(scope, conversation_id) do
+      seq = Map.fetch!(attrs, :seq)
+
+      Repo.transaction(fn ->
+        changeset =
+          %UserRequest{conversation_id: conversation_id}
+          |> UserRequest.changeset(attrs)
+
+        case Repo.insert(changeset,
+               on_conflict:
+                 {:replace_all_except, [:id, :conversation_id, :seq, :classification, :inserted_at]},
+               conflict_target: [:conversation_id, :seq],
+               returning: true
+             ) do
+          {:ok, user_request} ->
+            mark_final_rows(conversation_id, seq, final_row_ids)
+            user_request
+
+          {:error, changeset} ->
+            Repo.rollback(changeset)
+        end
+      end)
+    end
+  end
+
+  defp mark_final_rows(conversation_id, seq, final_row_ids) do
+    DisplayMessage
+    |> where([m], m.conversation_id == ^conversation_id and m.user_request_seq == ^seq)
+    |> Repo.update_all(set: [user_request_final: false])
+
+    if final_row_ids != [] do
+      DisplayMessage
+      |> where([m], m.conversation_id == ^conversation_id and m.id in ^final_row_ids)
+      |> Repo.update_all(set: [user_request_final: true])
+    end
+
+    :ok
+  end
+
+  @doc """
+  Returns the IDs of a user request's trailing assistant text rows: the rows
+  after its last row of any other kind. Used when the final answer's rows were
+  not reported. A final answer has no tool calls, so its rows come last.
+
+  A trailing row of another kind (a todo snapshot, a notification) ends the
+  scan and yields no rows, which leaves the user request's work uncollapsed
+  rather than collapsing the wrong rows.
+  """
+  def trailing_answer_row_ids(%Scope{} = scope, conversation_id, seq) do
+    case authorize_conversation(scope, conversation_id) do
+      :ok ->
+        DisplayMessage
+        |> where([m], m.conversation_id == ^conversation_id and m.user_request_seq == ^seq)
+        |> order_by([m], desc: m.inserted_at, desc: m.sequence)
+        |> Repo.all()
+        |> Enum.take_while(&(&1.message_type == "assistant" and &1.content_type in ~w(text thinking)))
+        |> Enum.filter(&(&1.content_type == "text"))
+        |> Enum.map(& &1.id)
+
+      {:error, :not_found} ->
+        []
+    end
+  end
+
+  @doc """
+  Lists the recorded user requests of a conversation, keyed by `seq`.
+  """
+  def user_requests_by_seq(%Scope{} = scope, conversation_id) do
+    case authorize_conversation(scope, conversation_id) do
+      :ok ->
+        UserRequest
+        |> where([i], i.conversation_id == ^conversation_id)
+        |> Repo.all()
+        |> Map.new(&{&1.seq, &1})
+
+      {:error, :not_found} ->
+        %{}
     end
   end
 

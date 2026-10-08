@@ -11,6 +11,7 @@ defmodule Mix.Sagents.Gen.Persistence.Generator do
       Schema.generate_conversation(config),
       Schema.generate_agent_state(config),
       Schema.generate_display_message(config),
+      Schema.generate_user_request(config),
       Migration.generate(config)
     ]
   end

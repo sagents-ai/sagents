@@ -48,6 +48,7 @@ defmodule Sagents.Agent do
 
   alias __MODULE__
   alias Sagents.AgentUtils
+  alias Sagents.UserRequest
   alias Sagents.Message.DisplayHelpers
   alias Sagents.Middleware
   alias Sagents.State
@@ -561,6 +562,13 @@ defmodule Sagents.Agent do
     callbacks. When running via `AgentServer`, the only callbacks passed here are
     the PubSub broadcasting callbacks; middleware collection happens internally.
 
+  - `:user_request_seq` - The user request this run belongs to (see
+    `Sagents.UserRequest`). Every message the run adds is stamped with it,
+    and tools read it as `context.user_request_seq`. Defaults to the state's
+    `user_request_seq`. `Sagents.AgentServer` sets it; a tool that runs an
+    agent of its own passes `context.user_request_seq` so that work is
+    attributed to the user request that caused it.
+
   - `:until_tool` - Tool name (string) or list of tool names. When set, the run
     completes (returning `{:ok, state, tool_result}`) as soon as the target tool
     is *called*, regardless of whether it succeeded or returned an error. Errors
@@ -652,8 +660,35 @@ defmodule Sagents.Agent do
   @spec execute(t(), State.t(), keyword()) :: execute_result()
   def execute(%Agent{} = agent, %State{} = state, opts \\ []) do
     # Ensure agent_id is set in state (library handles this automatically)
-    state = %{state | agent_id: agent.agent_id}
+    state =
+      %{state | agent_id: agent.agent_id}
+      |> put_user_request_seq(opts)
 
+    # Messages inserted by a tool's expansion and the canonical messages that
+    # replace the rolling state at a clean finish pass no callback, so the
+    # result is stamped as a whole. Messages that already carry a number keep it.
+    agent
+    |> do_execute(state, opts)
+    |> UserRequest.stamp_result(state.user_request_seq)
+  end
+
+  # `:user_request_seq` sets the number this run's messages are stamped with.
+  # Without it the state's own number is used.
+  defp put_user_request_seq(%State{} = state, opts) do
+    case Keyword.get(opts, :user_request_seq) do
+      seq when is_integer(seq) and seq >= 0 ->
+        %State{state | user_request_seq: seq}
+
+      nil ->
+        state
+
+      other ->
+        raise ArgumentError,
+              ":user_request_seq must be a non-negative integer, got: #{inspect(other)}"
+    end
+  end
+
+  defp do_execute(%Agent{} = agent, %State{} = state, opts) do
     callbacks = AgentUtils.resolve_callbacks(agent.middleware, opts)
 
     with {:ok, validated_opts} <- validate_until_tool(agent, opts),
@@ -724,19 +759,26 @@ defmodule Sagents.Agent do
   @spec resume(t(), State.t(), any(), keyword()) :: execute_result()
   def resume(%Agent{} = agent, %State{} = state, resume_data, opts \\ []) do
     # Ensure agent_id is set in state (library handles this automatically)
-    state = %{state | agent_id: agent.agent_id}
+    state =
+      %{state | agent_id: agent.agent_id}
+      |> put_user_request_seq(opts)
 
-    case apply_handle_resume_hooks(agent, state, resume_data, agent.middleware, opts) do
-      {:ok, updated_state} ->
-        execute(agent, %{updated_state | interrupt_data: nil}, opts)
+    result =
+      case apply_handle_resume_hooks(agent, state, resume_data, agent.middleware, opts) do
+        {:ok, updated_state} ->
+          execute(agent, %{updated_state | interrupt_data: nil}, opts)
 
-      {:interrupt, interrupted_state, new_interrupt_data} ->
-        {:interrupt, %{interrupted_state | interrupt_data: new_interrupt_data},
-         new_interrupt_data}
+        {:interrupt, interrupted_state, new_interrupt_data} ->
+          {:interrupt, %{interrupted_state | interrupt_data: new_interrupt_data},
+           new_interrupt_data}
 
-      {:error, reason} ->
-        {:error, reason}
-    end
+        {:error, reason} ->
+          {:error, reason}
+      end
+
+    # A resume hook can patch a tool result into the state without running the
+    # model (sub-agent HITL); stamping covers those messages too.
+    UserRequest.stamp_result(result, state.user_request_seq)
   end
 
   defp apply_handle_resume_hooks(agent, state, resume_data, middleware, opts) do
@@ -990,6 +1032,10 @@ defmodule Sagents.Agent do
             # `context.agent_id` to publish events back through their
             # AgentServer (e.g. `Sagents.AgentServer.publish_event_from/2`).
             agent_id: state.agent_id,
+            # The user request this run belongs to. Tools read
+            # `context.user_request_seq`; AgentServer's callbacks read it from
+            # the chain to stamp messages as they arrive.
+            user_request_seq: state.user_request_seq,
             # Identity and grouping keys LangChain's OpenTelemetry layer reads to
             # populate `gen_ai.agent.name` and `gen_ai.conversation.id`. They also
             # give tools a supported way to know which agent and conversation they
