@@ -28,6 +28,16 @@ defmodule Sagents.GeneratedDisplayPersistenceTest do
     def interrupt_tool_call(_scope, _call_id, _metadata), do: {:ok, nil}
     def cancel_tool_call(_scope, _call_id), do: {:ok, nil}
     def resolve_interrupted_tool_result(_scope, _call_id, _content), do: {:ok, nil}
+
+    def complete_user_request(_scope, conversation_id, attrs, final_row_ids) do
+      send(self(), {:completed, conversation_id, attrs, final_row_ids})
+      {:ok, %{id: 1}}
+    end
+
+    def trailing_answer_row_ids(_scope, conversation_id, seq) do
+      send(self(), {:trailing_lookup, conversation_id, seq})
+      ["trailing-1"]
+    end
   end
 
   setup do
@@ -184,6 +194,108 @@ defmodule Sagents.GeneratedDisplayPersistenceTest do
 
       assert_receive {:appended,
                       %{"tool_call_id" => "call_9", "status" => "pending", "sequence" => 0}}
+    end
+  end
+
+  describe "user request tracking" do
+    test "save_message stores the row's user request", %{module: module} do
+      assert {:ok, [_row]} =
+               module.save_message(:scope, Message.new_assistant!("hi"), %{
+                 conversation_id: 7,
+                 user_request_seq: 3
+               })
+
+      assert_receive {:appended, %{"user_request_seq" => 3}}
+    end
+
+    test "a row before the first human message stores nil", %{module: module} do
+      assert {:ok, [_row]} =
+               module.save_message(:scope, Message.new_assistant!("hi"), %{
+                 conversation_id: 7,
+                 user_request_seq: 0
+               })
+
+      assert_receive {:appended, %{"user_request_seq" => nil}}
+    end
+
+    test "synthetic rows store the user request under the attrs' own key style", %{module: module} do
+      module.save_synthetic_message(
+        :scope,
+        %{message_type: :assistant, content_type: "notification", content: %{}},
+        %{conversation_id: 7, user_request_seq: 2}
+      )
+
+      assert_receive {:appended, %{user_request_seq: 2}}
+
+      module.save_synthetic_message(
+        :scope,
+        %{"message_type" => "assistant", "content_type" => "notification", "content" => %{}},
+        %{conversation_id: 7, user_request_seq: 2}
+      )
+
+      assert_receive {:appended, %{"user_request_seq" => 2} = string_keyed}
+      refute Map.has_key?(string_keyed, :user_request_seq)
+    end
+
+    defp report(overrides) do
+      Map.merge(
+        %{
+          seq: 4,
+          status: :completed,
+          completed_at: ~U[2026-10-07 12:00:00.000000Z],
+          final_message: nil,
+          final_rows: [],
+          assistant_message_count: 2,
+          tool_calls: %{"search" => 1},
+          token_usage: LangChain.TokenUsage.new!(%{input: 30, output: 3})
+        },
+        overrides
+      )
+    end
+
+    test "complete_user_request records the report and marks only the answer's text rows", %{
+      module: module
+    } do
+      rows = [
+        %{id: "thinking-1", content_type: "thinking"},
+        %{id: "text-1", content_type: "text"}
+      ]
+
+      assert :ok =
+               module.complete_user_request(:scope, report(%{final_rows: rows}), %{
+                 conversation_id: 7,
+                 user_request_seq: 4
+               })
+
+      assert_receive {:completed, 7, attrs, ["text-1"]}
+
+      assert %{
+               seq: 4,
+               status: "completed",
+               assistant_message_count: 2,
+               tool_calls: %{"search" => 1},
+               token_usage: %{"input" => 30, "output" => 3}
+             } = attrs
+    end
+
+    test "unknown final rows fall back to the trailing answer rows", %{module: module} do
+      assert :ok =
+               module.complete_user_request(
+                 :scope,
+                 report(%{final_rows: nil, token_usage: nil}),
+                 %{
+                   conversation_id: 7,
+                   user_request_seq: 4
+                 }
+               )
+
+      assert_receive {:trailing_lookup, 7, 4}
+      assert_receive {:completed, 7, %{token_usage: %{}}, ["trailing-1"]}
+    end
+
+    test "nothing is recorded without a conversation", %{module: module} do
+      assert :ok = module.complete_user_request(:scope, report(%{}), %{conversation_id: nil})
+      refute_receive {:completed, _, _, _}
     end
   end
 end

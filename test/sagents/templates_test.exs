@@ -283,6 +283,7 @@ defmodule Sagents.TemplatesTest do
       context.ex.eex
       conversation.ex.eex
       display_message.ex.eex
+      user_request.ex.eex
       migration.exs.eex
     )
 
@@ -303,6 +304,49 @@ defmodule Sagents.TemplatesTest do
         assert source =~ ~s(- `"#{key}"`),
                "the schema template does not document the #{inspect(key)} content key"
       end
+    end
+
+    test "display rows carry their user request, cast from attrs" do
+      source = render_persistence("display_message.ex.eex")
+
+      assert source =~ "field :user_request_seq, :integer"
+      assert source =~ "field :user_request_final, :boolean, default: false"
+
+      # Both changesets cast the two fields.
+      assert length(String.split(source, ":user_request_final\n")) == 3
+    end
+
+    test "the migration adds the user request columns and the user requests ledger" do
+      source = render_persistence("migration.exs.eex")
+
+      assert source =~ "add :user_request_seq, :integer"
+      assert source =~ "add :user_request_final, :boolean, default: false, null: false"
+
+      assert source =~
+               "create index(:sagents_display_messages, [:conversation_id, :user_request_seq])"
+
+      assert source =~ "create table(:sagents_user_requests, primary_key: false)"
+      assert source =~ "create unique_index(:sagents_user_requests, [:conversation_id, :seq])"
+    end
+
+    test "the user request schema matches the ledger table" do
+      source = render_persistence("user_request.ex.eex")
+
+      assert source =~ ~r/defmodule (Elixir\.)?MyApp\.Conversations\.UserRequest do/
+      assert source =~ ~s(schema "sagents_user_requests" do)
+      assert source =~ "unique_constraint([:conversation_id, :seq])"
+    end
+
+    test "the context upserts user requests and keeps the host's classification" do
+      source = render_persistence("context.ex.eex")
+
+      assert source =~
+               "def complete_user_request(%Scope{} = scope, conversation_id, attrs, final_row_ids)"
+
+      assert source =~ "conflict_target: [:conversation_id, :seq]"
+      assert source =~ "[:id, :conversation_id, :seq, :classification, :inserted_at]"
+      assert source =~ "def trailing_answer_row_ids(%Scope{} = scope, conversation_id, seq)"
+      assert source =~ "def user_requests_by_seq(%Scope{} = scope, conversation_id)"
     end
 
     test "the schema accepts content carrying keys beyond the per-type ones" do

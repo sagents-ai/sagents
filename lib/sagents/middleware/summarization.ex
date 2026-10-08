@@ -125,6 +125,7 @@ defmodule Sagents.Middleware.Summarization do
   alias Sagents.State
   alias Sagents.AgentServer
   alias LangChain.Message
+  alias LangChain.TokenUsage
   alias LangChain.Chains.SummarizeConversationChain
   alias LangChain.Utils
   alias LangChain.Utils.ChainResult
@@ -246,9 +247,9 @@ defmodule Sagents.Middleware.Summarization do
 
       # Generate summary
       case generate_summary(messages_to_summarize, state, config) do
-        {:ok, summary_text} ->
+        {:ok, summary_text, usage} ->
           # Create summary messages
-          summary_messages = create_summary_messages(summary_text)
+          summary_messages = create_summary_messages(summary_text, usage)
 
           # Rebuild message list
           rebuilt_messages =
@@ -349,8 +350,13 @@ defmodule Sagents.Middleware.Summarization do
       # Run summarization
       case SummarizeConversationChain.run(summarizer, conversation_text) do
         {:ok, chain} ->
-          # Extract summary text from chain using standard utility
-          ChainResult.to_string(chain)
+          # Extract summary text from chain using standard utility. The
+          # summarizer's own usage travels with it so the user request that
+          # triggered the summary is charged for it.
+          case ChainResult.to_string(chain) do
+            {:ok, text} -> {:ok, text, TokenUsage.get(chain.last_message)}
+            other -> other
+          end
 
         {:error, _chain, reason} ->
           {:error, reason}
@@ -372,12 +378,26 @@ defmodule Sagents.Middleware.Summarization do
     Enum.map_join(messages, "\n", &SummarizeConversationChain.for_summary_text/1)
   end
 
-  defp create_summary_messages(summary_text) do
+  # Both messages stand in for older history. `summary: true` keeps them out of
+  # a user request's final answer and message counts; the assistant message
+  # carries the summarizer's own usage so the user request that triggered it
+  # pays for it.
+  defp create_summary_messages(summary_text, usage) do
     [
-      Message.new_user!("Summarize our conversation up to this point for future reference."),
-      Message.new_assistant!(summary_text)
+      Message.new!(%{
+        role: :user,
+        content: "Summarize our conversation up to this point for future reference.",
+        metadata: %{summary: true}
+      }),
+      Message.new_assistant!(%{
+        content: summary_text,
+        metadata: put_usage(%{summary: true}, usage)
+      })
     ]
   end
+
+  defp put_usage(metadata, %TokenUsage{} = usage), do: Map.put(metadata, :usage, usage)
+  defp put_usage(metadata, _usage), do: metadata
 
   # Approximate token counting This is a fast estimation based on word count and
   # character count More accurate than character count alone, faster than

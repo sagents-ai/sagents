@@ -45,6 +45,7 @@ defmodule Sagents.State do
   - **todos**: Replaces with new todos (merge handled by TodoList middleware)
   - **metadata**: Deep merges metadata maps
   - **agent_id**: Uses right if present, otherwise left (runtime identifier, not data)
+  - **user_request_seq**: The larger of the two (the number only moves forward)
   """
 
   use Ecto.Schema
@@ -60,6 +61,10 @@ defmodule Sagents.State do
     field :messages, {:array, :any}, default: [], virtual: true
     field :todos, {:array, :map}, default: []
     field :metadata, :map, default: %{}
+    # The current user request: the number every new message is stamped with.
+    # Advanced by AgentServer when a human message lands; 0 until the first
+    # one. Persisted, so a restored conversation continues its numbering.
+    field :user_request_seq, :integer, default: 0
     # Runtime-only middleware state. Virtual: never persisted, never JSON-encoded.
     # Use this for values that are inherently process-local or non-serializable —
     # captured closures, OTel/Sentry context tokens, PIDs, refs, tuples — that
@@ -107,11 +112,13 @@ defmodule Sagents.State do
       :messages,
       :todos,
       :metadata,
+      :user_request_seq,
       :runtime,
       :interrupt_data,
       :pause_reason,
       :conversation_id
     ])
+    |> validate_number(:user_request_seq, greater_than_or_equal_to: 0)
     |> apply_action(:insert)
   end
 
@@ -271,6 +278,7 @@ defmodule Sagents.State do
   - **messages**: Concatenates lists (left + right)
   - **todos**: Uses right if present, otherwise left
   - **metadata**: Deep merges maps
+  - **user_request_seq**: The larger of the two
 
   ## Examples
 
@@ -287,6 +295,9 @@ defmodule Sagents.State do
       messages: merge_messages(left.messages, right.messages),
       todos: merge_todos(left.todos, right.todos),
       metadata: deep_merge_maps(left.metadata, right.metadata),
+      # A tool's state delta is a fresh %State{} carrying the default 0. The
+      # number only moves forward, so the larger side wins.
+      user_request_seq: max(left.user_request_seq || 0, right.user_request_seq || 0),
       runtime: merge_runtime(left.runtime, right.runtime),
       interrupt_data: right.interrupt_data || left.interrupt_data,
       pause_reason: right.pause_reason || left.pause_reason
@@ -488,6 +499,10 @@ defmodule Sagents.State do
   - All TODOs
   - All metadata
 
+  Keeps `user_request_seq`. User requests are numbered per conversation, and a
+  host's stored transcript and user request records still hold the earlier
+  numbers, so the next user request continues the numbering.
+
   **Note**: This function only resets the Agent's state structure. File state is managed
   separately by FileSystemServer and must be reset through AgentServer.reset/1 which
   coordinates the full reset process.
@@ -513,6 +528,7 @@ defmodule Sagents.State do
       messages: [],
       todos: [],
       metadata: %{},
+      user_request_seq: state.user_request_seq,
       runtime: %{}
     }
   end

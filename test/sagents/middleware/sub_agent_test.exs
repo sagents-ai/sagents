@@ -2787,4 +2787,63 @@ defmodule Sagents.Middleware.SubAgentTest do
       assert is_function(cbs.on_tool_call_identified, 3)
     end
   end
+
+  describe "user request attribution" do
+    setup do
+      agent_id = "parent-#{System.unique_integer([:positive])}"
+      {:ok, _sup} = start_supervised({SubAgentsDynamicSupervisor, agent_id: agent_id})
+
+      {:ok, middleware_config} =
+        SubAgentMiddleware.init(
+          agent_id: agent_id,
+          model: test_model(),
+          middleware: [],
+          subagents: [build_subagent_config("researcher", "Research topics")]
+        )
+
+      context = %{
+        agent_id: agent_id,
+        tool_call_id: "call_7",
+        user_request_seq: 3,
+        state: State.new!(%{messages: []}),
+        parent_middleware: []
+      }
+
+      %{middleware_config: middleware_config, context: context}
+    end
+
+    defp start_researcher(context, config) do
+      SubAgentMiddleware.start_subagent(
+        "Research",
+        "researcher",
+        %{"instructions" => "Research", "task_name" => "researcher"},
+        context,
+        config
+      )
+    end
+
+    test "the sub-agent runs under the parent's user request", %{
+      middleware_config: config,
+      context: context
+    } do
+      test_pid = self()
+      answer = Message.new_assistant!(%{content: "Research completed!"})
+
+      LLMChain
+      |> stub(:run, fn chain, _opts ->
+        send(test_pid, {:sub_context, chain.custom_context})
+
+        {:ok,
+         Map.merge(chain, %{
+           messages: chain.messages ++ [answer],
+           last_message: answer,
+           needs_response: false
+         })}
+      end)
+
+      assert {:ok, "Research completed!"} = start_researcher(context, config)
+
+      assert_received {:sub_context, %{user_request_seq: 3, state: %State{user_request_seq: 3}}}
+    end
+  end
 end

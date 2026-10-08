@@ -66,10 +66,17 @@ defmodule Sagents.DisplayMessagePersistence do
   @typedoc """
   Context map passed to every callback. Carries cross-cutting identifiers that
   every implementation needs but don't benefit from positional visibility.
+
+  - `:agent_id` - the agent's identifier
+  - `:conversation_id` - the conversation the rows belong to, or `nil`
+  - `:user_request_seq` - the user request the row belongs to (see
+    `Sagents.UserRequest`); 0 before the first human message. Store it on the
+    row to group the transcript by user request.
   """
   @type callback_context :: %{
           required(:agent_id) => String.t(),
-          required(:conversation_id) => String.t() | nil
+          required(:conversation_id) => String.t() | nil,
+          required(:user_request_seq) => non_neg_integer()
         }
 
   @type tool_status :: :executing | :completed | :failed | :interrupted | :cancelled
@@ -101,7 +108,7 @@ defmodule Sagents.DisplayMessagePersistence do
 
   - `scope` — Integrator-defined scope struct (or `nil`). Use to filter DB writes.
   - `message` — The `LangChain.Message` struct to persist
-  - `context` — Map with `:agent_id` and `:conversation_id`
+  - `context` — Map with `:agent_id`, `:conversation_id`, and `:user_request_seq`
 
   ## Returns
 
@@ -134,7 +141,7 @@ defmodule Sagents.DisplayMessagePersistence do
     | `:interrupted` | `%{call_id: "...", display_text: "..."}` |
     | `:cancelled` | `%{call_id: "...", name: "..."}` |
 
-  - `context` — Map with `:agent_id` and `:conversation_id`
+  - `context` — Map with `:agent_id`, `:conversation_id`, and `:user_request_seq`
 
   ## Returns
 
@@ -162,7 +169,7 @@ defmodule Sagents.DisplayMessagePersistence do
   - `scope` — Integrator-defined scope struct (or `nil`). Use to filter DB writes.
   - `tool_call_id` — The tool call ID matching the interrupted tool result
   - `result_content` — The actual result content string
-  - `context` — Map with `:agent_id` and `:conversation_id`
+  - `context` — Map with `:agent_id`, `:conversation_id`, and `:user_request_seq`
 
   ## Returns
 
@@ -207,7 +214,7 @@ defmodule Sagents.DisplayMessagePersistence do
 
   - `scope` — Integrator-defined scope struct (or `nil`). Use to filter DB writes.
   - `attrs` — Map with `:message_type`, `:content_type`, `:content` (and optionally `:metadata`).
-  - `context` — Map with `:agent_id` and `:conversation_id`.
+  - `context` — Map with `:agent_id`, `:conversation_id`, and `:user_request_seq`.
 
   ## Returns
 
@@ -220,5 +227,66 @@ defmodule Sagents.DisplayMessagePersistence do
               context :: callback_context()
             ) :: {:ok, term()} | {:error, term()}
 
-  @optional_callbacks [resolve_tool_result: 4, save_synthetic_message: 3]
+  @typedoc """
+  The report for a finished user request. The summary fields come from
+  `Sagents.UserRequest.summarize/2`, without the message list.
+
+  - `:status` - `:completed`, `:error`, `:cancelled`, or `:superseded` (an
+    interrupt the user abandoned by sending a new message)
+  - `:final_rows` - the rows `save_message/3` returned for the final answer,
+    or `nil` when they are not known (no final answer, or the server
+    restarted during the user request). An implementation chooses which of
+    them to mark; a thinking row usually stays with the collapsed work.
+  - `:token_usage` - the user request's total usage, including sub-agent work
+    and summarization it triggered
+  """
+  @type user_request_report :: %{
+          seq: pos_integer(),
+          status: :completed | :error | :cancelled | :superseded,
+          completed_at: DateTime.t(),
+          final_message: LangChain.Message.t() | nil,
+          final_rows: list() | nil,
+          assistant_message_count: non_neg_integer(),
+          tool_calls: %{String.t() => pos_integer()},
+          token_usage: LangChain.TokenUsage.t() | nil
+        }
+
+  @doc """
+  Called when a user request ends. Use it to record per-request work (for
+  billing) and to mark the final answer's rows.
+
+  AgentServer calls it before broadcasting the status change that ends the
+  user request, and broadcasts the same report as
+  `{:user_request_completed, report}`.
+
+  A user request ends when its last run finishes cleanly, errors, or is
+  cancelled; when a halt interrupt is dismissed; or when the user sends a new
+  message instead of answering an interrupt. Interrupts and pauses do not end
+  it: a resume continues the same user request.
+
+  The same `seq` can be reported more than once. A run started without a new
+  human message, after `Sagents.AgentServer.reset/1` or
+  `Sagents.AgentServer.restore_state/2`, continues the current user request,
+  and it is reported again when that run ends. Implementations should upsert
+  by conversation and `seq`; the last report is the current one.
+
+  Optional callback. A module that does not implement it still receives every
+  other callback, and subscribers still receive the broadcast.
+
+  ## Returns
+
+  - `:ok`
+  - `{:error, reason}`: logged, does not affect the agent
+  """
+  @callback complete_user_request(
+              scope :: term() | nil,
+              report :: user_request_report(),
+              context :: callback_context()
+            ) :: :ok | {:error, term()}
+
+  @optional_callbacks [
+    resolve_tool_result: 4,
+    save_synthetic_message: 3,
+    complete_user_request: 3
+  ]
 end

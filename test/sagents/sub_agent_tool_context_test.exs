@@ -38,6 +38,32 @@ defmodule Sagents.SubAgentToolContextTest do
     )
   end
 
+  describe "user_request_seq propagation" do
+    test "the sub-agent's state and context carry the parent's user request" do
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: "parent-1",
+          instructions: "Do work",
+          agent_config: bare_agent(),
+          user_request_seq: 3
+        )
+
+      assert %{user_request_seq: 3, state: %State{user_request_seq: 3}} =
+               subagent.chain.custom_context
+    end
+
+    test "defaults to 0" do
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "parent-1",
+          instructions: "Do work",
+          compiled_agent: bare_agent()
+        )
+
+      assert %{user_request_seq: 0} = subagent.chain.custom_context
+    end
+  end
+
   describe "tool_context propagation via new_from_config" do
     test "SubAgent custom_context includes parent_tool_context keys" do
       agent = bare_agent()
@@ -128,6 +154,7 @@ defmodule Sagents.SubAgentToolContextTest do
       # :agent_name, :conversation_id, :otel_attributes) is also internal: it is
       # what lets a sub-agent's spans report their own lineage and inherit the
       # parent's trace context. See Sagents.AgentTraceContextTest.
+      # :user_request_seq carries the parent's user request (0 when not given).
       assert Map.keys(ctx) |> Enum.sort() ==
                [
                  :agent_id,
@@ -139,7 +166,8 @@ defmodule Sagents.SubAgentToolContextTest do
                  :scope,
                  :state,
                  :sub_agent_id,
-                 :tool_context
+                 :tool_context,
+                 :user_request_seq
                ]
 
       assert ctx.tool_context == %{}

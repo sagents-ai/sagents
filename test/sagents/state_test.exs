@@ -13,6 +13,12 @@ defmodule Sagents.StateTest do
       assert state.todos == []
       assert state.metadata == %{}
       assert state.agent_id == nil
+      assert state.user_request_seq == 0
+    end
+
+    test "rejects a negative user_request_seq" do
+      assert {:error, changeset} = State.new(%{user_request_seq: -1})
+      assert {_msg, _opts} = changeset.errors[:user_request_seq]
     end
 
     test "creates a state with provided attributes" do
@@ -85,6 +91,29 @@ defmodule Sagents.StateTest do
       assert merged.metadata.nested.x == 1
       assert merged.metadata.nested.y == 3
       assert merged.metadata.nested.z == 4
+    end
+  end
+
+  describe "merge_states/2 user_request_seq" do
+    test "keeps the larger number in either direction" do
+      at_5 = State.new!(%{user_request_seq: 5})
+      at_2 = State.new!(%{user_request_seq: 2})
+
+      assert State.merge_states(at_5, at_2).user_request_seq == 5
+      assert State.merge_states(at_2, at_5).user_request_seq == 5
+    end
+
+    test "a tool's todo delta does not reset the number" do
+      at_5 = State.new!(%{user_request_seq: 5})
+      delta = %State{todos: [%{id: "1", content: "task"}]}
+
+      assert State.merge_states(at_5, delta).user_request_seq == 5
+    end
+
+    test "a map update does not reset the number" do
+      at_5 = State.new!(%{user_request_seq: 5})
+
+      assert State.merge_states(at_5, %{metadata: %{key: "value"}}).user_request_seq == 5
     end
   end
 
@@ -386,6 +415,12 @@ defmodule Sagents.StateTest do
   end
 
   describe "reset/1" do
+    test "keeps the user request number so numbering continues" do
+      state = State.new!(%{messages: [Message.new_user!("hi")], user_request_seq: 4})
+
+      assert %State{messages: [], user_request_seq: 4} = State.reset(state)
+    end
+
     test "clears messages, todos, and metadata" do
       state =
         State.new!(%{
