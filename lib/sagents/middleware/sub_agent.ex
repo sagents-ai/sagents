@@ -798,7 +798,8 @@ defmodule Sagents.Middleware.SubAgent do
                 parent_metadata: parent_metadata,
                 parent_runtime: parent_runtime,
                 scope: parent_scope,
-                parent_trace: parent_trace
+                parent_trace: parent_trace,
+                user_request_seq: Map.get(context, :user_request_seq, 0)
               )
 
             agent ->
@@ -815,7 +816,8 @@ defmodule Sagents.Middleware.SubAgent do
                 parent_metadata: parent_metadata,
                 parent_runtime: parent_runtime,
                 scope: parent_scope,
-                parent_trace: parent_trace
+                parent_trace: parent_trace,
+                user_request_seq: Map.get(context, :user_request_seq, 0)
               )
           end
 
@@ -923,7 +925,8 @@ defmodule Sagents.Middleware.SubAgent do
             parent_metadata: parent_metadata,
             parent_runtime: parent_runtime,
             scope: parent_scope,
-            parent_trace: parent_trace
+            parent_trace: parent_trace,
+            user_request_seq: Map.get(context, :user_request_seq, 0)
           )
 
         # Get supervisor and start SubAgent (same as pre-configured)

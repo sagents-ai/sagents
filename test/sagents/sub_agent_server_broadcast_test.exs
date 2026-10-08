@@ -276,6 +276,163 @@ defmodule Sagents.SubAgentServerBroadcastTest do
     end
   end
 
+  describe "token usage and user request stamping" do
+    defp with_usage(%Message{} = message, input, output) do
+      usage = LangChain.TokenUsage.new!(%{input: input, output: output})
+      %Message{message | metadata: Map.put(message.metadata || %{}, :usage, usage)}
+    end
+
+    defp weather_call do
+      Message.new_assistant!(%{
+        tool_calls: [
+          ToolCall.new!(%{
+            status: :complete,
+            call_id: "call_w",
+            name: "get_weather",
+            arguments: %{"location" => "Paris"}
+          })
+        ]
+      })
+    end
+
+    # The usage the parent AgentServer is holding for a tool call.
+    defp parent_usage(parent_agent_id, tool_call_id) do
+      parent_agent_id
+      |> AgentServer.get_pid()
+      |> :sys.get_state()
+      |> Map.fetch!(:subagent_usage)
+      |> Map.get(tool_call_id)
+    end
+
+    defp start_weather_subagent(parent_agent_id, opts \\ []) do
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: parent_agent_id,
+          instructions: "Check the weather",
+          agent_config: create_test_agent_with_tools(),
+          user_request_seq: Keyword.get(opts, :user_request_seq, 0)
+        )
+
+      {:ok, pid} =
+        SubAgentServer.start_link(
+          subagent: subagent,
+          tool_call_id: Keyword.get(opts, :tool_call_id, "call_task")
+        )
+
+      {subagent, pid}
+    end
+
+    test "each message's usage reaches the parent as it completes", context do
+      parent_agent = start_parent_agent(context)
+      {subagent, _pid} = start_weather_subagent(parent_agent.agent_id, user_request_seq: 4)
+
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [with_usage(weather_call(), 100, 10)]}
+      end)
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [with_usage(Message.new_assistant!("Sunny"), 200, 20)]}
+      end)
+
+      assert {:ok, "Sunny"} = SubAgentServer.execute(subagent.id)
+
+      assert wait_until(fn ->
+               match?(
+                 %LangChain.TokenUsage{input: 300, output: 30},
+                 parent_usage(parent_agent.agent_id, "call_task")
+               )
+             end)
+
+      sub_id = subagent.id
+
+      assert_receive {:agent, {:debug, {:subagent, ^sub_id, {:subagent_completed, data}}}}, 1_000
+      assert %LangChain.TokenUsage{input: 300, output: 30} = data.token_usage
+
+      # Inner messages reach the parent's debug channel stamped with the
+      # parent's user request.
+      assert_received {:agent, {:debug, {:subagent, ^sub_id, {:subagent_llm_message, message}}}}
+      assert Sagents.UserRequest.seq(message) == 4
+    end
+
+    test "a failed run has already reported what it spent", context do
+      parent_agent = start_parent_agent(context)
+      {subagent, _pid} = start_weather_subagent(parent_agent.agent_id)
+
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [with_usage(weather_call(), 100, 10)]}
+      end)
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:error, LangChain.LangChainError.exception(type: "overloaded", message: "busy")}
+      end)
+
+      assert {:error, _reason} = SubAgentServer.execute(subagent.id)
+
+      assert wait_until(fn ->
+               match?(
+                 %LangChain.TokenUsage{input: 100, output: 10},
+                 parent_usage(parent_agent.agent_id, "call_task")
+               )
+             end)
+    end
+
+    test "a sub-agent killed mid-run has already reported what it spent", context do
+      parent_agent = start_parent_agent(context)
+      {subagent, pid} = start_weather_subagent(parent_agent.agent_id)
+      test_pid = self()
+
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [with_usage(weather_call(), 100, 10)]}
+      end)
+      |> expect(:call, fn _model, _messages, _tools ->
+        send(test_pid, :second_call_started)
+        Process.sleep(:infinity)
+      end)
+
+      Process.unlink(pid)
+      ref = Process.monitor(pid)
+      spawn(fn -> SubAgentServer.execute(subagent.id) end)
+
+      assert_receive :second_call_started, 2_000
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+
+      assert wait_until(fn ->
+               match?(
+                 %LangChain.TokenUsage{input: 100, output: 10},
+                 parent_usage(parent_agent.agent_id, "call_task")
+               )
+             end)
+    end
+
+    test "a sub-agent started without a tool call records nothing", context do
+      parent_agent = start_parent_agent(context)
+
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: parent_agent.agent_id,
+          instructions: "Say hi",
+          agent_config: create_test_agent()
+        )
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
+
+      ChatAnthropic
+      |> expect(:call, fn _model, _messages, _tools ->
+        {:ok, [with_usage(Message.new_assistant!("Hi"), 5, 1)]}
+      end)
+
+      assert {:ok, "Hi"} = SubAgentServer.execute(subagent.id)
+      _state = AgentServer.get_state(parent_agent.agent_id)
+
+      assert parent_agent.agent_id
+             |> AgentServer.get_pid()
+             |> :sys.get_state()
+             |> Map.fetch!(:subagent_usage) == %{}
+    end
+  end
+
   describe "subagent_error event" do
     test "broadcasts error on execution failure", context do
       parent_agent = start_parent_agent(context)

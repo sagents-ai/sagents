@@ -83,18 +83,23 @@ defmodule Sagents.SubAgentServer do
   require Logger
 
   alias Sagents.AgentServer
+  alias Sagents.UserRequest
   alias Sagents.ProcessRegistry
   alias Sagents.SubAgent
+  alias LangChain.Message
   alias LangChain.TokenUsage
 
   defmodule ServerState do
     @moduledoc false
-    defstruct [:subagent, :started_at]
+    defstruct [:subagent, :started_at, :tool_call_id]
 
     @type t :: %__MODULE__{
             subagent: SubAgent.t(),
             # Monotonic time for duration calculation (milliseconds)
-            started_at: integer() | nil
+            started_at: integer() | nil,
+            # The parent's `task` tool call that started this sub-agent. Each
+            # message's token usage is recorded against it on the parent.
+            tool_call_id: String.t() | nil
           }
   end
 
@@ -368,7 +373,8 @@ defmodule Sagents.SubAgentServer do
 
     server_state = %ServerState{
       subagent: subagent,
-      started_at: started_at
+      started_at: started_at,
+      tool_call_id: Keyword.get(opts, :tool_call_id)
     }
 
     Logger.debug(
@@ -601,8 +607,20 @@ defmodule Sagents.SubAgentServer do
   # This enables real-time visibility into sub-agent execution.
   defp build_pubsub_callbacks(%ServerState{} = server_state) do
     %{
-      on_message_processed: fn _chain, message ->
-        broadcast_subagent_event(server_state, {:subagent_llm_message, message})
+      on_message_processed: fn chain, message ->
+        record_usage_on_parent(server_state, message)
+
+        # Stamped with the parent's user request so observers can attribute it.
+        seq =
+          case chain.custom_context do
+            %{user_request_seq: seq} when is_integer(seq) -> seq
+            _other -> 0
+          end
+
+        broadcast_subagent_event(
+          server_state,
+          {:subagent_llm_message, UserRequest.stamp(message, seq)}
+        )
       end
     }
   end
@@ -679,35 +697,53 @@ defmodule Sagents.SubAgentServer do
         nil
       end
 
-    # Get messages for token usage extraction only
-    messages = subagent.chain.messages
-
-    # Extract token usage from the last assistant message
-    token_usage = extract_token_usage(messages)
-
     %{
       id: subagent.id,
       result: result,
       duration_ms: duration_ms,
-      token_usage: token_usage
+      token_usage: total_token_usage(chain_messages(subagent))
     }
   end
 
-  # Extract token usage from the last assistant message in the chain
-  defp extract_token_usage(messages) when is_list(messages) do
-    # Find the last assistant message which typically contains the final token usage
-    messages
-    |> Enum.reverse()
-    |> Enum.find_value(fn message ->
-      if message.role == :assistant do
-        TokenUsage.get(message)
-      else
-        nil
-      end
-    end)
+  defp chain_messages(%SubAgent{chain: %{messages: messages}}) when is_list(messages),
+    do: messages
+
+  defp chain_messages(%SubAgent{}), do: []
+
+  # Each assistant message's usage goes to the parent as soon as the message
+  # completes, recorded against the `task` call that started this sub-agent.
+  # Reporting as it happens, rather than once at the end, means a run that
+  # errors, crashes, times out, or is cancelled has already handed over what
+  # it spent. With no parent AgentServer (a bare Agent.execute) the usage has
+  # nowhere durable to go and is dropped.
+  defp record_usage_on_parent(
+         %ServerState{subagent: subagent, tool_call_id: tool_call_id},
+         %Message{role: :assistant} = message
+       )
+       when is_binary(tool_call_id) do
+    case TokenUsage.get(message) do
+      %TokenUsage{} = usage ->
+        AgentServer.record_subagent_usage(subagent.parent_agent_id, tool_call_id, usage)
+
+      nil ->
+        :ok
+    end
   end
 
-  defp extract_token_usage(_other), do: nil
+  defp record_usage_on_parent(_server_state, _message), do: :ok
+
+  # Total usage across every assistant message the sub-agent produced. A
+  # sub-agent makes one LLM call per assistant message, and each reports its
+  # own usage.
+  defp total_token_usage(messages) when is_list(messages) do
+    Enum.reduce(messages, nil, fn
+      %Message{role: :assistant} = message, acc ->
+        TokenUsage.add_total(acc, TokenUsage.get(message))
+
+      _message, acc ->
+        acc
+    end)
+  end
 
   # Extract a friendly name from the subagent
   defp get_subagent_name(subagent) do

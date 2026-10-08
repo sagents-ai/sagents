@@ -131,6 +131,12 @@ defmodule <%= @context_module %>.DisplayMessage do
 
   This guarantees deterministic ordering even when multiple messages share
   the same microsecond timestamp.
+
+  ### User requests:
+
+  Group by `user_request_seq` to show one human request with its work. A queued
+  user message can be inserted among the previous user request's rows; grouping
+  by number, not position, keeps it with its own user request.
   """
 
   use Ecto.Schema
@@ -164,6 +170,12 @@ defmodule <%= @context_module %>.DisplayMessage do
     # "interrupted", "cancelled"
     field :status, :string, default: "completed"
     field :metadata, :map, default: %{}
+    # The user request (one human message and all the work done for it) this
+    # row belongs to. nil for rows written before user requests were tracked.
+    field :user_request_seq, :integer
+    # True on the rows of the user request's final answer: the rows a UI keeps
+    # visible when it collapses the rest of the user request's work.
+    field :user_request_final, :boolean, default: false
 
     timestamps(type: :utc_datetime_usec, updated_at: false)
   end
@@ -178,7 +190,9 @@ defmodule <%= @context_module %>.DisplayMessage do
       :content_type,
       :sequence,
       :status,
-      :metadata
+      :metadata,
+      :user_request_seq,
+      :user_request_final
     ])
     |> put_change(:conversation_id, conversation_id)
     |> common_validations()
@@ -194,7 +208,9 @@ defmodule <%= @context_module %>.DisplayMessage do
       :content_type,
       :sequence,
       :status,
-      :metadata
+      :metadata,
+      :user_request_seq,
+      :user_request_final
     ])
     |> common_validations()
   end

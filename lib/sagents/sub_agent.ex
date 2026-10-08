@@ -222,6 +222,9 @@ defmodule Sagents.SubAgent do
   - `:scope` - Scope struct to inherit from the parent (optional). Propagated to
     the SubAgent's `custom_context.scope` so sub-agent tools and persistence callbacks
     see the same tenant context as the parent. Defaults to `agent_config.scope`.
+  - `:user_request_seq` - The parent's current user request (optional; see
+    `Sagents.UserRequest`). The sub-agent's messages are stamped with it, and
+    its tools read it as `context.user_request_seq`. Defaults to `0`.
   - `:suppress_debug_events` - When true, none of this sub-agent's events are
     published on the parent's `:debug` channel (optional). Use it for a
     sub-agent whose inner messages must not leave the sub-agent. The parent
@@ -276,6 +279,8 @@ defmodule Sagents.SubAgent do
   - `:scope` - Scope struct to inherit from the parent (optional). Propagated to
     the SubAgent's `custom_context.scope` so sub-agent tools and persistence callbacks
     see the same tenant context as the parent. Defaults to `compiled_agent.scope`.
+  - `:user_request_seq` - The parent's current user request (optional). See
+    `new_from_config/1`. Defaults to `0`.
   - `:suppress_debug_events` - When true, none of this sub-agent's events are
     published on the parent's `:debug` channel (optional). See
     `new_from_config/1`. Defaults to `false`.
@@ -338,6 +343,7 @@ defmodule Sagents.SubAgent do
     max_runs = Keyword.get(opts, :max_runs) || agent.max_runs
     parent_trace = Keyword.get(opts, :parent_trace, %{})
     suppress_debug_events = Keyword.get(opts, :suppress_debug_events, false)
+    user_request_seq = Keyword.get(opts, :user_request_seq, 0)
 
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
 
@@ -348,7 +354,8 @@ defmodule Sagents.SubAgent do
       State.new!(%{
         agent_id: sub_agent_id,
         metadata: parent_metadata,
-        runtime: parent_runtime
+        runtime: parent_runtime,
+        user_request_seq: user_request_seq
       })
 
     # Merge parent_tool_context into custom_context (same pattern as
@@ -365,6 +372,10 @@ defmodule Sagents.SubAgent do
         scope: scope,
         # Direct to the parent agent id.
         agent_id: parent_agent_id,
+        # The parent's user request. Sub-agent tools read it to attribute any
+        # agent work they start; the sub-agent's own messages are stamped
+        # with it.
+        user_request_seq: user_request_seq,
         # Lineage and observability context. `agent_id` above intentionally points
         # at the parent (tools use it to publish events back through the parent's
         # AgentServer), so the sub-agent's own identity is carried separately here.

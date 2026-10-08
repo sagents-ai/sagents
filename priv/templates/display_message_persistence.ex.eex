@@ -31,7 +31,8 @@ defmodule <%= module %> do
           "message_type" => Atom.to_string(item.message_type),
           "content_type" => Atom.to_string(item.type),
           "content" => item.content,
-          "sequence" => index
+          "sequence" => index,
+          "user_request_seq" => user_request_seq(context)
         }
 
         # Pull the tool-call id out of `content` into the top-level
@@ -109,7 +110,65 @@ defmodule <%= module %> do
   def save_synthetic_message(_scope, _attrs, %{conversation_id: nil}),
     do: {:error, :no_conversation}
 
-  def save_synthetic_message(scope, attrs, %{conversation_id: conversation_id}) do
+  def save_synthetic_message(scope, attrs, %{conversation_id: conversation_id} = context) do
+    attrs = put_user_request_seq(attrs, user_request_seq(context))
     <%= conversations_module %>.append_display_message(scope, conversation_id, attrs)
   end
+
+  @doc """
+  Records a finished user request and marks the display rows of its final
+  answer, so a UI can fold the rest of the user request's work away.
+
+  Only the answer's text rows are marked; a thinking row stays with the work.
+  When the answer's rows are not known (the server restarted during the
+  user request), the user request's trailing assistant text rows are used.
+  """
+  @impl true
+  def complete_user_request(_scope, _report, %{conversation_id: nil}), do: :ok
+
+  def complete_user_request(scope, report, %{conversation_id: conversation_id}) do
+    final_row_ids =
+      case report.final_rows do
+        rows when is_list(rows) ->
+          rows
+          |> Enum.filter(&(&1.content_type == "text"))
+          |> Enum.map(& &1.id)
+
+        nil ->
+          <%= conversations_module %>.trailing_answer_row_ids(scope, conversation_id, report.seq)
+      end
+
+    attrs = %{
+      seq: report.seq,
+      status: Atom.to_string(report.status),
+      completed_at: report.completed_at,
+      assistant_message_count: report.assistant_message_count,
+      tool_calls: report.tool_calls,
+      token_usage: usage_to_map(report.token_usage)
+    }
+
+    case <%= conversations_module %>.complete_user_request(scope, conversation_id, attrs, final_row_ids) do
+      {:ok, _user_request} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # 0 means the row arrived before any human message; it is stored as nil.
+  defp user_request_seq(%{user_request_seq: seq}) when is_integer(seq) and seq > 0, do: seq
+  defp user_request_seq(_context), do: nil
+
+  # Synthetic attrs arrive with atom or string keys, and a changeset rejects a
+  # map that mixes the two.
+  defp put_user_request_seq(attrs, seq) do
+    if Enum.any?(Map.keys(attrs), &is_binary/1) do
+      Map.put(attrs, "user_request_seq", seq)
+    else
+      Map.put(attrs, :user_request_seq, seq)
+    end
+  end
+
+  defp usage_to_map(%LangChain.TokenUsage{input: input, output: output}),
+    do: %{"input" => input, "output" => output}
+
+  defp usage_to_map(_usage), do: %{}
 end

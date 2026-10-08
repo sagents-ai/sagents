@@ -20,7 +20,7 @@ defmodule Sagents.Persistence.StateSerializer do
   data.**
 
   **What is serialized**:
-  - ✅ Conversation state: messages, todos, metadata
+  - ✅ Conversation state: messages, todos, metadata, user_request_seq
 
   **What is NOT serialized**:
   - ❌ Agent configuration: middleware, tools, model
@@ -30,9 +30,17 @@ defmodule Sagents.Persistence.StateSerializer do
 
   `LangChain.Message.metadata` is a free-form map that can hold any term,
   including token usage structs and error causes wrapping HTTP responses. Rather
-  than round-tripping it, the serializer projects the two keys the framework
-  reads from restored history — `:streaming_error` and `:stop_details`, both used
-  by `Sagents.Message.DisplayHelpers` — and drops the rest.
+  than round-tripping it, the serializer projects the keys the framework reads
+  from restored history and drops the rest:
+
+  - `:streaming_error` and `:stop_details`, used by
+    `Sagents.Message.DisplayHelpers`
+  - `:user_request_seq`, the user request the message belongs to
+  - `:usage` and `:subagent_usage`, the token usage `Sagents.UserRequest` sums
+    for a user request
+  - `:summary`, which marks the messages that stand in for summarized history
+
+  Each is small, plain data.
 
   A restored `:streaming_error` carries the failure's `type` and `message` only.
   Anything else a caller puts in `metadata` lives for the turn that set it.
@@ -60,6 +68,7 @@ defmodule Sagents.Persistence.StateSerializer do
   alias Sagents.{State, Agent, Todo}
   alias LangChain.LangChainError
   alias LangChain.Message
+  alias LangChain.TokenUsage
   alias LangChain.Message.{ContentPart, ToolCall, ToolResult}
 
   @current_version 2
@@ -165,7 +174,8 @@ defmodule Sagents.Persistence.StateSerializer do
     %{
       "messages" => Enum.map(state.messages, &serialize_message/1),
       "todos" => Enum.map(state.todos, &Todo.to_map/1),
-      "metadata" => serialize_map_to_string_keys(state.metadata)
+      "metadata" => serialize_map_to_string_keys(state.metadata),
+      "user_request_seq" => state.user_request_seq || 0
     }
   end
 
@@ -203,11 +213,22 @@ defmodule Sagents.Persistence.StateSerializer do
         _other -> %{}
       end
 
-    case State.new(%{agent_id: agent_id, messages: messages, todos: todos, metadata: metadata}) do
+    case State.new(%{
+           agent_id: agent_id,
+           messages: messages,
+           todos: todos,
+           metadata: metadata,
+           user_request_seq: deserialize_user_request_seq(data["user_request_seq"])
+         }) do
       {:ok, state} -> {:ok, state}
       {:error, changeset} -> {:error, {:invalid_state, changeset}}
     end
   end
+
+  # Payloads written before user requests were numbered lack the key and restore
+  # as 0, "no user request yet".
+  defp deserialize_user_request_seq(seq) when is_integer(seq) and seq >= 0, do: seq
+  defp deserialize_user_request_seq(_other), do: 0
 
   # Private Functions
 
@@ -243,9 +264,11 @@ defmodule Sagents.Persistence.StateSerializer do
 
   # `Message.metadata` holds arbitrary terms — token usage structs, provider
   # bookkeeping, whatever a caller put there — so it is not round-tripped
-  # wholesale. Two keys are projected into a JSON-safe shape, because the
-  # framework answers questions about them from restored history:
-  # `Sagents.Message.DisplayHelpers.streaming_error/1` and `stop_details/1`.
+  # wholesale. The keys the framework answers questions about from restored
+  # history are projected into a JSON-safe shape:
+  # `Sagents.Message.DisplayHelpers.streaming_error/1` and `stop_details/1`
+  # read the first two; `Sagents.UserRequest` reads the user request number,
+  # usage and the summary flag.
   #
   # The projection is narrower than the in-process value. A
   # `LangChain.LangChainError` carries `:original`, which can be any term at all
@@ -268,6 +291,10 @@ defmodule Sagents.Persistence.StateSerializer do
     %{}
     |> put_serialized_streaming_error(Map.get(metadata, :streaming_error))
     |> put_serialized_stop_details(Map.get(metadata, :stop_details))
+    |> put_serialized_integer("user_request_seq", Map.get(metadata, :user_request_seq))
+    |> put_serialized_usage("usage", Map.get(metadata, :usage))
+    |> put_serialized_usage("subagent_usage", Map.get(metadata, :subagent_usage))
+    |> put_serialized_flag("summary", Map.get(metadata, :summary))
   end
 
   defp put_serialized_streaming_error(projected, %LangChainError{} = error) do
@@ -285,6 +312,25 @@ defmodule Sagents.Persistence.StateSerializer do
     do: Map.put(projected, "stop_details", details)
 
   defp put_serialized_stop_details(projected, _details), do: projected
+
+  defp put_serialized_integer(projected, key, value) when is_integer(value),
+    do: Map.put(projected, key, value)
+
+  defp put_serialized_integer(projected, _key, _value), do: projected
+
+  # `raw` is the provider's decoded JSON usage map, so it is already JSON-safe.
+  defp put_serialized_usage(projected, key, %TokenUsage{} = usage) do
+    Map.put(projected, key, %{
+      "input" => usage.input,
+      "output" => usage.output,
+      "raw" => usage.raw || %{}
+    })
+  end
+
+  defp put_serialized_usage(projected, _key, _usage), do: projected
+
+  defp put_serialized_flag(projected, key, true), do: Map.put(projected, key, true)
+  defp put_serialized_flag(projected, _key, _value), do: projected
 
   defp deserialize_message(data) when is_map(data) do
     # Convert string keys to atom keys for Message.new
@@ -331,6 +377,10 @@ defmodule Sagents.Persistence.StateSerializer do
       %{}
       |> put_deserialized_streaming_error(metadata["streaming_error"])
       |> put_deserialized_stop_details(metadata["stop_details"])
+      |> put_deserialized_integer(:user_request_seq, metadata["user_request_seq"])
+      |> put_deserialized_usage(:usage, metadata["usage"])
+      |> put_deserialized_usage(:subagent_usage, metadata["subagent_usage"])
+      |> put_deserialized_flag(:summary, metadata["summary"])
 
     if map_size(projected) == 0, do: attrs, else: Map.put(attrs, :metadata, projected)
   end
@@ -351,6 +401,28 @@ defmodule Sagents.Persistence.StateSerializer do
     do: Map.put(projected, :stop_details, details)
 
   defp put_deserialized_stop_details(projected, _details), do: projected
+
+  defp put_deserialized_integer(projected, key, value) when is_integer(value),
+    do: Map.put(projected, key, value)
+
+  defp put_deserialized_integer(projected, _key, _value), do: projected
+
+  defp put_deserialized_usage(projected, key, usage) when is_map(usage) do
+    Map.put(
+      projected,
+      key,
+      TokenUsage.new!(%{
+        input: usage["input"],
+        output: usage["output"],
+        raw: usage["raw"] || %{}
+      })
+    )
+  end
+
+  defp put_deserialized_usage(projected, _key, _usage), do: projected
+
+  defp put_deserialized_flag(projected, key, true), do: Map.put(projected, key, true)
+  defp put_deserialized_flag(projected, _key, _value), do: projected
 
   defp serialize_content(content) when is_binary(content), do: content
 

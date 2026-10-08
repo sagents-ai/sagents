@@ -244,6 +244,9 @@ defmodule Sagents.Fork do
   defp build_base(%State{} = state, opts) do
     %State{
       messages: state.messages,
+      # The copied messages keep their user request numbers, so the fork
+      # continues the numbering rather than restarting it.
+      user_request_seq: state.user_request_seq,
       todos: resolve_todos(state.todos, Keyword.get(opts, :todos, [])),
       metadata: resolve_metadata(state.metadata, Keyword.get(opts, :metadata, %{}))
     }

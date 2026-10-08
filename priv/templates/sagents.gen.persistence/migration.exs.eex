@@ -44,6 +44,10 @@ defmodule <%= @repo %>.Migrations.Create<%= Macro.camelize(@table_prefix) %>Pers
       # Message-local ordering (0-based within same timestamp)
       add :sequence, :integer, default: 0, null: false
       add :metadata, :map, default: %{}
+      # The user request the row belongs to, and whether it is that
+      # user request's final answer
+      add :user_request_seq, :integer
+      add :user_request_final, :boolean, default: false, null: false
 
       timestamps(type: :utc_datetime_usec, updated_at: false)
     end
@@ -55,5 +59,26 @@ defmodule <%= @repo %>.Migrations.Create<%= Macro.camelize(@table_prefix) %>Pers
     create index(:<%= @table_prefix %>display_messages, [:status])
     # Index for tool-call lifecycle
     create index(:<%= @table_prefix %>display_messages, [:tool_call_id])
+    # Grouping a transcript by user request
+    create index(:<%= @table_prefix %>display_messages, [:conversation_id, :user_request_seq])
+
+    # User requests ledger (one row per finished user request)
+    create table(:<%= @table_prefix %>user_requests, primary_key: false) do
+      add :id, :binary_id, primary_key: true
+      add :conversation_id, references(:<%= @table_prefix %>conversations, on_delete: :delete_all, type: :binary_id), null: false
+      add :seq, :integer, null: false
+      # "completed", "error", "cancelled", "superseded"
+      add :status, :string, null: false
+      add :completed_at, :utc_datetime_usec, null: false
+      add :assistant_message_count, :integer, default: 0, null: false
+      add :tool_calls, :map, default: %{}
+      add :token_usage, :map, default: %{}
+      # Set by the host, for billing by outcome
+      add :classification, :string
+
+      timestamps(type: :utc_datetime_usec)
+    end
+
+    create unique_index(:<%= @table_prefix %>user_requests, [:conversation_id, :seq])
   end
 end

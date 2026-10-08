@@ -318,6 +318,44 @@ defmodule Sagents.Middleware.SummarizationTest do
       assert kept_assistant == Enum.at(messages, 6)
     end
 
+    test "the summary messages are flagged and carry the summarizer's usage", %{
+      agent_id: agent_id
+    } do
+      usage = LangChain.TokenUsage.new!(%{input: 500, output: 40})
+
+      stub(ChatOpenAI, :call, fn _model, _messages, _tools ->
+        {:ok,
+         [
+           Message.new_assistant!(%{
+             content: "Summary of the earlier conversation",
+             metadata: %{usage: usage}
+           })
+         ]}
+      end)
+
+      {:ok, config} =
+        Summarization.init(
+          model: ChatOpenAI.new!(%{model: "gpt-4", stream: false}),
+          messages_to_keep: 2,
+          max_tokens_before_summary: 100,
+          token_counter: fn _msgs -> 1_000 end
+        )
+
+      state = State.new!(%{agent_id: agent_id, messages: over_threshold_conversation()})
+
+      assert {:ok, %State{messages: [_system, summary_user, summary_assistant | _kept]}} =
+               Summarization.before_model(state, config)
+
+      assert %Message{role: :user, metadata: %{summary: true}} = summary_user
+
+      assert %Message{
+               role: :assistant,
+               metadata: %{summary: true, usage: %LangChain.TokenUsage{input: 500, output: 40}}
+             } = summary_assistant
+
+      refute Sagents.UserRequest.final_answer?(summary_assistant)
+    end
+
     test "keeps every message when the summarizing LLM fails", %{agent_id: agent_id} do
       stub(ChatOpenAI, :call, fn _model, _messages, _tools ->
         {:error, LangChainError.exception(type: "api_error", message: "summarizer unavailable")}

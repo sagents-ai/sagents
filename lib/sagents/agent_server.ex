@@ -266,12 +266,14 @@ defmodule Sagents.AgentServer do
   alias Sagents.Agent
   alias Sagents.State
   alias Sagents.AgentSupervisor
+  alias Sagents.UserRequest
   alias Sagents.Message.DisplayHelpers
   alias Sagents.Middleware
   alias Sagents.MiddlewareEntry
   alias Sagents.Persistence.StateSerializer
   alias Sagents.ProcessRegistry
   alias Sagents.Publisher
+  alias LangChain.Chains.LLMChain
   alias LangChain.Message
   alias LangChain.Message.ContentPart
 
@@ -332,6 +334,15 @@ defmodule Sagents.AgentServer do
       # message rather than growing a list. The GenServer already serializes every
       # write, so the merge needs no coordination.
       pending_message: nil,
+      # The display rows of the latest message that could be the current
+      # user request's final answer, as `{seq, rows}`. A later candidate replaces
+      # it; completion reports it. Not persisted: after a restart the report
+      # carries `final_rows: nil` and the host falls back to the trailing rows.
+      final_candidate: nil,
+      # Sub-agent usage waiting to be attached to its tool message, by
+      # tool_call_id. Filled by record_subagent_usage/3 during a run and drained
+      # at the run boundary.
+      subagent_usage: %{},
       # Consecutive executions started by a drain rather than by a human. Reset by
       # handle_call({:add_message, ...}) (the human door), never by
       # handle_cast({:queue_message, ...}) (the tool door). Bounds the one new
@@ -398,6 +409,8 @@ defmodule Sagents.AgentServer do
             restored: boolean(),
             interrupt_persisted: boolean(),
             pending_message: LangChain.Message.t() | nil,
+            final_candidate: {pos_integer(), list()} | nil,
+            subagent_usage: %{String.t() => LangChain.TokenUsage.t()},
             pending_resume: term() | nil,
             consecutive_auto_executions: non_neg_integer()
           }
@@ -1357,6 +1370,35 @@ defmodule Sagents.AgentServer do
   end
 
   @doc """
+  Record a sub-agent's token usage against the tool call that ran it.
+
+  `Sagents.SubAgentServer` calls this as each of the sub-agent's messages
+  completes, so usage reaches the parent even when the sub-agent's run errors,
+  crashes, or is cancelled. Calls for the same `tool_call_id` are summed. At
+  the end of the current run the total is attached as
+  `metadata[:subagent_usage]` to the parent's tool message for that call, or,
+  when the run ended before that message existed, to the assistant message
+  that made the call. It is persisted with the conversation and counted in the
+  user request's usage (see `Sagents.UserRequest`). A cast, so the sub-agent
+  never waits on a parent that is busy with its own run.
+
+  A sub-agent that itself runs sub-agents reports their usage with a
+  `tool_call_id` from its own chain, which no parent tool message carries, so
+  nested usage is not attached.
+
+  Returns `{:error, :no_server}` when no AgentServer is running for `agent_id`.
+  """
+  @spec record_subagent_usage(String.t(), String.t(), LangChain.TokenUsage.t()) ::
+          :ok | {:error, :no_server}
+  def record_subagent_usage(agent_id, tool_call_id, %LangChain.TokenUsage{} = usage)
+      when is_binary(agent_id) and is_binary(tool_call_id) do
+    case fetch_pid(agent_id) do
+      {:ok, pid} -> GenServer.cast(pid, {:record_subagent_usage, tool_call_id, usage})
+      {:error, _reason} -> {:error, :no_server}
+    end
+  end
+
+  @doc """
   Reset the agent's state and filesystem to start fresh.
 
   This clears:
@@ -2055,7 +2097,21 @@ defmodule Sagents.AgentServer do
     # rolling state captures as much as possible before we snapshot it.
     server_state = drain_turn_casts(server_state)
 
-    new_state = %{server_state | status: :cancelled, task: nil}
+    # Usage a sub-agent reported before it was killed may still be queued
+    # behind this call. Take it in now so the cancelled request is reported
+    # with it.
+    server_state = drain_subagent_usage_casts(server_state)
+
+    # The rolling state has no canonical replacement on cancel. Messages that
+    # reached it through on_message_processed are already stamped; this keeps
+    # every stored message numbered.
+    new_state =
+      attach_subagent_usage(%{
+        server_state
+        | status: :cancelled,
+          task: nil,
+          state: UserRequest.stamp_state(server_state.state, server_state.state.user_request_seq)
+      })
 
     # Persist the rolling state — the database now reflects messages produced
     # up to the cancel point, so page reload recovers them.
@@ -2066,6 +2122,10 @@ defmodule Sagents.AgentServer do
     # when multiple LiveViews are subscribed to the same agent. Mirrors the
     # :error path's persist_error_as_display_message.
     persist_cancel_as_display_message(new_state)
+
+    # The rolling state holds every message that passed a callback, with its
+    # usage, so a cancelled user request is reported with what it spent.
+    report_user_request_complete(new_state, :cancelled)
 
     # Reset inactivity timer after cancellation
     new_state = reset_inactivity_timer(new_state)
@@ -2120,6 +2180,10 @@ defmodule Sagents.AgentServer do
           execution_seq: server_state.execution_seq + 1,
           error: nil
       }
+
+      # A halt is the agent deciding to stop. Acknowledging it leaves nothing
+      # more to do for the request, so the user request is complete.
+      report_user_request_complete(updated_server_state, :completed)
 
       broadcast_event(updated_server_state, {:status_changed, :idle, nil})
       update_presence_status(updated_server_state, :idle)
@@ -2192,7 +2256,13 @@ defmodule Sagents.AgentServer do
         _from,
         %ServerState{status: :running} = server_state
       ) do
-    case queue_incoming_message(server_state, message, opts, true) do
+    case queue_incoming_message(
+           server_state,
+           message,
+           opts,
+           true,
+           human_user_request_seq(server_state)
+         ) do
       {:ok, updated_server_state} ->
         # A human just spoke, so this run is no longer part of an unbroken chain
         # of machine-initiated runs. Resetting here, and never in the tool door,
@@ -2211,8 +2281,20 @@ defmodule Sagents.AgentServer do
     # configured message preprocessor, exactly as before.
     case resolve_message_halves(server_state, message, opts, true) do
       {:ok, display_message, llm_message} ->
+        # A human message opens the next user request. This is the only place,
+        # with drain_pending_message/1, where the number advances.
+        seq = human_user_request_seq(server_state)
+        display_message = put_display_seq(display_message, seq)
+        llm_message = UserRequest.put_seq(llm_message, seq)
+
+        # An interrupt the user abandons by sending a new message ends the
+        # user request it belonged to. Reported before the number moves on.
+        if server_state.status == :interrupted do
+          report_user_request_complete(server_state, :superseded)
+        end
+
         # Add LLM message to the state
-        new_state = State.add_message(server_state.state, llm_message)
+        new_state = %{State.add_message(server_state.state, llm_message) | user_request_seq: seq}
 
         # Transition to idle if we were completed/error/cancelled to allow new
         # execution. If interrupted, the user has chosen to send a new message
@@ -2257,6 +2339,8 @@ defmodule Sagents.AgentServer do
         # Note: During LLM execution, assistant messages are also saved via on_message_processed callback
         # But if manually adding assistant messages, we should also save them here
         save_display_half(updated_server_state, display_message)
+
+        broadcast_event(updated_server_state, {:user_request_started, %{seq: seq}})
 
         # Note: Debug event for user messages is NOT broadcast here.
         # The authoritative state (with potential middleware modifications)
@@ -2408,7 +2492,14 @@ defmodule Sagents.AgentServer do
   # thing the breaker is counting.
   @impl true
   def handle_cast({:queue_message, message, opts}, server_state) do
-    case queue_incoming_message(server_state, message, opts, false) do
+    # A tool's queued words continue the user request the tool is running in.
+    case queue_incoming_message(
+           server_state,
+           message,
+           opts,
+           false,
+           server_state.state.user_request_seq
+         ) do
       {:ok, %ServerState{status: :idle} = updated_server_state} ->
         # No run is in flight, so there is no boundary to wait for. The
         # boundary is now. Without this, a message queued from outside a run
@@ -2479,6 +2570,35 @@ defmodule Sagents.AgentServer do
       )
 
       {:noreply, new_server_state}
+    else
+      {:noreply, server_state}
+    end
+  end
+
+  # Each sub-agent reports once, when it ends. Parallel `task` calls each have
+  # their own tool_call_id; two reports for one id are two runs of it (after a
+  # resume) and are summed.
+  @impl true
+  def handle_cast({:record_subagent_usage, tool_call_id, usage}, server_state) do
+    updated =
+      Map.update(
+        server_state.subagent_usage,
+        tool_call_id,
+        usage,
+        &LangChain.TokenUsage.add_total(&1, usage)
+      )
+
+    {:noreply, %{server_state | subagent_usage: updated}}
+  end
+
+  # Record the latest possible final answer for the current user request. Late
+  # casts from a superseded run are dropped, as for :turn_state_update. Casts
+  # from the run's task arrive before the task's result, so the last candidate
+  # is installed before handle_execution_result/2 runs.
+  @impl true
+  def handle_cast({:final_answer_candidate, exec_seq, seq, rows}, server_state) do
+    if exec_seq == server_state.execution_seq and is_integer(seq) do
+      {:noreply, %{server_state | final_candidate: {seq, rows}}}
     else
       {:noreply, server_state}
     end
@@ -2805,7 +2925,18 @@ defmodule Sagents.AgentServer do
     else
       Logger.error("Agent execution task crashed: #{inspect(reason)}")
 
-      new_state = %{server_state | status: :error, error: reason}
+      server_state = stop_orphaned_subagents(server_state)
+
+      new_state =
+        attach_subagent_usage(%{
+          server_state
+          | status: :error,
+            error: reason,
+            state:
+              UserRequest.stamp_state(server_state.state, server_state.state.user_request_seq)
+        })
+
+      report_user_request_complete(new_state, :error)
       broadcast_event(new_state, {:status_changed, :error, reason})
 
       {:noreply, Map.delete(new_state, :task)}
@@ -2862,12 +2993,26 @@ defmodule Sagents.AgentServer do
       end,
 
       # Callback for complete message (either through delta or non-streamed messages)
-      on_message_processed: fn _chain, message ->
+      on_message_processed: fn chain, message ->
+        # Stamp before saving so the display rows carry the user request. Read
+        # from the chain rather than this closure: the chain's context is the
+        # live value for the run.
+        message = UserRequest.stamp(message, chain_user_request_seq(chain))
+
         # Save and broadcast message (if callback configured)
-        maybe_save_and_broadcast_message(server_state, message)
+        rows = maybe_save_and_broadcast_message(server_state, message)
         # Append to the rolling state so every observer (debugger, persistence,
         # get_state) sees turn-level progress before Agent.execute/3 returns.
         safe_cast(server_name, {:turn_state_update, exec_seq, message})
+
+        # Finality is only known when the user request ends, so every message
+        # that could be the final answer replaces the previous candidate.
+        if UserRequest.final_answer?(message) do
+          safe_cast(
+            server_name,
+            {:final_answer_candidate, exec_seq, UserRequest.seq(message), rows}
+          )
+        end
       end,
 
       # Callback for token usage information
@@ -2955,6 +3100,12 @@ defmodule Sagents.AgentServer do
     }
   end
 
+  defp chain_user_request_seq(%LLMChain{custom_context: %{user_request_seq: seq}})
+       when is_integer(seq),
+       do: seq
+
+  defp chain_user_request_seq(_chain), do: 0
+
   # Stamp the server's conversation id onto the state handed to Agent.execute/3 and
   # Agent.resume/4, which forwards it into `LLMChain.custom_context` for tools and
   # for `gen_ai.conversation.id` on the trace.
@@ -2975,8 +3126,11 @@ defmodule Sagents.AgentServer do
     callbacks = [pubsub_callbacks]
 
     # Execute agent with callbacks
+    # The server is the source of truth for the user request number. The state
+    # carries it too; passing it states that explicitly.
     case Agent.execute(server_state.agent, with_conversation_id(server_state),
-           callbacks: callbacks
+           callbacks: callbacks,
+           user_request_seq: server_state.state.user_request_seq
          ) do
       {:ok, new_state} ->
         # Broadcast state changes
@@ -3019,7 +3173,8 @@ defmodule Sagents.AgentServer do
            server_state.agent,
            with_conversation_id(server_state),
            resume_data,
-           callbacks: callbacks
+           callbacks: callbacks,
+           user_request_seq: server_state.state.user_request_seq
          ) do
       {:ok, new_state} ->
         broadcast_state_changes(server_state, new_state)
@@ -3056,12 +3211,13 @@ defmodule Sagents.AgentServer do
     # This wholesale replacement is exactly why `pending_message` lives on
     # ServerState rather than on State. A queue kept inside `new_state` would
     # be destroyed right here, by the mechanism it exists to survive.
-    updated_state = %{
-      server_state
-      | status: :idle,
-        state: new_state,
-        error: nil
-    }
+    updated_state =
+      attach_subagent_usage(%{
+        server_state
+        | status: :idle,
+          state: new_state,
+          error: nil
+      })
 
     # A clean finish is the safe boundary for delivering a queued message.
     # Note the `:task` key is dropped on the :idle branch only, matching what
@@ -3082,6 +3238,11 @@ defmodule Sagents.AgentServer do
       {:idle, idle_state} ->
         # Persist agent state on completion
         idle_state = maybe_persist_state(idle_state, :on_completion)
+
+        # Reported before :idle so a UI can fold the user request's work away
+        # and re-enable input in one render.
+        report_user_request_complete(idle_state, :completed)
+        idle_state = %{idle_state | final_candidate: nil}
 
         broadcast_event(idle_state, {:status_changed, :idle, nil})
         update_presence_status(idle_state, :idle)
@@ -3106,12 +3267,13 @@ defmodule Sagents.AgentServer do
   # sends a new message instead of resuming, handle_call({:add_message, ...})
   # demotes the interrupt and the message takes the ordinary path.
   defp handle_execution_result({:interrupt, interrupted_state, interrupt_data}, server_state) do
-    updated_state = %{
-      server_state
-      | status: :interrupted,
-        state: interrupted_state,
-        interrupt_data: interrupt_data
-    }
+    updated_state =
+      attach_subagent_usage(%{
+        server_state
+        | status: :interrupted,
+          state: interrupted_state,
+          interrupt_data: interrupt_data
+      })
 
     # Update sub-agent tool call display message to "interrupted"
     maybe_update_interrupt_tool_display(updated_state, interrupt_data, :interrupted)
@@ -3148,12 +3310,13 @@ defmodule Sagents.AgentServer do
   # conversation boundary. The queue survives in ServerState and drains when the
   # resumed run finishes cleanly.
   defp handle_execution_result({:pause, paused_state}, server_state) do
-    updated_state = %{
-      server_state
-      | status: :paused,
-        state: paused_state,
-        error: nil
-    }
+    updated_state =
+      attach_subagent_usage(%{
+        server_state
+        | status: :paused,
+          state: paused_state,
+          error: nil
+      })
 
     # Persist agent state so it can be resumed after restart
     updated_state = maybe_persist_state(updated_state, :on_completion)
@@ -3177,11 +3340,15 @@ defmodule Sagents.AgentServer do
   # that something is waiting, so a host can decide whether to retry, drop
   # it, or tell the user.
   defp handle_execution_result({:error, reason}, server_state) do
-    updated_state = %{
-      server_state
-      | status: :error,
-        error: reason
-    }
+    server_state = stop_orphaned_subagents(server_state)
+
+    updated_state =
+      attach_subagent_usage(%{
+        server_state
+        | status: :error,
+          error: reason,
+          state: UserRequest.stamp_state(server_state.state, server_state.state.user_request_seq)
+      })
 
     if updated_state.pending_message do
       broadcast_debug_event(updated_state, {:pending_message_held, :error})
@@ -3192,6 +3359,10 @@ defmodule Sagents.AgentServer do
 
     # Persist an assistant message describing the error so it survives page reloads
     maybe_persist_error_as_display_message(updated_state, reason)
+
+    # The candidate is kept: execute/1 without a new message continues this
+    # user request, and it is reported again when that run ends.
+    report_user_request_complete(updated_state, :error)
 
     broadcast_event(updated_state, {:status_changed, :error, reason})
     update_presence_status(updated_state, :error)
@@ -3279,6 +3450,17 @@ defmodule Sagents.AgentServer do
   #   2. If it is blocked (e.g. in-flight LLM call), the PARENT broadcasts a
   #      minimal :subagent_cancelled event directly from this process.
   # Either way, observers see a terminal event before the sub-agent is killed.
+  # A run that ends abnormally can leave sub-agents running. When an async tool
+  # times out or the run crashes, the run's processes die, but each
+  # SubAgentServer lives under its own supervisor and keeps calling the model
+  # for a result nobody will read. They are stopped the way a cancel stops
+  # them. Any usage they already sent is taken in, so the request is reported
+  # with it.
+  defp stop_orphaned_subagents(%ServerState{} = server_state) do
+    cancel_all_subagents(server_state)
+    drain_subagent_usage_casts(server_state)
+  end
+
   defp cancel_all_subagents(%ServerState{} = server_state) do
     agent_id = server_state.agent.agent_id
 
@@ -3409,6 +3591,16 @@ defmodule Sagents.AgentServer do
     end
   end
 
+  defp drain_subagent_usage_casts(%ServerState{} = server_state) do
+    receive do
+      {:"$gen_cast", {:record_subagent_usage, _tool_call_id, _usage} = request} ->
+        {:noreply, server_state} = handle_cast(request, server_state)
+        drain_subagent_usage_casts(server_state)
+    after
+      0 -> server_state
+    end
+  end
+
   # safe_cast is used from callback closures that run in the Task process. If
   # the GenServer is no longer registered (crashed, shut down) the cast is a
   # silent no-op rather than crashing the Task.
@@ -3424,13 +3616,124 @@ defmodule Sagents.AgentServer do
   # for all scope-bearing callback invocations below.
   defp current_scope(%ServerState{agent: %{scope: scope}}), do: scope
 
-  # Build the shared callback context map — agent_id + conversation_id. Scope is
-  # passed separately as the first positional argument to each callback.
+  # Build the shared callback context map — agent_id, conversation_id, and the
+  # current user request. Scope is passed separately as the first positional
+  # argument to each callback.
   defp callback_context(%ServerState{} = s) do
     %{
       agent_id: s.agent.agent_id,
-      conversation_id: s.conversation_id
+      conversation_id: s.conversation_id,
+      user_request_seq: s.state.user_request_seq
     }
+  end
+
+  # Put recorded sub-agent usage on the messages that carry those calls, as
+  # `metadata[:subagent_usage]`. The tool message holding the call's result is
+  # preferred. When there is none, because the run errored, was cancelled, or
+  # is interrupted before the result arrived, the assistant message that made
+  # the call takes it, so the usage is persisted and counted either way. An
+  # entry neither message carries yet stays for a later boundary. Called
+  # wherever a run boundary installs a state, before it is persisted or
+  # reported.
+  defp attach_subagent_usage(%ServerState{subagent_usage: pending} = server_state)
+       when map_size(pending) == 0,
+       do: server_state
+
+  defp attach_subagent_usage(%ServerState{state: state, subagent_usage: pending} = server_state) do
+    {messages, pending} = Enum.map_reduce(state.messages, pending, &attach_to_tool_result/2)
+    {messages, remaining} = Enum.map_reduce(messages, pending, &attach_to_tool_call/2)
+    %{server_state | state: %{state | messages: messages}, subagent_usage: remaining}
+  end
+
+  defp attach_to_tool_result(
+         %LangChain.Message{role: :tool, tool_results: results} = message,
+         pending
+       )
+       when is_list(results) and map_size(pending) > 0 do
+    put_subagent_usage(message, pending, Enum.map(results, & &1.tool_call_id))
+  end
+
+  defp attach_to_tool_result(message, pending), do: {message, pending}
+
+  defp attach_to_tool_call(
+         %LangChain.Message{role: :assistant, tool_calls: calls} = message,
+         pending
+       )
+       when is_list(calls) and calls != [] and map_size(pending) > 0 do
+    put_subagent_usage(message, pending, Enum.map(calls, & &1.call_id))
+  end
+
+  defp attach_to_tool_call(message, pending), do: {message, pending}
+
+  # Move the pending usage for `call_ids` onto the message, summed with any it
+  # already carries.
+  defp put_subagent_usage(%LangChain.Message{} = message, pending, call_ids) do
+    {usages, remaining} = Map.split(pending, call_ids)
+
+    case Map.values(usages) do
+      [] ->
+        {message, remaining}
+
+      found ->
+        metadata = message.metadata || %{}
+
+        total =
+          Enum.reduce(found, metadata[:subagent_usage], &LangChain.TokenUsage.add_total(&2, &1))
+
+        {%LangChain.Message{message | metadata: Map.put(metadata, :subagent_usage, total)},
+         remaining}
+    end
+  end
+
+  # Report the current user request as finished: to the host's
+  # complete_user_request/3, when implemented, and to subscribers. Reports
+  # nothing before the first human message.
+  defp report_user_request_complete(%ServerState{state: state} = server_state, status) do
+    seq = state.user_request_seq
+
+    if seq > 0 do
+      summary =
+        (UserRequest.get(state, seq) || UserRequest.summarize(seq, []))
+        |> Map.delete(:messages)
+
+      report =
+        Map.merge(summary, %{
+          status: status,
+          completed_at: DateTime.utc_now(),
+          final_rows: final_rows(server_state, seq)
+        })
+
+      maybe_persist_user_request(server_state, report)
+      broadcast_event(server_state, {:user_request_completed, report})
+    end
+
+    :ok
+  end
+
+  defp final_rows(%ServerState{final_candidate: {seq, rows}}, seq), do: rows
+  defp final_rows(%ServerState{}, _seq), do: nil
+
+  defp maybe_persist_user_request(%ServerState{} = server_state, report) do
+    module = server_state.display_message_persistence
+
+    if module && server_state.conversation_id && Code.ensure_loaded?(module) &&
+         function_exported?(module, :complete_user_request, 3) do
+      try do
+        case module.complete_user_request(
+               current_scope(server_state),
+               report,
+               callback_context(server_state)
+             ) do
+          :ok -> :ok
+          {:error, reason} -> Logger.error("complete_user_request failed: #{inspect(reason)}")
+        end
+      rescue
+        exception ->
+          Logger.error("complete_user_request raised: #{inspect(exception)}")
+      end
+    end
+
+    :ok
   end
 
   # Persist agent state via the AgentPersistence behaviour (if configured),
@@ -3759,20 +4062,26 @@ defmodule Sagents.AgentServer do
   # `%Message{}`: nothing display-related ever waits in it. A user who typed
   # while the agent was busy sees their words right away, and a tool's
   # acknowledgement lands when the tool ran rather than a turn later.
+  #
+  # `seq` is the user request the message belongs to: the next one for human
+  # words, the current one for a tool's. The display half is saved under it
+  # right away, while the previous user request may still be current.
   defp queue_incoming_message(
          server_state,
          %LangChain.Message{role: :user} = message,
          opts,
-         preprocess?
+         preprocess?,
+         seq
        ) do
     case resolve_message_halves(server_state, message, opts, preprocess?) do
       {:ok, display_message, llm_message} ->
-        save_display_half(server_state, display_message)
+        save_display_half(server_state, put_display_seq(display_message, seq))
 
         updated_server_state =
           %{
             server_state
-            | pending_message: merge_pending(server_state.pending_message, llm_message)
+            | pending_message:
+                merge_pending(server_state.pending_message, UserRequest.stamp(llm_message, seq))
           }
           |> reset_inactivity_timer()
 
@@ -3793,7 +4102,8 @@ defmodule Sagents.AgentServer do
          _server_state,
          %LangChain.Message{role: role} = _message,
          _opts,
-         _preprocess?
+         _preprocess?,
+         _seq
        ) do
     {:error, "Cannot queue a #{inspect(role)} message. Only :user messages can be queued."}
   end
@@ -3805,9 +4115,36 @@ defmodule Sagents.AgentServer do
   # inheriting it from Anthropic's message combiner.
   defp merge_pending(nil, %LangChain.Message{} = incoming), do: incoming
 
+  #
+  # A merged message belongs to the highest number among its parts. Human words
+  # claim the next user request; a tool's queued words belong to the current
+  # one. When both are queued, the human claim wins.
   defp merge_pending(%LangChain.Message{} = pending, %LangChain.Message{} = incoming) do
-    %LangChain.Message{pending | content: pending.content ++ incoming.content}
+    merged = %LangChain.Message{pending | content: pending.content ++ incoming.content}
+
+    case max(UserRequest.seq(pending) || 0, UserRequest.seq(incoming) || 0) do
+      0 -> merged
+      seq -> UserRequest.put_seq(merged, seq)
+    end
   end
+
+  # The user request a human message belongs to. Normally the next number. When
+  # the queue already holds a human message that claimed the next number (typed
+  # during a run, or held after an error), this message joins it: the two are
+  # merged into one `:user` message and answered together.
+  defp human_user_request_seq(%ServerState{state: state, pending_message: pending}) do
+    current = state.user_request_seq
+
+    case pending && UserRequest.seq(pending) do
+      claimed when is_integer(claimed) and claimed > current -> claimed
+      _other -> current + 1
+    end
+  end
+
+  # Stamp the display half. `:none` has no display half. A `seq` of 0 (a tool
+  # message before any human message) leaves the message unstamped.
+  defp put_display_seq(:none, _seq), do: :none
+  defp put_display_seq(%LangChain.Message{} = message, seq), do: UserRequest.stamp(message, seq)
 
   # Resolve the (display, llm) pair for an incoming message.
   #
@@ -3850,14 +4187,34 @@ defmodule Sagents.AgentServer do
   end
 
   defp drain_pending_message(%ServerState{pending_message: pending} = server_state) do
+    current = server_state.state.user_request_seq
+    pending_seq = UserRequest.seq(pending) || 0
+    advances? = pending_seq > current
+
+    # A pending message numbered past the current user request holds human words
+    # (see human_user_request_seq/1). Delivering it ends the current user request,
+    # which finished cleanly or the drain would not be running, and opens the
+    # next. A tool-queued message carries the current number and continues it.
+    if advances? do
+      report_user_request_complete(server_state, :completed)
+    end
+
     # The message is real conversation either way, so it lands in state.messages
     # before the breaker is consulted. A tripped breaker declines to *run*; it
     # does not discard what the user or tool said.
     appended = %{
       server_state
-      | state: State.add_message(server_state.state, pending),
-        pending_message: nil
+      | state: %{
+          State.add_message(server_state.state, pending)
+          | user_request_seq: max(current, pending_seq)
+        },
+        pending_message: nil,
+        final_candidate: if(advances?, do: nil, else: server_state.final_candidate)
     }
+
+    if advances? do
+      broadcast_event(appended, {:user_request_started, %{seq: pending_seq}})
+    end
 
     if appended.consecutive_auto_executions >= @max_consecutive_auto_executions do
       Logger.error(
@@ -3964,7 +4321,16 @@ defmodule Sagents.AgentServer do
     if server_state.display_message_persistence && server_state.conversation_id do
       module = server_state.display_message_persistence
       scope = current_scope(server_state)
-      context = callback_context(server_state)
+
+      # Prefer the message's own number. A queued human message is saved while
+      # the previous user request is still current.
+      context =
+        server_state
+        |> callback_context()
+        |> Map.put(
+          :user_request_seq,
+          UserRequest.seq(message) || server_state.state.user_request_seq
+        )
 
       try do
         case module.save_message(scope, message, context) do
@@ -3974,17 +4340,21 @@ defmodule Sagents.AgentServer do
             end)
 
             broadcast_event(server_state, {:llm_message, message})
+            display_messages
 
           {:error, reason} ->
             Logger.error("Display message persistence failed: #{inspect(reason)}")
+            []
         end
       rescue
         exception ->
           Logger.error("Display message persistence raised exception: #{inspect(exception)}")
+          []
       end
     else
       # No persistence configured — just broadcast the message event
       broadcast_event(server_state, {:llm_message, message})
+      []
     end
   end
 
