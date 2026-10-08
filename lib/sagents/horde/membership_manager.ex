@@ -19,8 +19,9 @@ defmodule Sagents.Horde.MembershipManager do
   are never pruned.
 
   Membership here is instead derived from **participation**: every node that
-  starts `Sagents.Supervisor` joins an OTP `:pg` group, and this process sets
-  Horde's members to exactly the nodes in that group. Because a node runs
+  starts `Sagents.Supervisor` joins an OTP `:pg` group, and this process adds
+  each node to Horde's members as it joins that group and removes it once it
+  leaves. Because a node runs
   `Sagents.Supervisor` only where the host application chose to (e.g. gated to a
   `:web` role), "nodes running Sagents" *is* "agent-hosting nodes" — no
   node-name predicate required. `:pg` removes a node's entry automatically on
@@ -28,12 +29,23 @@ defmodule Sagents.Horde.MembershipManager do
 
   ## What it manages
 
-  On startup and on every `:pg` join/leave it calls `Horde.Cluster.set_members/2`
-  on all three Sagents Horde instances so they stay consistent:
+  On startup and on every `:pg` join/leave it updates the members of all three
+  Sagents Horde instances through `Horde.Cluster.set_members/2` so they stay
+  consistent:
 
   - `Sagents.Registry`
   - `Sagents.AgentsDynamicSupervisor`
   - `Sagents.FileSystem.FileSystemSupervisor`
+
+  Every update starts from what the instance holds at that moment and only
+  adds the nodes a `:pg` view shows or removes the nodes `:pg` reported as
+  gone. A view is never handed to Horde as the whole member set. `:pg`
+  discovers the other nodes' scopes asynchronously, so for a moment after this
+  process joins, the group it reads is a partial view of the cluster, while
+  Horde, which also learns members through CRDT replication from its peers,
+  may already hold the rest. Horde treats a member missing from `set_members/2`
+  as removed and drops that member's registrations cluster-wide, so applying a
+  partial view would unregister every agent on the nodes it has not seen yet.
 
   It is started automatically by `Sagents.Supervisor` (together with its `:pg`
   scope) when `members: :participation` is configured; you do not start it
@@ -109,27 +121,23 @@ defmodule Sagents.Horde.MembershipManager do
     :ok = :pg.join(@scope, group, self())
     {ref, _pids} = :pg.monitor(@scope, group)
 
-    nodes = current_member_nodes(group)
-    apply_members(nodes)
+    # Discovery of the other nodes' scopes is still in flight, so this is a
+    # partial view. It can only add; the rest arrives as :join events.
+    add_members(current_member_nodes(group))
 
-    {:ok, %{ref: ref, group: group, members: nodes}}
+    {:ok, %{ref: ref, group: group}}
   end
 
   @impl true
-  def handle_info({ref, action, _group, _pids}, %{ref: ref} = state)
-      when action in [:join, :leave] do
-    nodes = current_member_nodes(state.group)
+  def handle_info({ref, :join, _group, pids}, %{ref: ref} = state) do
+    add_members(member_nodes(pids))
+    {:noreply, state}
+  end
 
-    state =
-      if nodes == state.members do
-        state
-      else
-        Logger.debug("Sagents Horde membership changed (#{action}): #{inspect(nodes)}")
-
-        apply_members(nodes)
-        %{state | members: nodes}
-      end
-
+  def handle_info({ref, :leave, _group, pids}, %{ref: ref} = state) do
+    # A node has left only once none of its marker pids remain in the group.
+    left = member_nodes(pids) -- current_member_nodes(state.group)
+    remove_members(left)
     {:noreply, state}
   end
 
@@ -154,12 +162,30 @@ defmodule Sagents.Horde.MembershipManager do
     |> Enum.sort()
   end
 
-  defp apply_members(nodes) do
-    for horde <- @hordes do
-      members = Enum.map(nodes, &{horde, &1})
+  # Horde's only membership API is `set_members/2`, which takes what it is
+  # given as the whole truth and removes everything else. So each instance is
+  # updated from what it holds right now: nodes are added to that, or removed
+  # from it, and Horde is only called when the result differs. Horde learns
+  # members through CRDT replication as well, which is why "what it holds" is
+  # read fresh each time rather than tracked here.
+  defp add_members(nodes), do: update_members(:add, nodes, &Enum.uniq(&1 ++ nodes))
 
+  defp remove_members([]), do: :ok
+  defp remove_members(nodes), do: update_members(:remove, nodes, &(&1 -- nodes))
+
+  defp update_members(action, nodes, update) do
+    for horde <- @hordes do
       try do
-        :ok = Horde.Cluster.set_members(horde, members)
+        current = horde_member_nodes(horde)
+        wanted = Enum.sort(update.(current))
+
+        if wanted != Enum.sort(current) do
+          Logger.debug(
+            "Sagents Horde membership #{action} #{inspect(nodes)} on #{inspect(horde)}: #{inspect(wanted)}"
+          )
+
+          :ok = Horde.Cluster.set_members(horde, Enum.map(wanted, &{horde, &1}))
+        end
       catch
         kind, reason ->
           # A horde process may be momentarily unavailable (e.g. restarting).
@@ -172,5 +198,12 @@ defmodule Sagents.Horde.MembershipManager do
     end
 
     :ok
+  end
+
+  defp horde_member_nodes(horde) do
+    horde
+    |> Horde.Cluster.members()
+    |> Enum.map(fn {_name, member_node} -> member_node end)
+    |> Enum.uniq()
   end
 end
