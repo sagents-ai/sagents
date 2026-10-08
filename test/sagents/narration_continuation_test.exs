@@ -7,8 +7,8 @@ defmodule Sagents.NarrationContinuationTest do
   These tests stub the HTTP call rather than the chat model, so the adapter
   decodes a real provider body and the marker reaches the agent the way it does
   in a live run. Each adapter that speaks the OpenAI Responses API is covered,
-  because they carry the label differently: one reads it off each output item,
-  the other off metadata belonging to the whole message.
+  because they receive the label in different shapes: one reads it off each
+  output item of the raw body, the other off each text part req_llm decoded.
 
   The control in each block is what makes the rest meaningful: an unmarked
   assistant message still ends the turn after a single call.
@@ -230,23 +230,28 @@ defmodule Sagents.NarrationContinuationTest do
     end
   end
 
-  # ── the same API through req_llm, which labels the whole message ───
+  # ── the same API through req_llm, which labels each text part ──────
 
   describe "ChatReqLLM" do
     setup do
       %{model: ChatReqLLM.new!(%{model: "openai:gpt-5.4", api_key: "test"})}
     end
 
-    defp req_llm_response(text, metadata) do
+    # req_llm decodes each Responses message item into its own text part and
+    # carries the item's `phase` in that part's metadata.
+    defp text_part(text, nil), do: ReqLLM.Message.ContentPart.text(text)
+    defp text_part(text, phase), do: ReqLLM.Message.ContentPart.text(text, %{phase: phase})
+
+    defp req_llm_response(parts) do
       %ReqLLM.Response{
         id: "resp_#{System.unique_integer([:positive])}",
         model: "gpt-5.4",
         context: ReqLLM.Context.new([]),
         message: %ReqLLM.Message{
           role: :assistant,
-          content: [ReqLLM.Message.ContentPart.text(text)],
+          content: parts,
           tool_calls: nil,
-          metadata: metadata
+          metadata: %{}
         },
         finish_reason: :stop,
         usage: %{input_tokens: 10, output_tokens: 5, total_tokens: 15},
@@ -266,8 +271,8 @@ defmodule Sagents.NarrationContinuationTest do
 
     test "a commentary-only response does not end the turn", %{model: model} do
       expect_generates([
-        req_llm_response(@commentary, %{phase: "commentary"}),
-        req_llm_response(@answer, %{phase: "final_answer"})
+        req_llm_response([text_part(@commentary, "commentary")]),
+        req_llm_response([text_part(@answer, "final_answer")])
       ])
 
       assert {:ok, state} = run_agent(model, [])
@@ -279,25 +284,16 @@ defmodule Sagents.NarrationContinuationTest do
       assert Message.answer_content(answer) == @answer
     end
 
-    test "commentary joined onto the answer is split, and ends the turn", %{model: model} do
-      # req_llm joins every message item's text into one part and reports the
-      # items separately. The joined text holds an answer, so the turn ends on
-      # it; what the split buys is an answer that can be read on its own.
-      response =
-        req_llm_response(@commentary <> @answer, %{
-          phase_items: [
-            %{
-              "phase" => "commentary",
-              "content" => [%{"type" => "output_text", "text" => @commentary}]
-            },
-            %{
-              "phase" => "final_answer",
-              "content" => [%{"type" => "output_text", "text" => @answer}]
-            }
-          ]
-        })
-
-      expect_generates([response])
+    test "commentary and the answer in one response end the turn", %{model: model} do
+      # The message holds an answer, so the narration in front of it does not
+      # keep the turn open. Each part keeps its own label, so the answer can be
+      # read on its own.
+      expect_generates([
+        req_llm_response([
+          text_part(@commentary, "commentary"),
+          text_part(@answer, "final_answer")
+        ])
+      ])
 
       assert {:ok, state} = run_agent(model, [])
 
@@ -308,7 +304,7 @@ defmodule Sagents.NarrationContinuationTest do
     end
 
     test "an unmarked assistant message ends the turn (control)", %{model: model} do
-      expect_generates([req_llm_response(@answer, %{})])
+      expect_generates([req_llm_response([text_part(@answer, nil)])])
 
       assert {:ok, state} = run_agent(model, [])
 
@@ -327,9 +323,8 @@ defmodule Sagents.NarrationContinuationTest do
 
     test "narration before the target tool is not a failure to call it", %{model: model} do
       # An until_tool run reports `until_tool_not_called` when the chain stops
-      # without reaching the tool. Narration used to stop the chain, so the
-      # error named the wrong cause: the model had not declined to call the
-      # tool, it had not finished speaking yet.
+      # without reaching the tool. Narration does not stop the chain: the model
+      # has not declined to call the tool, it has not finished speaking yet.
       expect_posts([
         responses_body([message_item("commentary", @commentary)]),
         responses_body([function_call_item("inspect_resource", %{"name" => "web"})])
