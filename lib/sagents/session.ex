@@ -60,6 +60,7 @@ defmodule Sagents.Session do
     AgentServer,
     AgentSupervisor,
     AgentsDynamicSupervisor,
+    AgentUtils,
     Publisher,
     State,
     Subscriber
@@ -106,6 +107,11 @@ defmodule Sagents.Session do
   - `:pending_resume` — a resume payload applied during boot, before the
     initial status broadcast. See `resume/4`, which is the supported way to
     set this.
+  - `:pending_resume_for`: the tool call ids of the interrupt
+    `:pending_resume` answers (see
+    `Sagents.AgentUtils.interrupt_tool_call_ids/1`). The answer is applied
+    only if the agent boots waiting on exactly those calls. `resume/4` sets
+    this from the host's `:interrupt_data`.
   """
   @spec start(config(), conversation_id :: term(), opts :: keyword()) ::
           {:ok, session_info()} | {:error, term()}
@@ -215,7 +221,8 @@ defmodule Sagents.Session do
       scope: Map.fetch!(state, :current_scope),
       request_opts: Keyword.get(opts, :request_opts, []),
       initial_subscribers: [{:main, self(), subscribe_opts}],
-      pending_resume: Keyword.get(opts, :pending_resume)
+      pending_resume: Keyword.get(opts, :pending_resume),
+      pending_resume_for: Keyword.get(opts, :pending_resume_for)
     ]
 
     case start(config, conversation_id, start_opts) do
@@ -271,6 +278,11 @@ defmodule Sagents.Session do
   - `{:error, reason}` — passed through. Note a **live** agent that is not
     interrupted returns an error rather than being woken, because there is
     nothing to wake and nothing to resume.
+  - `{:error, {:outcome_unknown, reason}}`: the agent took the call and then
+    failed (it crashed, or the call timed out). The answer may already be in
+    effect, and an approved tool may be running, so this is not a reason to
+    wake the agent and is never retried here. Tell the user the outcome is
+    unknown rather than inviting them to answer again.
 
   ## Ordering
 
@@ -321,7 +333,10 @@ defmodule Sagents.Session do
   end
 
   defp wake_and_resume(config, state, agent_id, resume_data, opts) do
-    start_opts = Keyword.put(opts, :pending_resume, resume_data)
+    start_opts =
+      opts
+      |> Keyword.put(:pending_resume, resume_data)
+      |> Keyword.put(:pending_resume_for, answered_interrupt(state))
 
     case do_ensure_running(config, state, start_opts) do
       {:ok, changes, %{started: true}} ->
@@ -339,6 +354,17 @@ defmodule Sagents.Session do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # The interrupt the host was showing when the user answered, named by its
+  # tool call ids. The woken agent applies the answer only to that interrupt.
+  # nil when the host state does not carry the interrupt, which leaves the
+  # answer unbound.
+  defp answered_interrupt(state) do
+    case AgentUtils.interrupt_tool_call_ids(Map.get(state, :interrupt_data)) do
+      [] -> nil
+      ids -> ids
     end
   end
 
@@ -547,6 +573,7 @@ defmodule Sagents.Session do
         |> Keyword.put(:builder, {__MODULE__, :build_start_opts, [build_args]})
         |> Keyword.put(:initial_subscribers, Keyword.get(opts, :initial_subscribers, []))
         |> Keyword.put(:pending_resume, Keyword.get(opts, :pending_resume))
+        |> Keyword.put(:pending_resume_for, Keyword.get(opts, :pending_resume_for))
 
       case AgentsDynamicSupervisor.start_agent_sync(supervisor_config) do
         {:ok, _supervisor_pid} ->

@@ -298,12 +298,22 @@ defmodule Sagents.Modes.AgentExecutionTest do
       assert {:interrupt, interrupted_chain, _interrupt_data} =
                AgentExecution.run(chain, opts)
 
-      tool_calls = interrupted_chain.last_message.tool_calls
+      # The interrupt is recorded in the conversation as placeholder results.
+      # A resume replaces them with the real results, as HumanInTheLoop does.
+      [placeholders, assistant | _earlier] = Enum.reverse(interrupted_chain.messages)
+      assert [%ToolResult{is_interrupt: true}] = placeholders.tool_results
+
+      pending_chain = %{
+        interrupted_chain
+        | messages: Enum.drop(interrupted_chain.messages, -1),
+          exchanged_messages: Enum.drop(interrupted_chain.exchanged_messages, -1),
+          last_message: assistant
+      }
 
       resumed_chain =
         LLMChain.execute_tool_calls_with_decisions(
-          interrupted_chain,
-          tool_calls,
+          pending_chain,
+          assistant.tool_calls,
           [%{type: :approve}]
         )
 

@@ -83,6 +83,46 @@ defmodule Sagents.Horde.ParticipationMembershipTest do
 
       LocalCluster.stop(cluster)
     end
+
+    test "a node joining does not drop the registrations other nodes hold" do
+      {cluster, [web1, web2, web3]} = start_participation_cluster(3)
+
+      # A registration owned by web1, held the way an agent holds its :via
+      # name. A joining node's membership manager starts while its :pg
+      # discovery is still in flight, so what it sees is a partial view of the
+      # cluster. Handing that view to Horde as the whole member set removes
+      # every member not in it, and Horde drops a removed member's
+      # registrations cluster-wide. The manager must only ever add from a view.
+      start_supervisor_on([web1])
+      {:ok, owner} = :rpc.call(web1, Sagents.ClusterTestHelper, :register_marker, [:held_by_web1])
+      assert marker_owner(web1, :held_by_web1) == owner
+
+      start_supervisor_on([web2])
+      assert wait_until(fn -> members(web2, Sagents.Registry) == Enum.sort([web1, web2]) end)
+
+      assert wait_until(fn -> marker_owner(web2, :held_by_web1) == owner end),
+             "web2 never saw web1's registration"
+
+      assert marker_owner(web1, :held_by_web1) == owner,
+             "web1 lost its own registration when web2 joined"
+
+      start_supervisor_on([web3])
+
+      assert wait_until(fn ->
+               members(web3, Sagents.Registry) == Enum.sort([web1, web2, web3])
+             end)
+
+      assert wait_until(fn -> marker_owner(web3, :held_by_web1) == owner end),
+             "web3 never saw web1's registration"
+
+      assert marker_owner(web1, :held_by_web1) == owner,
+             "web1 lost its own registration when web3 joined"
+
+      assert marker_owner(web2, :held_by_web1) == owner,
+             "web2 lost web1's registration when web3 joined"
+
+      LocalCluster.stop(cluster)
+    end
   end
 
   describe "members: :participation with partition" do
@@ -150,6 +190,11 @@ defmodule Sagents.Horde.ParticipationMembershipTest do
           [members: :participation, partition: partition]
         ])
     end
+  end
+
+  # The pid holding the `{:membership_test, key}` registration, as seen from `node`.
+  defp marker_owner(node, key) do
+    :rpc.call(node, Sagents.ClusterTestHelper, :marker_owner, [key])
   end
 
   # The node()s currently in `horde`'s member set, as observed from `node`.

@@ -81,9 +81,11 @@ config :sagents, :horde, members: :participation
 
 Membership becomes exactly the nodes that run `Sagents.Supervisor`. Each such
 node joins an OTP `:pg` group; `Sagents.Horde.MembershipManager` (started
-automatically, with its `:pg` scope) sets Horde's members to that group's nodes
-and updates them on `:nodeup`/`:nodedown`. Dead nodes are pruned for free (`:pg`
-drops them on `:nodedown`).
+automatically, with its `:pg` scope) adds a node to Horde's members when it
+joins that group and removes it when it leaves. Dead nodes are pruned for free
+(`:pg` drops them on `:nodedown`). A node that is still discovering the group
+only ever adds members, so it never removes peers it has not seen yet, or the
+agents registered on them.
 
 The key move is that **you control membership simply by controlling where
 `Sagents.Supervisor` starts.** Gate it to your agent-hosting role:
