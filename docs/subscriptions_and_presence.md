@@ -368,7 +368,7 @@ Fired when a display message has been persisted to the database (requires
 A user request is one human message and all the work done for it (see
 `Sagents.UserRequest`). `:user_request_started` fires when a human message opens
 the next one. `:user_request_completed` carries the same report
-`Sagents.DisplayMessagePersistence.complete_user_request/3` receives: `:seq`,
+`c:Sagents.DisplayMessagePersistence.complete_user_request/3` receives: `:seq`,
 `:status`, `:final_message`, `:final_rows`, `:token_usage` and the counts. It
 arrives before the `:status_changed` event that ends the run, so a UI can fold
 the finished user request's work away and re-enable input in one render.
