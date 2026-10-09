@@ -1,5 +1,21 @@
 # Migration Guide: v0.16.x → v0.17.0
 
+v0.17.0 has two independent changes. Do both parts.
+
+- **[Part 1: User requests](#part-1-user-requests).** New numbering of the work
+  behind each human message, new events, and an optional ledger. Mostly
+  template and database changes in your generated persistence layer.
+- **[Part 2: Agent resilience and durable approvals](#part-2-agent-resilience-and-durable-approvals).**
+  Presence can no longer crash agents, a restarted agent reads current state,
+  and HITL approvals survive the agent process. No template or database
+  changes, but new error values, a new persistence lifecycle, and a different
+  shape for an interrupted HITL state that hand-written code and tests can
+  depend on.
+
+Neither part is caught by the compiler. Both are search-driven.
+
+# Part 1: User requests
+
 ## What changed and why
 
 A conversation had no record of which work belonged to which human message.
@@ -44,7 +60,16 @@ That is what this guide is for.
 
 ## Read this before you start
 
-**Most of this is opt-in. One step is not.** AgentServer now broadcasts two new
+**Part 2 has three things that break at runtime rather than compile time,**
+all covered in its steps:
+[a `persist_state/3` that matches on `context.lifecycle`](#p23-handle-the-on_resume-lifecycle-in-persist_state3)
+without a fallback makes every HITL approval fail,
+[a `case` on lifecycle call results](#p22-handle-error-outcome_unknown-reason)
+without a fallback raises `CaseClauseError` on the new error value, and
+[a test that `expect`s `Sagents.Presence.update/4`](#p26-update-tests)
+fails because the AgentServer no longer calls it.
+
+**Most of Part 1 is opt-in. One step is not.** AgentServer now broadcasts two new
 main-channel events, `{:user_request_started, %{seq: seq}}` and
 `{:user_request_completed, report}`. A LiveView or GenServer that subscribes to
 an agent and has **no catch-all `handle_info`** raises `FunctionClauseError` on
@@ -729,3 +754,425 @@ For details on the design, see
 [docs/persistence.md](docs/persistence.md),
 [docs/subscriptions_and_presence.md](docs/subscriptions_and_presence.md), and
 the `Sagents.UserRequest` moduledoc.
+
+
+---
+
+# Part 2: Agent resilience and durable approvals
+
+## What changed and why
+
+A production host saw agents crash-loop for days and lose the results of tool
+calls users had approved under certain conditions. One incident chained several defects, and v0.17.0
+fixes all of them:
+
+- **Presence could crash an agent.** Every `Phoenix.Tracker` write and `list`
+  is a `GenServer.call` with a 5 second timeout, and every agent's discovery
+  entry lives on one tracker shard. When that shard backed up, an agent's own
+  presence call timed out and the exit killed it, sometimes mid-resume after an
+  approved tool had started. Agents now hand presence writes to
+  `Sagents.PresenceWriter`, a per-node process started by `Sagents.Supervisor`,
+  and never wait on the tracker. A failed write is logged and dropped.
+- **A restarted agent went back in time.** `AgentSupervisor` loaded persisted
+  state once and every AgentServer restart booted from that snapshot, then
+  persisted it over newer turns. The AgentServer now loads in its own `init/1`
+  on every start.
+- **"Not running" was ambiguous.** A call to an agent that crashed while
+  handling it returned `{:error, :agent_not_running}`, which
+  `Sagents.Session.resume/4` read as "asleep", so it woke the agent and resumed
+  again. Such calls now return `{:error, {:outcome_unknown, reason}}`.
+- **HITL approvals did not survive the process.** A pending approval was not
+  recorded in the conversation, so a restart came back `:idle`. Nothing was
+  persisted while approved tools ran, so a restart lost both the approval and
+  the result of a side effect that had happened. Pending approvals are now
+  recorded as placeholder tool results, and a checkpoint is persisted before
+  approved tools start.
+
+| What | Where it reaches your code | Action needed? |
+| --- | --- | --- |
+| `{:error, {:outcome_unknown, reason}}` from lifecycle calls | Code that calls `AgentServer` / `Session` / your Coordinator, and your error copy | **Yes**: at least the user-facing message (P2.2) |
+| New `:on_resume` persistence lifecycle | Your `AgentPersistence.persist_state/3` | **Yes, if it matches on `context.lifecycle`** |
+| `load_state/2` on every AgentServer start | Your `AgentPersistence.load_state/2` | Check its error returns |
+| Interrupted HITL state ends with a placeholder tool message | Code that reads `state.messages` or resumes HITL by hand | Check |
+| Presence writes are asynchronous | Tests and presence mocks | **Yes, if tests stub or read agent presence** |
+| `Phoenix.Presence` start order | Your `application.ex` | Check |
+| `recovery:` option on `interrupt_on` | Your agent factory | No, opt-in |
+
+Nothing here touches the database or the generated templates. A host on stock
+generated code needs the error message from P2.2 and its test updates from
+P2.6; for the rest, the searches should come back clean.
+
+---
+
+## Part 2 Steps
+
+### P2.1 Check the start order of your `Phoenix.Presence`
+
+`Sagents.PresenceWriter` stops after your agents and applies the presence
+writes they make on the way down, which needs the tracker still running. Start
+your Presence **before** `Sagents.Supervisor`, as
+[docs/deployment.md](docs/deployment.md) already shows:
+
+```elixir
+children = [
+  MyApp.Repo,
+  {Phoenix.PubSub, name: MyApp.PubSub},
+  MyAppWeb.Presence,      # before Sagents.Supervisor
+  Sagents.Supervisor,
+  MyAppWeb.Endpoint
+]
+```
+
+```
+grep -rn "Presence\|Sagents.Supervisor" lib/*/application.ex
+```
+
+Getting it backwards is not a crash. Agents shutting down with the node leave
+their discovery entries behind until the other nodes notice the node is gone,
+which shows up as agents briefly listed on a node that has already stopped.
+
+---
+
+### P2.2 Handle `{:error, {:outcome_unknown, reason}}`
+
+The lifecycle calls (`AgentServer.execute/1`, `cancel/1`,
+`dismiss_interrupt/1`, `resume/2`, `add_message/3`, `reset/1`, and the
+`Sagents.Session` functions built on them) return an error value whose meaning
+is new:
+
+| Value | Meaning | Safe to start the agent and repeat? |
+| --- | --- | --- |
+| `{:error, :agent_not_running}` | The request never reached a running agent | Yes |
+| `{:error, {:outcome_unknown, reason}}` | The agent took the call and then failed: it crashed while handling it, the call timed out, or its node went away | **No.** It may have taken effect. After a `resume` that approved a tool, the tool may be running |
+| `{:error, :registry_unavailable}` | This node cannot look agents up (draining) | Unchanged |
+
+In v0.16 every one of those failures came back as `:agent_not_running`. Find
+the code that acts on results:
+
+```
+grep -rn "agent_not_running" lib/ --include="*.ex"
+grep -rn "AgentServer\.\(execute\|cancel\|dismiss_interrupt\|resume\|add_message\|reset\)(" lib/ --include="*.ex"
+grep -rn "Session\.\(resume\|dismiss\)\|resume_agent_session\|dismiss_agent_session" lib/ --include="*.ex"
+```
+
+For each result:
+
+1. **A `case` with no fallback clause** raises `CaseClauseError` on the new
+   value. Add a clause.
+2. **A clause that restarts the agent and retries on `:agent_not_running`**
+   (a hand-written Coordinator does this) keeps working for that value. Do not
+   extend it to `:outcome_unknown`. `Session.resume/4` already passes it
+   through without waking or retrying.
+3. **What to show the user.** Do not invite the user to try again. For a
+   resume, a restarted agent broadcasts its true status (`:running`,
+   `:interrupted`, or `:idle`) on boot, and your ordinary status handling
+   updates the UI from that.
+
+   The generated `flash_session_error/3` in your `AgentLiveHelpers` shows
+   each action's `:user_message`, which for a HITL decision is "That decision
+   could not be submitted. Please try again." That is wrong for this case.
+   Add a clause ahead of its catch-all:
+
+   ```elixir
+   @outcome_unknown_message "We could not confirm that went through. It may still be in progress."
+
+   def flash_session_error(socket, reason, copy) do
+     label = Keyword.fetch!(copy, :log_label)
+
+     case reason do
+       :registry_unavailable ->
+         Logger.warning("#{label}: this node is draining, its Sagents registry is unavailable")
+         put_flash(socket, :error, @draining_message)
+
+       # The agent took the request and then failed. It may be in effect, so
+       # never suggest repeating it. The agent's next status event settles the UI.
+       {:outcome_unknown, _detail} = other ->
+         Logger.error("#{label}: #{inspect(other)}")
+         put_flash(socket, :error, @outcome_unknown_message)
+
+       other ->
+         Logger.error("#{label}: #{inspect(other)}")
+         put_flash(socket, :error, Keyword.fetch!(copy, :user_message))
+     end
+   end
+   ```
+
+The 5 second calls (`add_message/3`, `cancel/1`, `dismiss_interrupt/1`,
+`reset/1`) also return `:outcome_unknown` on a timeout. `execute/1` and
+`resume/2` wait indefinitely and return it only when the agent dies.
+
+---
+
+### P2.3 Handle the `:on_resume` lifecycle in `persist_state/3`
+
+`persist_state/3` is now called with `context.lifecycle == :on_resume`
+**synchronously, before approved tool calls start**, to record that they are
+running. A `persist_state/3` that matches on the lifecycle without a fallback
+raises on it, which crashes the agent inside every HITL approval: the tools
+never run and the approval never goes through.
+
+```
+grep -rn "lifecycle" lib/ --include="*.ex"
+```
+
+The generated `AgentPersistence` only logs the lifecycle and needs nothing.
+A hand-written one should:
+
+- treat `:on_resume` as an ordinary save of the state it is given, and
+- keep a fallback clause, since lifecycles can be added again.
+
+Two properties now matter more than before, because a restarted agent reads
+back what was last persisted (step P2.4):
+
+- **Return `:ok` only once the write is durable.** A write that is queued and
+  acknowledged early can be overtaken by the restart's read.
+- **Keep it fast.** The `:on_resume` save delays the start of the approved
+  tools by its duration.
+
+---
+
+### P2.4 Check `load_state/2`
+
+The AgentServer now calls `load_state/2` in its own `init/1` on **every start**,
+including a restart by its supervisor. Before, `AgentSupervisor` called it once,
+when it started.
+
+- **`{:error, :not_found}` means "start fresh"** with the `:initial_state`
+  you passed. Any other `{:error, reason}`, or a raise, **fails the start**
+  (`{:stop, {:load_failed, reason}}`), so that a fallback state is never
+  persisted over a conversation that could not be read. Return `:not_found`
+  only when that is what you mean.
+- **It runs in the AgentServer process.** Tests that grant Ecto sandbox access
+  to specific pids must cover it; shared mode needs nothing.
+- **Keep it fast.** `start_agent_sync/1` can now return while the load is in
+  progress. Calls made then wait until the load finishes, and one with a 5
+  second timeout (`add_message/3`) returns `:outcome_unknown` if the load
+  takes longer.
+
+```
+grep -rn "def load_state" lib/ --include="*.ex"
+```
+
+The generated `load_state/2` returns only `{:ok, state}` or
+`{:error, :not_found}` and needs nothing.
+
+A Coordinator that loads state itself and passes it as `:initial_state`
+alongside `:agent_persistence` behaves as before: the persisted state wins,
+and `:initial_state` is used only when nothing is persisted.
+
+---
+
+### P2.5 Check code that reads an interrupted HITL state
+
+When `HumanInTheLoop` asks for approval, the conversation now ends with a
+**tool message of placeholder results**, one per tool call of the assistant
+message, each with `is_interrupt: true`, the content
+`"Waiting for a human to review this tool call."`, and the approval's
+`interrupt_data`. In v0.16 it ended with the assistant message and its
+unanswered tool calls.
+
+```
+grep -rn "List.last(.*messages)\|tool_calls" lib/ --include="*.ex" | grep -v "deps/"
+grep -rn "execute_tool_calls_with_decisions\|check_pre_tool_hitl" lib/ --include="*.ex"
+```
+
+- **Read pending calls from `interrupt_data.action_requests`,** not from the
+  last message. Code that took `List.last(state.messages).tool_calls` now gets
+  a tool message.
+- **Resume through `Agent.resume/4`, `AgentServer.resume/2`, or
+  `Session.resume/4`.** They replace the placeholders with the real results.
+  Code that resumes at chain level with
+  `LLMChain.execute_tool_calls_with_decisions/3` must drop the trailing
+  placeholder message first, or every call ends up with two results.
+- **Rendering from `state.messages`** (`get_state/1`, `export_state/1`) shows
+  the placeholders. Skip tool results with `is_interrupt: true`. Display
+  messages are unaffected: placeholders are never saved as display rows.
+- **A custom execution mode** that calls `Sagents.Mode.Steps.check_pre_tool_hitl/2`
+  gets the placeholders automatically.
+
+The restored interrupt is identical to the one originally raised. Code that
+compared a restored HITL interrupt to the live one, or relied on a
+`:tool_call_id` key added at restore, sees the same map either way.
+
+---
+
+### P2.6 Update tests
+
+```
+grep -rn "Sagents.Presence\|presence_module" test/ --include="*.exs"
+grep -rn "agent_not_running" test/ --include="*.exs"
+grep -rn "lifecycle" test/ --include="*.exs"
+```
+
+- **Stubs or expectations on `Sagents.Presence.update/4`.** The AgentServer no
+  longer calls `Sagents.Presence` for its own discovery entry, and its boot no
+  longer logs `"Failed to update presence status"`, which is what log-strict
+  suites stubbed it to silence. Remove the stubs. A Mimic `expect` now fails
+  `verify_on_exit!`, because it is never called.
+- **Presence mocks.** The writer calls your `presence_module` as
+  `update(pid, topic, key, metadata_map)`, falls back to
+  `track(pid, topic, key, metadata_map)` when `update` answers
+  `{:error, :nopresence}`, and calls `untrack(pid, topic, key)` on an orderly
+  stop. A mock whose `update/4` only accepts a function, or never answers
+  `:nopresence`, means nothing gets tracked. The failures are logged as
+  warnings, not raised.
+- **Reading agent presence right after an agent call.** Writes are
+  asynchronous now. Call `Sagents.PresenceWriter.flush/0` before reading; it
+  returns once every pending write is applied. (Without `Sagents.Supervisor`
+  running, writes are applied synchronously and need no flush.)
+- **Tests that kill an agent mid-call** and assert `:agent_not_running` now get
+  `{:error, {:outcome_unknown, :killed}}`.
+- **Tests that assert the shape of an interrupted HITL state** (the last
+  message is the assistant's) now see the placeholder tool message (P2.5).
+- **Persistence test doubles** whose `load_state/2` returns an error other than
+  `:not_found` now fail the agent's start (P2.4). Ones that assert on the exact
+  list of lifecycles see `:on_resume` during HITL tests.
+
+---
+
+### P2.7 Choose a recovery policy for gated tools (optional)
+
+An approved tool can be interrupted by the agent stopping after it started and
+before its result was persisted. The next boot applies the tool's
+`:recovery` policy, set per tool in `interrupt_on`:
+
+- `:report_unknown` (default): the call gets an error result telling the model
+  it was approved and started, but its outcome is unknown and should be
+  checked before running it again. It is never re-run on its own.
+- `:reexecute`: the boot re-runs the batch with the recorded decisions. Use
+  only for tools that are safe to repeat, for example idempotent by
+  `context.tool_call_id`, which every tool receives.
+
+```elixir
+interrupt_on: %{
+  "set_thermostat" => %{allowed_decisions: [:approve, :reject], recovery: :reexecute},
+  "send_payment" => true
+}
+```
+
+A batch is re-run only when every started call in it is `:reexecute`. A call
+that needed no approval but was in the same batch counts as `:report_unknown`.
+An unknown policy makes `Agent.new/2` return an error (`Agent.new!/2` raises).
+
+---
+
+### P2.8 Bind a `:pending_resume` you pass yourself (optional)
+
+`Session.resume/4` wakes a sleeping agent with the answer as `:pending_resume`,
+and now also passes `:pending_resume_for`: the tool call ids of the interrupt
+the user answered, read from the host state's `:interrupt_data` (generated
+hosts keep it there). The woken agent applies the answer only if it is waiting
+on exactly those calls, and otherwise discards it with a warning and stays
+`:interrupted`, so a stale answer can never approve a different, later
+question.
+
+Code that passes `:pending_resume` itself, to `Session.start/3`,
+`Session.ensure_running/3`, or `AgentSupervisor`, should pass the ids too:
+
+```elixir
+pending_resume: decisions,
+pending_resume_for: Sagents.AgentUtils.interrupt_tool_call_ids(interrupt_data)
+```
+
+Without it the answer is applied to whatever interrupt is pending, as in
+v0.16.
+
+```
+grep -rn "pending_resume" lib/ --include="*.ex"
+```
+
+---
+
+### P2.9 Behavior changes that need no code
+
+- **Presence failures are warnings now,** `"Presence ... failed and was
+  dropped"`, never a crash. While presence is degraded, an idle agent whose
+  viewer list cannot be read stays up until its inactivity timeout rather
+  than stopping on an unknown count.
+- **A crashed agent does not untrack itself.** The tracker removes the entry
+  when it sees the process exit, so the `presence_diff` leave arrives a moment
+  later than an explicit untrack would.
+- **A restarted agent resumes the latest persisted conversation,** and a
+  message queued when the previous process stopped (`pending_message`) is now
+  restored on supervised restarts and Horde moves too, and drains as usual.
+- **HITL approvals survive a restart.** `{:agent_shutdown, %{interrupt_restorable: true}}`
+  is now accurate for them, so a host that keeps the prompt on screen across
+  a nap (`AgentUtils.shutdown_session_changes/2`) keeps HITL prompts that
+  work when answered.
+- **Middleware callbacks fire for approved tool executions.** A middleware's
+  `on_tool_execution_completed` (and the other tool callbacks) now sees the
+  calls a human approved; in v0.16 it missed them. Remove any workaround that
+  recorded approved results separately, or they are counted twice.
+- **A run that finishes while the agent shuts down is persisted**
+  (`:on_completion` or `:on_interrupt`), instead of being dropped.
+- **Sending a message after a run that ended in `:error` or `:cancelled`**
+  turns any leftover interrupt placeholders into "the user did not respond"
+  results, as sending one while `:interrupted` always has.
+- **Nothing is backfilled.** A conversation saved by v0.16 with an approval
+  pending has no placeholders, and still boots `:idle` after the upgrade.
+
+---
+
+## Verifying Part 2
+
+### Check P2-A: a clean boot
+
+Start the app and open a conversation. The log has no
+`"Failed to update presence status"` warning, which v0.16 logged on every agent
+start.
+
+### Check P2-B: an approval survives the agent process
+
+With `agent_persistence` configured and a tool gated by `interrupt_on`, trigger
+an approval in the UI, then in `iex -S mix`:
+
+```elixir
+agent_id = "conversation-#{conversation_id}"
+{:ok, pid} = Sagents.AgentServer.fetch_pid(agent_id)
+Process.exit(pid, :kill)
+
+# The supervisor restarts it from persisted state.
+Sagents.AgentServer.get_status(agent_id)
+# => :interrupted
+```
+
+Approve in the UI. The tool runs once, and the conversation holds one result
+for the call.
+
+| What you see | Cause |
+| --- | --- |
+| `:idle` after the restart | No `agent_persistence`, or the approval was raised before the upgrade |
+| Approving crashes the agent, the tool never runs | P2.3: `persist_state/3` raises on `:on_resume` |
+| Agent fails to start: `{:load_failed, _}` | P2.4: `load_state/2` returned an error other than `:not_found` |
+
+### Check P2-C: presence trouble does not reach the agent (dev only)
+
+Suspend your Presence's tracker shard (never in production):
+
+```elixir
+:sys.suspend(:"Elixir.MyAppWeb.Presence_shard0")
+# Send a message, approve a tool: the agent keeps working.
+# Expect "Presence ... failed and was dropped" warnings after 5 seconds.
+:sys.resume(:"Elixir.MyAppWeb.Presence_shard0")
+```
+
+### Check P2-D: read the inventory back
+
+```
+grep -rn "agent_not_running\|outcome_unknown" lib/ --include="*.ex"
+grep -rn "lifecycle" lib/ --include="*.ex"
+grep -rn "Sagents.Presence" test/ --include="*.exs"
+```
+
+The first lists every place that acts on a call failure, each with a decision
+for `:outcome_unknown` (P2.2). The second shows no lifecycle match without a
+fallback (P2.3). The third shows no remaining stub of `Sagents.Presence.update/4`
+(P2.6).
+
+For details, see
+[docs/subscriptions_and_presence.md](docs/subscriptions_and_presence.md),
+[docs/persistence.md](docs/persistence.md),
+[docs/middleware.md](docs/middleware.md#interrupts-that-come-before-any-tool-runs),
+the "Failed Calls" section of the `Sagents.AgentServer` moduledoc, and the
+"Recovery" and "Durability" sections of the `Sagents.Middleware.HumanInTheLoop`
+moduledoc.
