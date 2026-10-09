@@ -283,6 +283,7 @@ defmodule Sagents.AgentServer do
   alias Sagents.Agent
   alias Sagents.State
   alias Sagents.AgentSupervisor
+  alias Sagents.AgentUtils
   alias Sagents.UserRequest
   alias Sagents.Message.DisplayHelpers
   alias Sagents.Middleware
@@ -394,11 +395,18 @@ defmodule Sagents.AgentServer do
       # Set only by `Sagents.Session.resume/4`, and only after `resume/2` returned
       # `{:error, :agent_not_running}`. Read exactly once, in
       # handle_continue(:broadcast_initial_state, _): applied if we booted
-      # `:interrupted`, dropped with a warning otherwise, and nil'd either way. So
-      # no handle_call/handle_info ever sees it set. Consuming it before the first
-      # broadcast is what lets a woken agent announce `:running` rather than an
-      # `:interrupted` snapshot it is about to leave. Never persisted.
-      pending_resume: nil
+      # `:interrupted` on the interrupt it answers, dropped with a warning
+      # otherwise, and nil'd either way. So no handle_call/handle_info ever sees
+      # it set. Consuming it before the first broadcast is what lets a woken
+      # agent announce `:running` rather than an `:interrupted` snapshot it is
+      # about to leave. Never persisted.
+      pending_resume: nil,
+      # The interrupt `pending_resume` answers, as the sorted tool call ids from
+      # `Sagents.AgentUtils.interrupt_tool_call_ids/1`, or nil when the caller did
+      # not say. The option rides in the supervisor's child spec, so every start
+      # of this server sees it again. The match is what stops an old answer from
+      # being applied to a later interrupt the user never saw.
+      pending_resume_for: nil
     ]
 
     @type t :: %__MODULE__{
@@ -435,6 +443,7 @@ defmodule Sagents.AgentServer do
             final_candidate: {pos_integer(), list()} | nil,
             subagent_usage: %{String.t() => LangChain.TokenUsage.t()},
             pending_resume: term() | nil,
+            pending_resume_for: [String.t()] | nil,
             consecutive_auto_executions: non_neg_integer()
           }
   end
@@ -447,7 +456,10 @@ defmodule Sagents.AgentServer do
   ## Options
 
   - `:agent` - The Agent struct (required)
-  - `:initial_state` - Initial State (default: empty state)
+  - `:initial_state` - Initial State (default: empty state). With
+    `:agent_persistence`, used only when the conversation has nothing
+    persisted: every start loads the persisted state through
+    `c:Sagents.AgentPersistence.load_state/2`.
   - `:initial_subscribers` - List of `{channel, pid}` or `{channel, pid, opts}`
     tuples to enroll as subscribers before `init/1` returns. Use this to
     atomically start the server and subscribe — every event broadcast
@@ -464,7 +476,11 @@ defmodule Sagents.AgentServer do
     Set to `nil` or `:infinity` to disable automatic shutdown
   - `:shutdown_delay` - Delay in milliseconds to allow the supervisor to gracefully stop all children (default: 5000)
   - `:conversation_id` - Optional conversation identifier for message persistence (default: nil)
-  - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` for state snapshots (default: nil)
+  - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` for state snapshots (default: nil).
+    Every start, including a supervisor restart, loads the conversation from it.
+    A load that returns an error other than `{:error, :not_found}` fails the
+    start, so a fallback state never overwrites a conversation that could not
+    be read.
   - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` for display messages (default: nil)
   - `:pending_resume` - A resume payload to apply during boot, for an answer
     submitted while no process was alive to take it. Applied in
@@ -1753,11 +1769,79 @@ defmodule Sagents.AgentServer do
     end
   end
 
+  # Every start, first or restart, reads the conversation's current persisted
+  # state when `:agent_persistence` is configured. A supervisor restarts this
+  # process from the child spec it was first started with, so state captured
+  # in that spec is the conversation as it was when the supervisor started.
+  # Booting from it, and then persisting it, would erase every turn since.
+  # `:initial_state` is only the fallback for a conversation with nothing
+  # persisted yet.
   defp init_fresh(opts) do
     agent = Keyword.fetch!(opts, :agent)
-    initial_state = Keyword.get(opts, :initial_state) || State.new!()
 
+    case load_persisted_state(agent, opts) do
+      {:ok, persisted_state} ->
+        case init_from_persisted(
+               persisted_state,
+               Keyword.put(opts, :restore_agent_id, agent.agent_id)
+             ) do
+          {:stop, {:restore_failed, reason}} ->
+            # A conversation that cannot be read back is unrecoverable either
+            # way. Booting fresh at least gives the user a working agent.
+            Logger.warning(
+              "Failed to deserialize persisted state for #{agent.agent_id}, " <>
+                "using initial_state: #{inspect(reason)}"
+            )
+
+            init_with_initial_state(agent, opts)
+
+          result ->
+            result
+        end
+
+      :not_found ->
+        init_with_initial_state(agent, opts)
+
+      {:error, reason} ->
+        # Starting from the fallback state here would persist it over the real
+        # conversation at the next lifecycle point. Failing the start leaves the
+        # stored conversation untouched and lets the supervisor retry.
+        {:stop, {:load_failed, reason}}
+    end
+  end
+
+  defp init_with_initial_state(agent, opts) do
+    initial_state = Keyword.get(opts, :initial_state) || State.new!()
     build_server_state(agent, initial_state, opts)
+  end
+
+  defp load_persisted_state(agent, opts) do
+    case Keyword.get(opts, :agent_persistence) do
+      nil ->
+        :not_found
+
+      persistence ->
+        context = %{
+          agent_id: agent.agent_id,
+          conversation_id: Keyword.get(opts, :conversation_id)
+        }
+
+        case persistence.load_state(agent.scope, context) do
+          {:ok, persisted_state} when is_map(persisted_state) ->
+            Logger.info("Loaded persisted state for #{agent.agent_id}")
+            {:ok, persisted_state}
+
+          {:error, :not_found} ->
+            :not_found
+
+          {:error, reason} ->
+            Logger.error(
+              "Failed to load persisted state for #{agent.agent_id}: #{inspect(reason)}"
+            )
+
+            {:error, reason}
+        end
+    end
   end
 
   defp init_from_persisted(persisted_state, opts) do
@@ -1900,7 +1984,8 @@ defmodule Sagents.AgentServer do
       pending_message: Keyword.get(opts, :pending_message),
       # An interrupt response submitted while no process was alive to take it.
       # Applied in handle_continue/2 before the first broadcast.
-      pending_resume: Keyword.get(opts, :pending_resume)
+      pending_resume: Keyword.get(opts, :pending_resume),
+      pending_resume_for: Keyword.get(opts, :pending_resume_for)
     }
 
     # Start the inactivity timer
@@ -1987,12 +2072,23 @@ defmodule Sagents.AgentServer do
   defp apply_pending_resume(
          %ServerState{pending_resume: resume_data, status: :interrupted} = server_state
        ) do
-    Logger.info(
-      "Agent #{server_state.agent.agent_id} applying a resume submitted while it was not running"
-    )
+    if answers_current_interrupt?(server_state) do
+      Logger.info(
+        "Agent #{server_state.agent.agent_id} applying a resume submitted while it was not running"
+      )
 
-    %{server_state | pending_resume: nil}
-    |> start_resume(resume_data)
+      %{server_state | pending_resume: nil, pending_resume_for: nil}
+      |> start_resume(resume_data)
+    else
+      Logger.warning(
+        "Agent #{server_state.agent.agent_id} was given a pending resume for tool calls " <>
+          "#{inspect(server_state.pending_resume_for)}, but it is waiting on " <>
+          "#{inspect(AgentUtils.interrupt_tool_call_ids(server_state.interrupt_data))}. " <>
+          "Discarding the resume: it answers an interrupt that is no longer pending."
+      )
+
+      %{server_state | pending_resume: nil, pending_resume_for: nil}
+    end
   end
 
   # Booted into some other status: the interrupt was demoted as non-restorable
@@ -2008,7 +2104,15 @@ defmodule Sagents.AgentServer do
         "was either answered elsewhere or could not be restored."
     )
 
-    %{server_state | pending_resume: nil}
+    %{server_state | pending_resume: nil, pending_resume_for: nil}
+  end
+
+  # An answer that does not say which interrupt it is for is applied to the
+  # pending one, which is all a caller could mean.
+  defp answers_current_interrupt?(%ServerState{pending_resume_for: nil}), do: true
+
+  defp answers_current_interrupt?(%ServerState{pending_resume_for: ids} = server_state) do
+    Enum.sort(ids) == AgentUtils.interrupt_tool_call_ids(server_state.interrupt_data)
   end
 
   # Mirror of LangChain's `extract_interrupt_data/1` — keep these in lockstep

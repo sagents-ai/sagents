@@ -799,6 +799,36 @@ defmodule Sagents.SessionTest do
       assert opts[:initial_subscribers] == [{:main, self(), []}]
     end
 
+    test "the woken agent is told which interrupt the answer is for" do
+      test_pid = self()
+      _fake_pid = stub_supervisor_ok(test_pid)
+      stub(AgentServer, :resume, fn _agent_id, _resume_data -> {:error, :agent_not_running} end)
+
+      shown = %{
+        action_requests: [%{tool_call_id: "call_b"}, %{tool_call_id: "call_a"}],
+        hitl_tool_call_ids: ["call_b", "call_a"]
+      }
+
+      Session.resume(base_config(), resume_state(%{interrupt_data: shown}), [
+        %{type: :approve},
+        %{type: :reject}
+      ])
+
+      assert_receive {:supervisor_config, opts}
+      assert opts[:pending_resume_for] == ["call_a", "call_b"]
+    end
+
+    test "an answer given without the interrupt in host state is left unbound" do
+      test_pid = self()
+      _fake_pid = stub_supervisor_ok(test_pid)
+      stub(AgentServer, :resume, fn _agent_id, _resume_data -> {:error, :agent_not_running} end)
+
+      Session.resume(base_config(), resume_state(), %{type: :answer})
+
+      assert_receive {:supervisor_config, opts}
+      assert opts[:pending_resume_for] == nil
+    end
+
     test "forwards :request_opts on the wake path so the woken agent is configured normally" do
       test_pid = self()
       _fake_pid = stub_supervisor_ok(test_pid)

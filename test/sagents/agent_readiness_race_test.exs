@@ -1,13 +1,14 @@
 defmodule Sagents.AgentReadinessRaceTest do
   @moduledoc """
   `AgentsDynamicSupervisor.start_agent_sync/1` returns only once the AgentServer
-  is registered. These pin down which registry key that promise is checked
-  against.
+  is registered, and a registered AgentServer answers with the conversation it
+  loaded.
 
   An AgentSupervisor registers `{:agent_supervisor, agent_id}` in
-  `:gen.init_it`, before `init/1` runs. Its AgentServer child registers
-  `{:agent_server, agent_id}` later, after `init/1` has loaded persisted state.
-  Callers of a started agent look up the second key.
+  `:gen.init_it`, before its `init/1` runs. Its AgentServer child registers
+  `{:agent_server, agent_id}` the same way, before its own `init/1` loads
+  persisted state. A call that reaches the AgentServer during that load waits
+  in its mailbox and is answered once the load completes.
   """
   use ExUnit.Case, async: false
 
@@ -17,9 +18,9 @@ defmodule Sagents.AgentReadinessRaceTest do
   alias Sagents.AgentSupervisor
   alias Sagents.AgentsDynamicSupervisor
 
-  # Holds `AgentSupervisor.init/1` open at the point where it loads persisted
-  # state: after the supervisor's own `:via` name is registered, and before its
-  # AgentServer child exists.
+  # Holds `AgentServer.init/1` open at the point where it loads persisted
+  # state: after both `:via` names are registered, and before the AgentServer
+  # can answer a call.
   defmodule BlockingPersistence do
     @behaviour Sagents.AgentPersistence
 
@@ -31,10 +32,17 @@ defmodule Sagents.AgentReadinessRaceTest do
       send(:readiness_race_test, {:loading, context.agent_id, self()})
 
       receive do
-        :release -> {:error, :not_found}
+        :release -> loaded_state()
       after
-        5_000 -> {:error, :not_found}
+        5_000 -> loaded_state()
       end
+    end
+
+    # A persisted conversation with one message, so a test can tell the loaded
+    # state from the empty fallback.
+    def loaded_state do
+      state = Sagents.State.new!(%{messages: [LangChain.Message.new_user!("persisted")]})
+      {:ok, Sagents.Persistence.StateSerializer.serialize_server_state(nil, state)}
     end
   end
 
@@ -50,7 +58,7 @@ defmodule Sagents.AgentReadinessRaceTest do
     agent
   end
 
-  # An AgentSupervisor parked inside `init/1`, started outside the dynamic
+  # An AgentServer parked inside `init/1`, under an AgentSupervisor started outside the dynamic
   # supervisor so that other starters are not serialized behind it. That is the
   # arrangement under Horde, where the supervisor is placed on another node.
   defp start_blocked_agent_supervisor(agent) do
@@ -68,92 +76,61 @@ defmodule Sagents.AgentReadinessRaceTest do
         Process.sleep(:infinity)
       end)
 
-    assert_receive {:loading, ^agent_id, sup_pid}, 1_000
+    assert_receive {:loading, ^agent_id, loader_pid}, 1_000
 
-    on_exit(fn -> release_and_stop(holder, sup_pid, agent_id) end)
+    on_exit(fn -> release_and_stop(holder, loader_pid, agent_id) end)
 
-    sup_pid
+    loader_pid
   end
 
   # Let `init/1` finish before taking the supervisor down, so teardown does not
   # log a crash for a supervisor that was only ever parked mid-startup.
-  defp release_and_stop(holder, sup_pid, agent_id) do
-    if AgentServer.fetch_pid(agent_id) == {:error, :not_running} do
-      send(sup_pid, :release)
-      await_registered(agent_id, System.monotonic_time(:millisecond) + 1_000)
+  defp release_and_stop(holder, loader_pid, agent_id) do
+    send(loader_pid, :release)
+
+    case AgentSupervisor.get_pid(agent_id) do
+      {:ok, sup_pid} -> if Process.alive?(sup_pid), do: Supervisor.stop(sup_pid, :normal)
+      _other -> :ok
     end
 
-    if Process.alive?(sup_pid), do: Supervisor.stop(sup_pid, :normal)
     Process.exit(holder, :kill)
+  catch
+    :exit, _reason -> Process.exit(holder, :kill)
   end
 
-  defp await_registered(agent_id, deadline) do
-    cond do
-      match?({:ok, _pid}, AgentServer.fetch_pid(agent_id)) ->
-        :ok
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        :timeout
-
-      true ->
-        Process.sleep(10)
-        await_registered(agent_id, deadline)
-    end
-  end
-
-  test "the two registry keys appear at different points in startup" do
+  test "an AgentServer is registered while it loads, and answers once loaded" do
     agent = build_agent()
-    _sup_pid = start_blocked_agent_supervisor(agent)
+    loader_pid = start_blocked_agent_supervisor(agent)
 
     assert {:ok, _pid} = AgentSupervisor.get_pid(agent.agent_id)
-    assert {:error, :not_running} = AgentServer.fetch_pid(agent.agent_id)
+    assert {:ok, ^loader_pid} = AgentServer.fetch_pid(agent.agent_id)
+
+    call = Task.async(fn -> AgentServer.get_state(agent.agent_id) end)
+    assert Task.yield(call, 200) == nil
+
+    send(loader_pid, :release)
+    assert %{messages: [_persisted]} = Task.await(call, 2_000)
   end
 
-  test "start_agent_sync waits for the AgentServer, not just its supervisor" do
+  test "start_agent_sync returns an agent whose first answer reflects the loaded state" do
     agent = build_agent()
     agent_id = agent.agent_id
-    sup_pid = start_blocked_agent_supervisor(agent)
-    test_pid = self()
+    loader_pid = start_blocked_agent_supervisor(agent)
 
-    {:ok, starter} =
-      Task.start(fn ->
-        result =
-          AgentsDynamicSupervisor.start_agent_sync(
-            agent_id: agent_id,
-            agent: agent,
-            startup_timeout: 2_000
-          )
-
-        send(test_pid, {:started, result})
-      end)
-
-    on_exit(fn -> Process.exit(starter, :kill) end)
-
-    # `start_agent` returns `:already_started` immediately here, since the
-    # AgentSupervisor is registered. The readiness wait still holds, because the
-    # AgentServer every caller looks up does not exist yet.
-    refute_receive {:started, _}, 300
-    assert {:error, :not_running} = AgentServer.fetch_pid(agent_id)
-
-    send(sup_pid, :release)
-
-    assert_receive {:started, {:ok, returned_pid}}, 2_000
-
-    # The AgentSupervisor pid is what callers get back, not the AgentServer's.
-    assert returned_pid == sup_pid
-    assert {:ok, _server_pid} = AgentServer.fetch_pid(agent_id)
-  end
-
-  test "start_agent_sync times out rather than reporting a half-started agent" do
-    agent = build_agent()
-    _sup_pid = start_blocked_agent_supervisor(agent)
-
-    assert {:error, :timeout_waiting_for_agent} =
+    # `start_agent` finds the AgentSupervisor registered and reports
+    # `:already_started`; the readiness wait finds the AgentServer registered.
+    assert {:ok, _sup_pid} =
              AgentsDynamicSupervisor.start_agent_sync(
-               agent_id: agent.agent_id,
+               agent_id: agent_id,
                agent: agent,
-               startup_timeout: 100
+               startup_timeout: 2_000
              )
+
+    call = Task.async(fn -> AgentServer.get_state(agent_id) end)
+    assert Task.yield(call, 200) == nil
+
+    send(loader_pid, :release)
+    assert %{messages: [_persisted]} = Task.await(call, 2_000)
   end
 
   test "a fresh start on one node serializes concurrent starters" do
@@ -162,8 +139,9 @@ defmodule Sagents.AgentReadinessRaceTest do
     test_pid = self()
 
     # Children start synchronously inside the dynamic supervisor's own
-    # handle_call, so a slow `AgentSupervisor.init/1` blocks the dynamic
-    # supervisor for the whole startup.
+    # handle_call, and an AgentSupervisor starts its AgentServer synchronously
+    # in its own init/1, so a slow load blocks the dynamic supervisor for the
+    # whole startup.
     {:ok, first} =
       Task.start(fn ->
         AgentsDynamicSupervisor.start_agent_sync(
@@ -179,7 +157,7 @@ defmodule Sagents.AgentReadinessRaceTest do
       AgentsDynamicSupervisor.stop_agent(agent_id)
     end)
 
-    assert_receive {:loading, ^agent_id, sup_pid}, 1_000
+    assert_receive {:loading, ^agent_id, loader_pid}, 1_000
 
     {:ok, second} =
       Task.start(fn ->
@@ -199,7 +177,7 @@ defmodule Sagents.AgentReadinessRaceTest do
     # the first is still in `init/1`, so it cannot observe the gap.
     refute_receive {:second_returned, _}, 300
 
-    send(sup_pid, :release)
+    send(loader_pid, :release)
 
     assert_receive {:second_returned, {:ok, _pid}}, 3_000
     assert {:ok, _pid} = AgentServer.fetch_pid(agent_id)

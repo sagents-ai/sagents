@@ -22,7 +22,9 @@ defmodule Sagents.AgentSupervisor do
 
   Accepts a keyword list with:
   - `:agent` - The Agent struct (required unless `:builder` is given)
-  - `:initial_state` - Initial State for AgentServer (optional)
+  - `:initial_state` - State for a conversation with nothing persisted (optional). With
+    `:agent_persistence`, the AgentServer loads the persisted conversation on every start
+    and uses this only when there is none.
   - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` (optional, default: nil)
   - `:shutdown_delay` - Delay in milliseconds to allow the supervisor to gracefully stop all children (optional, default: 5000)
   - `:conversation_id` - Optional conversation identifier for message persistence (optional, default: nil)
@@ -77,10 +79,8 @@ defmodule Sagents.AgentSupervisor do
   alias Sagents.Agent
   alias Sagents.AgentServer
   alias Sagents.Closures
-  alias Sagents.Persistence.StateSerializer
   alias Sagents.ProcessRegistry
   alias Sagents.SubAgentsDynamicSupervisor
-  alias Sagents.State
 
   @doc """
   Get the name of the AgentSupervisor process for a specific agent.
@@ -148,7 +148,9 @@ defmodule Sagents.AgentSupervisor do
   ## Options
 
   - `:agent` - The Agent struct (required unless `:builder` is given)
-  - `:initial_state` - Initial State for AgentServer (optional)
+  - `:initial_state` - State for a conversation with nothing persisted (optional). With
+    `:agent_persistence`, the AgentServer loads the persisted conversation on every start
+    and uses this only when there is none.
   - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple or `nil` (optional, default: nil).
     Used only for `Phoenix.Presence` `presence_diff` wiring; per-agent events are
     delivered directly to subscriber pids via `Sagents.Publisher`.
@@ -457,9 +459,12 @@ defmodule Sagents.AgentSupervisor do
     end
 
     # Extract remaining configuration
-    # Resolve initial state: prefer DB-persisted state over stale child spec state
-    # This is critical for Horde redistribution where the child spec's initial_state is stale
-    {initial_state, restored} = resolve_initial_state(config, agent)
+    #
+    # Persisted state is not loaded here. The AgentServer loads it in its own
+    # init/1 so that every start of the AgentServer, including a restart by this
+    # supervisor, reads the conversation as it is now. `:initial_state` is
+    # passed through as the fallback for a conversation with nothing persisted.
+    initial_state = Keyword.get(config, :initial_state)
     pubsub = Keyword.get(config, :pubsub)
     inactivity_timeout = Keyword.get(config, :inactivity_timeout, 300_000)
     shutdown_delay = Keyword.get(config, :shutdown_delay, 5000)
@@ -471,12 +476,12 @@ defmodule Sagents.AgentSupervisor do
     presence_module = Keyword.get(config, :presence_module)
     initial_subscribers = Keyword.get(config, :initial_subscribers, [])
     pending_resume = Keyword.get(config, :pending_resume)
+    pending_resume_for = Keyword.get(config, :pending_resume_for)
 
     # Build AgentServer options
     agent_server_opts = [
       agent: agent,
       initial_state: initial_state,
-      restored: restored,
       inactivity_timeout: inactivity_timeout,
       shutdown_delay: shutdown_delay,
       id: agent_id,
@@ -533,7 +538,10 @@ defmodule Sagents.AgentSupervisor do
     # agent was asleep, applied at boot before the initial status broadcast)
     agent_server_opts =
       if pending_resume,
-        do: Keyword.put(agent_server_opts, :pending_resume, pending_resume),
+        do:
+          agent_server_opts
+          |> Keyword.put(:pending_resume, pending_resume)
+          |> Keyword.put(:pending_resume_for, pending_resume_for),
         else: agent_server_opts
 
     # Build child specifications
@@ -554,55 +562,6 @@ defmodule Sagents.AgentSupervisor do
   end
 
   ## Private Helpers
-
-  # Resolve the initial state for the AgentServer.
-  #
-  # When agent_persistence is configured, loads fresh state from the DB rather
-  # than using the `initial_state` captured in the child spec
-  #
-  # Returns {state, restored} where restored is true if state was loaded from DB.
-  defp resolve_initial_state(config, agent) do
-    agent_persistence = Keyword.get(config, :agent_persistence)
-    fallback_state = Keyword.get(config, :initial_state, State.new!(%{agent_id: agent.agent_id}))
-
-    if agent_persistence do
-      conversation_id = Keyword.get(config, :conversation_id)
-
-      context = %{
-        agent_id: agent.agent_id,
-        conversation_id: conversation_id
-      }
-
-      case agent_persistence.load_state(agent.scope, context) do
-        {:ok, exported_state} ->
-          case StateSerializer.deserialize_state(agent.agent_id, exported_state["state"]) do
-            {:ok, state} ->
-              # Sweep stale interrupts using the agent's middleware. Restorable
-              # interrupt types (e.g. ask_user) survive; process-bound ones
-              # (e.g. sub-agent HITL) get demoted to error results.
-              state = Sagents.State.clean_stale_interrupts(state, agent.middleware)
-
-              Logger.info(
-                "Loaded persisted state for #{agent.agent_id} (#{length(state.messages)} messages)"
-              )
-
-              {state, true}
-
-            {:error, _reason} ->
-              Logger.warning(
-                "Failed to deserialize persisted state for #{agent.agent_id}, using initial_state"
-              )
-
-              {fallback_state, false}
-          end
-
-        {:error, :not_found} ->
-          {fallback_state, false}
-      end
-    else
-      {fallback_state, false}
-    end
-  end
 
   # Wait for the AgentServer to be registered and ready
   # Retries with exponential backoff up to the timeout
