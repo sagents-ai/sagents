@@ -19,7 +19,11 @@ defmodule Sagents.Mode.Steps do
   Reads middleware list from opts `:middleware`. Inspects `chain.exchanged_messages`
   for tool calls that match the HITL policy.
 
-  Returns `{:interrupt, chain, interrupt_data}` if approval is needed.
+  Returns `{:interrupt, chain, interrupt_data}` if approval is needed. The
+  returned chain ends with a tool message of placeholder results, one per tool
+  call, each carrying `interrupt_data` (see
+  `Sagents.Middleware.HumanInTheLoop.add_approval_placeholders/2`), so the
+  interrupt is persisted with the conversation.
   """
   def check_pre_tool_hitl({:continue, chain}, opts) do
     middleware = Keyword.get(opts, :middleware, [])
@@ -48,7 +52,10 @@ defmodule Sagents.Mode.Steps do
 
         case module.check_for_interrupt(state, config) do
           {:interrupt, interrupt_data} ->
-            {:interrupt, chain, interrupt_data}
+            # No tool has run, so nothing else would record the interrupt in
+            # the conversation. The placeholders make it durable.
+            {:interrupt, HumanInTheLoop.add_approval_placeholders(chain, interrupt_data),
+             interrupt_data}
 
           :continue ->
             {:continue, chain}

@@ -13,6 +13,7 @@ defmodule Sagents.AgentServerRestartTest do
 
   alias Sagents.{Agent, AgentServer, AgentSupervisor, State}
   alias Sagents.Persistence.StateSerializer
+  alias Sagents.TestStoredPersistence, as: StoredPersistence
   alias LangChain.Message
   alias LangChain.Message.{ToolCall, ToolResult}
 
@@ -22,65 +23,6 @@ defmodule Sagents.AgentServerRestartTest do
   setup_all do
     Mimic.copy(Agent)
     :ok
-  end
-
-  # Persistence that loads back what was last persisted, the way a database
-  # does. Every write is also recorded, in order.
-  defmodule StoredPersistence do
-    @behaviour Sagents.AgentPersistence
-
-    @table :agent_server_restart_test_store
-
-    def setup do
-      if :ets.whereis(@table) != :undefined, do: :ets.delete(@table)
-      :ets.new(@table, [:named_table, :public, :set])
-      :ok
-    end
-
-    def store(agent_id, %State{} = state) do
-      :ets.insert(
-        @table,
-        {{:latest, agent_id}, StateSerializer.serialize_server_state(nil, state)}
-      )
-    end
-
-    def fail_loads(reason), do: :ets.insert(@table, {:load_error, reason})
-
-    def writes(agent_id) do
-      case :ets.lookup(@table, {:writes, agent_id}) do
-        [{_key, writes}] -> Enum.reverse(writes)
-        [] -> []
-      end
-    end
-
-    @impl true
-    def persist_state(_scope, state_data, context) do
-      :ets.insert(@table, {{:latest, context.agent_id}, state_data})
-      writes = [{context.lifecycle, state_data} | writes_raw(context.agent_id)]
-      :ets.insert(@table, {{:writes, context.agent_id}, writes})
-      :ok
-    end
-
-    @impl true
-    def load_state(_scope, context) do
-      case :ets.lookup(@table, :load_error) do
-        [{:load_error, reason}] ->
-          {:error, reason}
-
-        [] ->
-          case :ets.lookup(@table, {:latest, context.agent_id}) do
-            [{_key, data}] -> {:ok, data}
-            [] -> {:error, :not_found}
-          end
-      end
-    end
-
-    defp writes_raw(agent_id) do
-      case :ets.lookup(@table, {:writes, agent_id}) do
-        [{_key, writes}] -> writes
-        [] -> []
-      end
-    end
   end
 
   setup do

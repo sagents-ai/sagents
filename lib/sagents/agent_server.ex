@@ -288,6 +288,7 @@ defmodule Sagents.AgentServer do
   alias Sagents.Message.DisplayHelpers
   alias Sagents.Middleware
   alias Sagents.MiddlewareEntry
+  alias Sagents.Middleware.HumanInTheLoop
   alias Sagents.Persistence.StateSerializer
   alias Sagents.PresenceWriter
   alias Sagents.ProcessRegistry
@@ -2051,7 +2052,10 @@ defmodule Sagents.AgentServer do
         execution_seq: server_state.execution_seq + 1
     }
 
-    new_state = reset_inactivity_timer(new_state)
+    new_state =
+      new_state
+      |> reset_inactivity_timer()
+      |> checkpoint_resume(resume_data)
 
     # Resume execution async (callbacks are built in resume_agent)
     task =
@@ -2060,6 +2064,50 @@ defmodule Sagents.AgentServer do
       end)
 
     Map.put(new_state, :task, task)
+  end
+
+  # An approval whose tools were running when the previous process stopped,
+  # restored because its tools allow running again (HumanInTheLoop `:recovery`).
+  # It is resumed with the decisions that were recorded before the tools
+  # started, through the same path as an answer submitted while asleep. Those
+  # decisions are the ones that were already acted on, so any other pending
+  # answer is set aside.
+  defp resume_in_flight(%ServerState{status: :interrupted} = server_state) do
+    case HumanInTheLoop.in_flight_decisions(server_state.interrupt_data) do
+      {:ok, decisions} ->
+        Logger.warning(
+          "Agent #{server_state.agent.agent_id} stopped while approved tool calls were " <>
+            "running. Running them again, as their tools allow."
+        )
+
+        %{
+          server_state
+          | pending_resume: decisions,
+            pending_resume_for: AgentUtils.interrupt_tool_call_ids(server_state.interrupt_data)
+        }
+
+      :none ->
+        server_state
+    end
+  end
+
+  defp resume_in_flight(%ServerState{} = server_state), do: server_state
+
+  # Approved tool calls are about to run. Record that they are running, and
+  # persist it, before the task that runs them exists: if this process stops
+  # before the run's result is persisted, the next boot finds the record and
+  # applies the tools' recovery policy rather than asking again or silently
+  # dropping work that may have happened. The marked state is also the rolling
+  # state, so a cancel, an error, or a shutdown during the run persists it too.
+  defp checkpoint_resume(%ServerState{} = server_state, resume_data) do
+    case HumanInTheLoop.resume_checkpoint(
+           server_state.state,
+           resume_data,
+           server_state.agent.middleware
+         ) do
+      {:ok, checkpoint} -> maybe_persist_state(%{server_state | state: checkpoint}, :on_resume)
+      :none -> server_state
+    end
   end
 
   # Consume a resume handed to us at start time by `Sagents.Session.resume/4`.
@@ -2115,13 +2163,27 @@ defmodule Sagents.AgentServer do
     Enum.sort(ids) == AgentUtils.interrupt_tool_call_ids(server_state.interrupt_data)
   end
 
+  # A HumanInTheLoop approval is one interrupt over a batch of tool calls, so
+  # each of its placeholders carries the same payload, and that payload is the
+  # interrupt exactly as it was raised. Every other interrupt is raised from
+  # inside a tool, one per result.
+  defp restore_interrupt_data(
+         [%{interrupt_data: %{hitl_tool_call_ids: _ids} = batch} | _rest] = results
+       ) do
+    if Enum.all?(results, &(&1.interrupt_data == batch)),
+      do: batch,
+      else: restore_tool_interrupt_data(results)
+  end
+
+  defp restore_interrupt_data(results), do: restore_tool_interrupt_data(results)
+
   # Mirror of LangChain's `extract_interrupt_data/1` — keep these in lockstep
   # so restored and freshly-fired interrupts surface identically.
-  defp restore_interrupt_data([single]) do
+  defp restore_tool_interrupt_data([single]) do
     Map.put(single.interrupt_data, :tool_call_id, single.tool_call_id)
   end
 
-  defp restore_interrupt_data(multiple) do
+  defp restore_tool_interrupt_data(multiple) do
     %{
       type: :multiple_interrupts,
       interrupts:
@@ -2168,7 +2230,10 @@ defmodule Sagents.AgentServer do
     # this server genuinely has once it has consumed everything it was handed.
     # Broadcasting :interrupted here and :running a microsecond later would
     # make every subscriber re-present a question that is already answered.
-    server_state = apply_pending_resume(server_state)
+    server_state =
+      server_state
+      |> resume_in_flight()
+      |> apply_pending_resume()
 
     # Broadcast initial status so UI knows agent is ready. When restored from
     # persisted state with a surviving (restorable) interrupt, this fires
@@ -2432,7 +2497,9 @@ defmodule Sagents.AgentServer do
               {State.cancel_pending_interrupts(new_state), :idle, nil}
 
             s when s in [:completed, :error, :cancelled] ->
-              {new_state, :idle, server_state.interrupt_data}
+              # A run that ended badly can leave interrupt placeholders behind
+              # (an approval whose resume failed). Nothing will answer them now.
+              {State.cancel_pending_interrupts(new_state), :idle, server_state.interrupt_data}
 
             _other ->
               {new_state, server_state.status, server_state.interrupt_data}
@@ -2684,7 +2751,7 @@ defmodule Sagents.AgentServer do
   @impl true
   def handle_cast({:turn_state_update, exec_seq, %LangChain.Message{} = message}, server_state) do
     if exec_seq == server_state.execution_seq and server_state.status == :running do
-      updated_messages = server_state.state.messages ++ [message]
+      updated_messages = append_turn_message(server_state.state.messages, message)
       updated_state = %{server_state.state | messages: updated_messages}
       new_server_state = %{server_state | state: updated_state}
 
@@ -2926,16 +2993,22 @@ defmodule Sagents.AgentServer do
 
     # If agent is actively running (has an LLM connection), wait for it to finish
     # This prevents corrupting conversations by killing TCP connections mid-stream
-    if server_state.status == :running and server_state.task != nil do
-      Logger.warning(
-        "AgentServer #{agent_id} terminating while status is :running. " <>
-          "Waiting for active task to complete. Reason: #{inspect(reason)}"
-      )
+    server_state =
+      if server_state.status == :running and server_state.task != nil do
+        Logger.warning(
+          "AgentServer #{agent_id} terminating while status is :running. " <>
+            "Waiting for active task to complete. Reason: #{inspect(reason)}"
+        )
 
-      # Wait up to 25 seconds for the task to complete naturally
-      # (must be less than the 30s shutdown timeout in child_spec)
-      wait_for_task_completion(server_state.task, 25_000)
-    end
+        # Wait up to 25 seconds for the task to complete naturally
+        # (must be less than the 30s shutdown timeout in child_spec)
+        case wait_for_task_completion(server_state.task, 25_000) do
+          {:ok, result} -> safely_adopt_final_result(server_state, result)
+          :none -> server_state
+        end
+      else
+        server_state
+      end
 
     # Cancel timer if present
     server_state = cancel_inactivity_timer(server_state)
@@ -3001,23 +3074,50 @@ defmodule Sagents.AgentServer do
 
   defp interrupt_restorable?(%ServerState{}), do: false
 
-  # Wait for an active Task to complete, with a timeout
+  # Wait for an active Task to complete, with a timeout. Returns the task's
+  # result when it finished.
   defp wait_for_task_completion(%Task{ref: ref}, max_wait_ms) do
     receive do
-      {^ref, _result} ->
+      {^ref, result} ->
         # Task completed, clean up the DOWN message
         Process.demonitor(ref, [:flush])
-        :ok
+        {:ok, result}
 
       {:DOWN, ^ref, :process, _pid, _reason} ->
         # Task process died
-        :ok
+        :none
     after
       max_wait_ms ->
         Logger.warning("Timed out waiting for active task during shutdown")
-        :ok
+        :none
     end
   end
+
+  # A run that finishes while the server is stopping has no handle_info left to
+  # deliver it. Persist what it produced, so its results (an approved tool's,
+  # for instance) are not lost with the process. Nothing else is done with it:
+  # the server is going away, so no new run may start and nothing is announced.
+  # Best-effort, like the :on_shutdown persist: the database may be stopping too.
+  defp safely_adopt_final_result(server_state, result) do
+    adopt_final_result(server_state, result)
+  catch
+    _kind, _reason -> server_state
+  end
+
+  defp adopt_final_result(server_state, {:ok, %State{} = new_state}),
+    do: maybe_persist_state(%{server_state | state: new_state}, :on_completion)
+
+  defp adopt_final_result(server_state, {:ok, %State{} = new_state, _extra}),
+    do: adopt_final_result(server_state, {:ok, new_state})
+
+  defp adopt_final_result(server_state, {:interrupt, %State{} = new_state, interrupt_data}),
+    do:
+      maybe_persist_state(
+        %{server_state | state: new_state, interrupt_data: interrupt_data},
+        :on_interrupt
+      )
+
+  defp adopt_final_result(server_state, _other), do: server_state
 
   ## Private Functions
 
@@ -4818,6 +4918,28 @@ defmodule Sagents.AgentServer do
   end
 
   defp build_middleware_entries(_other), do: []
+
+  # A tool message that answers every call of a trailing placeholder message
+  # (an interrupt's stand-in results) takes that message's place. Appending it
+  # instead would give those calls two results each.
+  defp append_turn_message(messages, %LangChain.Message{role: :tool} = message) do
+    case List.last(messages) do
+      %LangChain.Message{role: :tool, tool_results: [_first | _rest] = placeholders} ->
+        answered = MapSet.new(message.tool_results || [], & &1.tool_call_id)
+
+        if Enum.all?(
+             placeholders,
+             &(&1.is_interrupt and MapSet.member?(answered, &1.tool_call_id))
+           ),
+           do: Enum.drop(messages, -1) ++ [message],
+           else: messages ++ [message]
+
+      _other ->
+        messages ++ [message]
+    end
+  end
+
+  defp append_turn_message(messages, message), do: messages ++ [message]
 
   ## Agent Presence Tracking
   #
