@@ -47,6 +47,9 @@ defmodule Sagents.Supervisor do
 
   ## What it starts
 
+  - `Sagents.PresenceWriter`: makes presence writes for agents so an agent
+    never waits on `Phoenix.Tracker`. Started first so it stops last, after the
+    agents whose final writes it applies.
   - `Sagents.ProcessRegistry` — Process registry (local `Registry` or
     `Horde.Registry`)
   - Agents dynamic supervisor — For managing `AgentSupervisor` instances
@@ -62,8 +65,8 @@ defmodule Sagents.Supervisor do
 
   ## Restart strategy
 
-  Children are supervised `:rest_for_one`, with the registry first. Everything
-  listed after it depends on it: an `AgentSupervisor` and an `AgentServer`
+  Children are supervised `:rest_for_one`, with the registry first after the
+  presence writer. Everything listed after the registry depends on it: an `AgentSupervisor` and an `AgentServer`
   register their `:via` names in the registry once, at start, and nothing
   re-registers them afterwards. A registry that loses its contents would
   otherwise leave them running but invisible to every lookup, which lets a
@@ -98,6 +101,10 @@ defmodule Sagents.Supervisor do
 
     children =
       [
+        # First, so it is not restarted by a registry failure (it holds no
+        # registrations) and so it stops after every agent, applying the
+        # presence writes they make on the way down.
+        Sagents.PresenceWriter,
         Sagents.ProcessRegistry.child_spec([]),
         # Sits between the registry and its dependents on purpose. Both Horde
         # and Elixir's Registry own their ETS tables in a process one level

@@ -271,6 +271,11 @@ defmodule Sagents.Session do
   - `{:error, reason}` — passed through. Note a **live** agent that is not
     interrupted returns an error rather than being woken, because there is
     nothing to wake and nothing to resume.
+  - `{:error, {:outcome_unknown, reason}}`: the agent took the call and then
+    failed (it crashed, or the call timed out). The answer may already be in
+    effect, and an approved tool may be running, so this is not a reason to
+    wake the agent and is never retried here. Tell the user the outcome is
+    unknown rather than inviting them to answer again.
 
   ## Ordering
 

@@ -757,6 +757,27 @@ defmodule Sagents.SessionTest do
       refute_received :unexpected_start
     end
 
+    test "an unknown outcome is passed through, never retried or woken" do
+      test_pid = self()
+
+      stub(AgentServer, :resume, fn _agent_id, _resume_data ->
+        send(test_pid, :resume_called)
+        {:error, {:outcome_unknown, :killed}}
+      end)
+
+      stub(AgentsDynamicSupervisor, :start_agent_sync, fn _opts ->
+        send(test_pid, :unexpected_start)
+        {:error, :should_not_be_called}
+      end)
+
+      assert {:error, {:outcome_unknown, :killed}} =
+               Session.resume(base_config(), resume_state(), [%{type: :approve}])
+
+      assert_received :resume_called
+      refute_received :resume_called
+      refute_received :unexpected_start
+    end
+
     test "a sleeping agent is started with the answer in hand" do
       test_pid = self()
       _fake_pid = stub_supervisor_ok(test_pid)

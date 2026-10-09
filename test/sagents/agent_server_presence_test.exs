@@ -360,7 +360,7 @@ defmodule Sagents.AgentServerPresenceTest do
   # Tracking presence module that records calls for verification
   defmodule AgentPresence do
     def start_link(_opts \\ []) do
-      Elixir.Agent.start_link(fn -> %{tracked: [], updates: []} end, name: __MODULE__)
+      Elixir.Agent.start_link(fn -> %{tracked: []} end, name: __MODULE__)
     end
 
     def stop do
@@ -372,12 +372,11 @@ defmodule Sagents.AgentServerPresenceTest do
       :exit, _reason -> :ok
     end
 
+    # Agents write presence through Sagents.PresenceWriter, so flush it before
+    # reading what was written.
     def get_tracked do
+      Sagents.PresenceWriter.flush()
       Elixir.Agent.get(__MODULE__, fn state -> state.tracked end)
-    end
-
-    def get_updates do
-      Elixir.Agent.get(__MODULE__, fn state -> state.updates end)
     end
 
     # Phoenix.Presence compatible interface
@@ -389,12 +388,22 @@ defmodule Sagents.AgentServerPresenceTest do
       {:ok, make_ref()}
     end
 
-    def update(pid, topic, id, update_fn) when is_function(update_fn, 1) do
-      Elixir.Agent.update(__MODULE__, fn state ->
-        %{state | updates: [{pid, topic, id, update_fn} | state.updates]}
-      end)
+    # Like Phoenix.Tracker: replaces the metadata of an entry this pid tracks,
+    # and answers {:error, :nopresence} for one it does not.
+    def update(pid, topic, id, metadata) when is_map(metadata) do
+      Elixir.Agent.get_and_update(__MODULE__, fn state ->
+        if Enum.any?(state.tracked, &match?({^pid, ^topic, ^id, _meta}, &1)) do
+          tracked =
+            Enum.map(state.tracked, fn
+              {^pid, ^topic, ^id, _meta} -> {pid, topic, id, metadata}
+              other -> other
+            end)
 
-      {:ok, make_ref()}
+          {{:ok, make_ref()}, %{state | tracked: tracked}}
+        else
+          {{:error, :nopresence}, state}
+        end
+      end)
     end
 
     def untrack(_pid, _topic, _id) do
@@ -576,6 +585,7 @@ defmodule Sagents.AgentServerPresenceTest do
 
   # Helper to get metadata from real presence
   defp get_presence_metadata(agent_id) do
+    Sagents.PresenceWriter.flush()
     presences = Sagents.TestPresence.list("agent_server:presence")
 
     case Map.get(presences, agent_id) do
