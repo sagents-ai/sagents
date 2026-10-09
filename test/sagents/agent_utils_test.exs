@@ -1028,4 +1028,38 @@ defmodule Sagents.AgentUtilsTest do
       assert merged.agent_status == :interrupted
     end
   end
+
+  describe "interrupt_tool_call_ids/1" do
+    test "names a HumanInTheLoop batch by its gated calls, sorted" do
+      assert AgentUtils.interrupt_tool_call_ids(%{
+               action_requests: [],
+               hitl_tool_call_ids: ["call_2", "call_1"]
+             }) == ["call_1", "call_2"]
+    end
+
+    test "names a single in-tool interrupt by its call" do
+      assert AgentUtils.interrupt_tool_call_ids(%{
+               type: :ask_user_question,
+               tool_call_id: "call_1"
+             }) ==
+               ["call_1"]
+    end
+
+    test "names a multiple-interrupts wrapper by every member" do
+      data = %{
+        type: :multiple_interrupts,
+        interrupts: [
+          %{type: :ask_user_question, tool_call_id: "call_b"},
+          %{type: :ask_user_question, tool_call_id: "call_a"}
+        ]
+      }
+
+      assert AgentUtils.interrupt_tool_call_ids(data) == ["call_a", "call_b"]
+    end
+
+    test "answers [] for nil and for payloads that name no call" do
+      assert AgentUtils.interrupt_tool_call_ids(nil) == []
+      assert AgentUtils.interrupt_tool_call_ids(%{type: :halt, message: "stop"}) == []
+    end
+  end
 end

@@ -1122,9 +1122,11 @@ defmodule Sagents.Middleware.HumanInTheLoopTest do
           }
         })
 
-      # This will fail at build_chain since there's no real agent, but it proves
+      # This fails for want of tool calls in the conversation, but it proves
       # handle_resume CLAIMS the interrupt (not {:cont, state})
-      result = HumanInTheLoop.handle_resume(nil, state, [%{type: :approve}], config, [])
+      result =
+        HumanInTheLoop.handle_resume(create_test_agent(), state, [%{type: :approve}], config, [])
+
       refute match?({:cont, _}, result)
     end
   end

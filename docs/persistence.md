@@ -283,6 +283,8 @@ Internally the Coordinator (via `Sagents.Session.start/3`):
 3. Calls `AgentPersistence.load_state(scope, %{agent_id: ..., conversation_id: ...})` to restore saved state (or starts fresh on `{:error, :not_found}`, optionally seeded with the factory's `:fresh_state_attrs`).
 4. Starts the `AgentSupervisor` with `:agent_persistence` and `:display_message_persistence` configured.
 
+The `AgentServer` calls `load_state/2` again in its own `init/1`, on every start. A supervisor restarts a crashed `AgentServer` with the options it was first started with, so this is what brings it back with the conversation as last persisted rather than as it was when the session started. The state from step 3 is used only when nothing is persisted yet. If `load_state/2` returns an error other than `{:error, :not_found}`, the start fails rather than continuing with a fallback state that would later be persisted over the stored conversation.
+
 From that point, AgentServer invokes the callbacks automatically at the right lifecycle points — no callback-function wiring required at the call site.
 
 ### How Persistence Callbacks Fire

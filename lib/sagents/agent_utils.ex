@@ -326,6 +326,39 @@ defmodule Sagents.AgentUtils do
   def interrupt_session_changes(interrupt_data), do: present_hitl_tools(interrupt_data)
 
   @doc """
+  The tool call ids an interrupt is waiting on, sorted.
+
+  Two interrupt payloads with the same ids are the same question. This is how
+  an answer is matched to the interrupt it was given for: an answer that names
+  other ids belongs to an interrupt that is no longer pending.
+
+  Reads every payload shape the framework produces: a HumanInTheLoop batch
+  (`:hitl_tool_call_ids`), a single in-tool interrupt (`:tool_call_id`), and a
+  `:multiple_interrupts` wrapper (the ids of its members). Returns `[]` for a
+  payload that names no tool calls.
+
+  ## Example
+
+      AgentUtils.interrupt_tool_call_ids(%{type: :ask_user_question, tool_call_id: "call_1"})
+      # => ["call_1"]
+
+  """
+  @spec interrupt_tool_call_ids(map() | nil) :: [String.t()]
+  def interrupt_tool_call_ids(%{type: :multiple_interrupts, interrupts: interrupts})
+      when is_list(interrupts) do
+    interrupts
+    |> Enum.flat_map(&interrupt_tool_call_ids/1)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  def interrupt_tool_call_ids(%{hitl_tool_call_ids: ids}) when is_list(ids),
+    do: ids |> Enum.uniq() |> Enum.sort()
+
+  def interrupt_tool_call_ids(%{tool_call_id: id}) when is_binary(id), do: [id]
+  def interrupt_tool_call_ids(_other), do: []
+
+  @doc """
   Changes that fully clear all interrupt-derived host state.
 
   Single source of truth for the complete set of `pending_*` /

@@ -250,6 +250,23 @@ defmodule Sagents.AgentServer do
         {:status_changed, :idle, nil} -> :ok
       end
 
+  ## Failed Calls
+
+  The lifecycle functions (`execute/1`, `cancel/1`, `dismiss_interrupt/1`,
+  `resume/2`, `add_message/3`, `reset/1`) return an error value rather than
+  exiting when the call to the agent fails. The value says whether the request
+  could have taken effect:
+
+  - `{:error, :agent_not_running}`: the request never reached a running agent.
+    It is safe to start the agent and send it again; `Sagents.Session` does
+    this for you.
+  - `{:error, {:outcome_unknown, reason}}`: the agent crashed while handling
+    the request, the call timed out, or the agent's node went away. The request
+    may have taken effect, so do not repeat it blindly. After a `resume/2`
+    that approved a tool, the tool may already be running.
+  - `{:error, :registry_unavailable}`: this node cannot look agents up, for
+    example while it drains during a rolling deploy.
+
   ## Forking
 
   Because agent configuration is never serialized, a conversation's history can
@@ -266,11 +283,14 @@ defmodule Sagents.AgentServer do
   alias Sagents.Agent
   alias Sagents.State
   alias Sagents.AgentSupervisor
+  alias Sagents.AgentUtils
   alias Sagents.UserRequest
   alias Sagents.Message.DisplayHelpers
   alias Sagents.Middleware
   alias Sagents.MiddlewareEntry
+  alias Sagents.Middleware.HumanInTheLoop
   alias Sagents.Persistence.StateSerializer
+  alias Sagents.PresenceWriter
   alias Sagents.ProcessRegistry
   alias Sagents.Publisher
   alias LangChain.Chains.LLMChain
@@ -323,6 +343,10 @@ defmodule Sagents.AgentServer do
       # Presence module for agent discovery (e.g., MyApp.Presence)
       # When set, agent tracks presence on "agent_server:presence" topic
       :presence_module,
+      # When this agent first tracked itself for discovery. Every presence write
+      # carries the entry's full metadata, so this has to stay stable for the
+      # life of the process.
+      :presence_started_at,
       # Monotonic counter bumped on each execute/resume. Turn casts carry their seq
       # so late messages from a cancelled or superseded run are rejected.
       execution_seq: 0,
@@ -372,11 +396,18 @@ defmodule Sagents.AgentServer do
       # Set only by `Sagents.Session.resume/4`, and only after `resume/2` returned
       # `{:error, :agent_not_running}`. Read exactly once, in
       # handle_continue(:broadcast_initial_state, _): applied if we booted
-      # `:interrupted`, dropped with a warning otherwise, and nil'd either way. So
-      # no handle_call/handle_info ever sees it set. Consuming it before the first
-      # broadcast is what lets a woken agent announce `:running` rather than an
-      # `:interrupted` snapshot it is about to leave. Never persisted.
-      pending_resume: nil
+      # `:interrupted` on the interrupt it answers, dropped with a warning
+      # otherwise, and nil'd either way. So no handle_call/handle_info ever sees
+      # it set. Consuming it before the first broadcast is what lets a woken
+      # agent announce `:running` rather than an `:interrupted` snapshot it is
+      # about to leave. Never persisted.
+      pending_resume: nil,
+      # The interrupt `pending_resume` answers, as the sorted tool call ids from
+      # `Sagents.AgentUtils.interrupt_tool_call_ids/1`, or nil when the caller did
+      # not say. The option rides in the supervisor's child spec, so every start
+      # of this server sees it again. The match is what stops an old answer from
+      # being applied to a later interrupt the user never saw.
+      pending_resume_for: nil
     ]
 
     @type t :: %__MODULE__{
@@ -406,12 +437,14 @@ defmodule Sagents.AgentServer do
             display_message_persistence: module() | nil,
             message_preprocessor: module() | nil,
             presence_module: module() | nil,
+            presence_started_at: DateTime.t() | nil,
             restored: boolean(),
             interrupt_persisted: boolean(),
             pending_message: LangChain.Message.t() | nil,
             final_candidate: {pos_integer(), list()} | nil,
             subagent_usage: %{String.t() => LangChain.TokenUsage.t()},
             pending_resume: term() | nil,
+            pending_resume_for: [String.t()] | nil,
             consecutive_auto_executions: non_neg_integer()
           }
   end
@@ -424,7 +457,10 @@ defmodule Sagents.AgentServer do
   ## Options
 
   - `:agent` - The Agent struct (required)
-  - `:initial_state` - Initial State (default: empty state)
+  - `:initial_state` - Initial State (default: empty state). With
+    `:agent_persistence`, used only when the conversation has nothing
+    persisted: every start loads the persisted state through
+    `c:Sagents.AgentPersistence.load_state/2`.
   - `:initial_subscribers` - List of `{channel, pid}` or `{channel, pid, opts}`
     tuples to enroll as subscribers before `init/1` returns. Use this to
     atomically start the server and subscribe — every event broadcast
@@ -441,7 +477,11 @@ defmodule Sagents.AgentServer do
     Set to `nil` or `:infinity` to disable automatic shutdown
   - `:shutdown_delay` - Delay in milliseconds to allow the supervisor to gracefully stop all children (default: 5000)
   - `:conversation_id` - Optional conversation identifier for message persistence (default: nil)
-  - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` for state snapshots (default: nil)
+  - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` for state snapshots (default: nil).
+    Every start, including a supervisor restart, loads the conversation from it.
+    A load that returns an error other than `{:error, :not_found}` fails the
+    start, so a fallback state never overwrites a conversation that could not
+    be read.
   - `:display_message_persistence` - Module implementing `Sagents.DisplayMessagePersistence` for display messages (default: nil)
   - `:pending_resume` - A resume payload to apply during boot, for an answer
     submitted while no process was alive to take it. Applied in
@@ -1730,11 +1770,79 @@ defmodule Sagents.AgentServer do
     end
   end
 
+  # Every start, first or restart, reads the conversation's current persisted
+  # state when `:agent_persistence` is configured. A supervisor restarts this
+  # process from the child spec it was first started with, so state captured
+  # in that spec is the conversation as it was when the supervisor started.
+  # Booting from it, and then persisting it, would erase every turn since.
+  # `:initial_state` is only the fallback for a conversation with nothing
+  # persisted yet.
   defp init_fresh(opts) do
     agent = Keyword.fetch!(opts, :agent)
-    initial_state = Keyword.get(opts, :initial_state) || State.new!()
 
+    case load_persisted_state(agent, opts) do
+      {:ok, persisted_state} ->
+        case init_from_persisted(
+               persisted_state,
+               Keyword.put(opts, :restore_agent_id, agent.agent_id)
+             ) do
+          {:stop, {:restore_failed, reason}} ->
+            # A conversation that cannot be read back is unrecoverable either
+            # way. Booting fresh at least gives the user a working agent.
+            Logger.warning(
+              "Failed to deserialize persisted state for #{agent.agent_id}, " <>
+                "using initial_state: #{inspect(reason)}"
+            )
+
+            init_with_initial_state(agent, opts)
+
+          result ->
+            result
+        end
+
+      :not_found ->
+        init_with_initial_state(agent, opts)
+
+      {:error, reason} ->
+        # Starting from the fallback state here would persist it over the real
+        # conversation at the next lifecycle point. Failing the start leaves the
+        # stored conversation untouched and lets the supervisor retry.
+        {:stop, {:load_failed, reason}}
+    end
+  end
+
+  defp init_with_initial_state(agent, opts) do
+    initial_state = Keyword.get(opts, :initial_state) || State.new!()
     build_server_state(agent, initial_state, opts)
+  end
+
+  defp load_persisted_state(agent, opts) do
+    case Keyword.get(opts, :agent_persistence) do
+      nil ->
+        :not_found
+
+      persistence ->
+        context = %{
+          agent_id: agent.agent_id,
+          conversation_id: Keyword.get(opts, :conversation_id)
+        }
+
+        case persistence.load_state(agent.scope, context) do
+          {:ok, persisted_state} when is_map(persisted_state) ->
+            Logger.info("Loaded persisted state for #{agent.agent_id}")
+            {:ok, persisted_state}
+
+          {:error, :not_found} ->
+            :not_found
+
+          {:error, reason} ->
+            Logger.error(
+              "Failed to load persisted state for #{agent.agent_id}: #{inspect(reason)}"
+            )
+
+            {:error, reason}
+        end
+    end
   end
 
   defp init_from_persisted(persisted_state, opts) do
@@ -1877,7 +1985,8 @@ defmodule Sagents.AgentServer do
       pending_message: Keyword.get(opts, :pending_message),
       # An interrupt response submitted while no process was alive to take it.
       # Applied in handle_continue/2 before the first broadcast.
-      pending_resume: Keyword.get(opts, :pending_resume)
+      pending_resume: Keyword.get(opts, :pending_resume),
+      pending_resume_for: Keyword.get(opts, :pending_resume_for)
     }
 
     # Start the inactivity timer
@@ -1943,7 +2052,10 @@ defmodule Sagents.AgentServer do
         execution_seq: server_state.execution_seq + 1
     }
 
-    new_state = reset_inactivity_timer(new_state)
+    new_state =
+      new_state
+      |> reset_inactivity_timer()
+      |> checkpoint_resume(resume_data)
 
     # Resume execution async (callbacks are built in resume_agent)
     task =
@@ -1952,6 +2064,50 @@ defmodule Sagents.AgentServer do
       end)
 
     Map.put(new_state, :task, task)
+  end
+
+  # An approval whose tools were running when the previous process stopped,
+  # restored because its tools allow running again (HumanInTheLoop `:recovery`).
+  # It is resumed with the decisions that were recorded before the tools
+  # started, through the same path as an answer submitted while asleep. Those
+  # decisions are the ones that were already acted on, so any other pending
+  # answer is set aside.
+  defp resume_in_flight(%ServerState{status: :interrupted} = server_state) do
+    case HumanInTheLoop.in_flight_decisions(server_state.interrupt_data) do
+      {:ok, decisions} ->
+        Logger.warning(
+          "Agent #{server_state.agent.agent_id} stopped while approved tool calls were " <>
+            "running. Running them again, as their tools allow."
+        )
+
+        %{
+          server_state
+          | pending_resume: decisions,
+            pending_resume_for: AgentUtils.interrupt_tool_call_ids(server_state.interrupt_data)
+        }
+
+      :none ->
+        server_state
+    end
+  end
+
+  defp resume_in_flight(%ServerState{} = server_state), do: server_state
+
+  # Approved tool calls are about to run. Record that they are running, and
+  # persist it, before the task that runs them exists: if this process stops
+  # before the run's result is persisted, the next boot finds the record and
+  # applies the tools' recovery policy rather than asking again or silently
+  # dropping work that may have happened. The marked state is also the rolling
+  # state, so a cancel, an error, or a shutdown during the run persists it too.
+  defp checkpoint_resume(%ServerState{} = server_state, resume_data) do
+    case HumanInTheLoop.resume_checkpoint(
+           server_state.state,
+           resume_data,
+           server_state.agent.middleware
+         ) do
+      {:ok, checkpoint} -> maybe_persist_state(%{server_state | state: checkpoint}, :on_resume)
+      :none -> server_state
+    end
   end
 
   # Consume a resume handed to us at start time by `Sagents.Session.resume/4`.
@@ -1964,12 +2120,23 @@ defmodule Sagents.AgentServer do
   defp apply_pending_resume(
          %ServerState{pending_resume: resume_data, status: :interrupted} = server_state
        ) do
-    Logger.info(
-      "Agent #{server_state.agent.agent_id} applying a resume submitted while it was not running"
-    )
+    if answers_current_interrupt?(server_state) do
+      Logger.info(
+        "Agent #{server_state.agent.agent_id} applying a resume submitted while it was not running"
+      )
 
-    %{server_state | pending_resume: nil}
-    |> start_resume(resume_data)
+      %{server_state | pending_resume: nil, pending_resume_for: nil}
+      |> start_resume(resume_data)
+    else
+      Logger.warning(
+        "Agent #{server_state.agent.agent_id} was given a pending resume for tool calls " <>
+          "#{inspect(server_state.pending_resume_for)}, but it is waiting on " <>
+          "#{inspect(AgentUtils.interrupt_tool_call_ids(server_state.interrupt_data))}. " <>
+          "Discarding the resume: it answers an interrupt that is no longer pending."
+      )
+
+      %{server_state | pending_resume: nil, pending_resume_for: nil}
+    end
   end
 
   # Booted into some other status: the interrupt was demoted as non-restorable
@@ -1985,16 +2152,38 @@ defmodule Sagents.AgentServer do
         "was either answered elsewhere or could not be restored."
     )
 
-    %{server_state | pending_resume: nil}
+    %{server_state | pending_resume: nil, pending_resume_for: nil}
   end
+
+  # An answer that does not say which interrupt it is for is applied to the
+  # pending one, which is all a caller could mean.
+  defp answers_current_interrupt?(%ServerState{pending_resume_for: nil}), do: true
+
+  defp answers_current_interrupt?(%ServerState{pending_resume_for: ids} = server_state) do
+    Enum.sort(ids) == AgentUtils.interrupt_tool_call_ids(server_state.interrupt_data)
+  end
+
+  # A HumanInTheLoop approval is one interrupt over a batch of tool calls, so
+  # each of its placeholders carries the same payload, and that payload is the
+  # interrupt exactly as it was raised. Every other interrupt is raised from
+  # inside a tool, one per result.
+  defp restore_interrupt_data(
+         [%{interrupt_data: %{hitl_tool_call_ids: _ids} = batch} | _rest] = results
+       ) do
+    if Enum.all?(results, &(&1.interrupt_data == batch)),
+      do: batch,
+      else: restore_tool_interrupt_data(results)
+  end
+
+  defp restore_interrupt_data(results), do: restore_tool_interrupt_data(results)
 
   # Mirror of LangChain's `extract_interrupt_data/1` — keep these in lockstep
   # so restored and freshly-fired interrupts surface identically.
-  defp restore_interrupt_data([single]) do
+  defp restore_tool_interrupt_data([single]) do
     Map.put(single.interrupt_data, :tool_call_id, single.tool_call_id)
   end
 
-  defp restore_interrupt_data(multiple) do
+  defp restore_tool_interrupt_data(multiple) do
     %{
       type: :multiple_interrupts,
       interrupts:
@@ -2041,7 +2230,10 @@ defmodule Sagents.AgentServer do
     # this server genuinely has once it has consumed everything it was handed.
     # Broadcasting :interrupted here and :running a microsecond later would
     # make every subscriber re-present a question that is already answered.
-    server_state = apply_pending_resume(server_state)
+    server_state =
+      server_state
+      |> resume_in_flight()
+      |> apply_pending_resume()
 
     # Broadcast initial status so UI knows agent is ready. When restored from
     # persisted state with a surviving (restorable) interrupt, this fires
@@ -2053,9 +2245,8 @@ defmodule Sagents.AgentServer do
       {:status_changed, server_state.status, server_state.interrupt_data}
     )
 
-    update_presence_status(server_state, server_state.status)
-
-    # Track presence for agent discovery (unconditional when configured)
+    # Track presence for agent discovery (unconditional when configured). The
+    # entry is created with the boot status, so no separate status update.
     server_state = track_presence(server_state)
 
     # Subscribe to presence topic to detect when viewers leave
@@ -2306,7 +2497,9 @@ defmodule Sagents.AgentServer do
               {State.cancel_pending_interrupts(new_state), :idle, nil}
 
             s when s in [:completed, :error, :cancelled] ->
-              {new_state, :idle, server_state.interrupt_data}
+              # A run that ended badly can leave interrupt placeholders behind
+              # (an approval whose resume failed). Nothing will answer them now.
+              {State.cancel_pending_interrupts(new_state), :idle, server_state.interrupt_data}
 
             _other ->
               {new_state, server_state.status, server_state.interrupt_data}
@@ -2558,7 +2751,7 @@ defmodule Sagents.AgentServer do
   @impl true
   def handle_cast({:turn_state_update, exec_seq, %LangChain.Message{} = message}, server_state) do
     if exec_seq == server_state.execution_seq and server_state.status == :running do
-      updated_messages = server_state.state.messages ++ [message]
+      updated_messages = append_turn_message(server_state.state.messages, message)
       updated_state = %{server_state.state | messages: updated_messages}
       new_server_state = %{server_state | state: updated_state}
 
@@ -2800,16 +2993,22 @@ defmodule Sagents.AgentServer do
 
     # If agent is actively running (has an LLM connection), wait for it to finish
     # This prevents corrupting conversations by killing TCP connections mid-stream
-    if server_state.status == :running and server_state.task != nil do
-      Logger.warning(
-        "AgentServer #{agent_id} terminating while status is :running. " <>
-          "Waiting for active task to complete. Reason: #{inspect(reason)}"
-      )
+    server_state =
+      if server_state.status == :running and server_state.task != nil do
+        Logger.warning(
+          "AgentServer #{agent_id} terminating while status is :running. " <>
+            "Waiting for active task to complete. Reason: #{inspect(reason)}"
+        )
 
-      # Wait up to 25 seconds for the task to complete naturally
-      # (must be less than the 30s shutdown timeout in child_spec)
-      wait_for_task_completion(server_state.task, 25_000)
-    end
+        # Wait up to 25 seconds for the task to complete naturally
+        # (must be less than the 30s shutdown timeout in child_spec)
+        case wait_for_task_completion(server_state.task, 25_000) do
+          {:ok, result} -> safely_adopt_final_result(server_state, result)
+          :none -> server_state
+        end
+      else
+        server_state
+      end
 
     # Cancel timer if present
     server_state = cancel_inactivity_timer(server_state)
@@ -2821,16 +3020,11 @@ defmodule Sagents.AgentServer do
       _kind, _reason -> :ok
     end
 
-    # Explicitly untrack from presence before exiting.
-    # This is a synchronous call to the Tracker, ensuring the presence_diff
-    # is broadcast before this process exits. Without this, the Tracker only
-    # learns about the exit via async :DOWN messages, which may not be processed
-    # before the Presence supervisor itself is terminated during shutdown.
-    try do
-      untrack_presence(server_state)
-    catch
-      _kind, _reason -> :ok
-    end
+    # On an orderly stop, release the discovery entry explicitly. The tracker
+    # only learns of an exit from its link, and during a node shutdown it may be
+    # stopped before it handles that, leaving the entry on every other node.
+    # Sagents.PresenceWriter stops after the agents and applies the write.
+    untrack_presence(server_state, reason)
 
     # Broadcast node transfer and shutdown events.
     # PubSub may already be shut down if the application is stopping,
@@ -2880,23 +3074,50 @@ defmodule Sagents.AgentServer do
 
   defp interrupt_restorable?(%ServerState{}), do: false
 
-  # Wait for an active Task to complete, with a timeout
+  # Wait for an active Task to complete, with a timeout. Returns the task's
+  # result when it finished.
   defp wait_for_task_completion(%Task{ref: ref}, max_wait_ms) do
     receive do
-      {^ref, _result} ->
+      {^ref, result} ->
         # Task completed, clean up the DOWN message
         Process.demonitor(ref, [:flush])
-        :ok
+        {:ok, result}
 
       {:DOWN, ^ref, :process, _pid, _reason} ->
         # Task process died
-        :ok
+        :none
     after
       max_wait_ms ->
         Logger.warning("Timed out waiting for active task during shutdown")
-        :ok
+        :none
     end
   end
+
+  # A run that finishes while the server is stopping has no handle_info left to
+  # deliver it. Persist what it produced, so its results (an approved tool's,
+  # for instance) are not lost with the process. Nothing else is done with it:
+  # the server is going away, so no new run may start and nothing is announced.
+  # Best-effort, like the :on_shutdown persist: the database may be stopping too.
+  defp safely_adopt_final_result(server_state, result) do
+    adopt_final_result(server_state, result)
+  catch
+    _kind, _reason -> server_state
+  end
+
+  defp adopt_final_result(server_state, {:ok, %State{} = new_state}),
+    do: maybe_persist_state(%{server_state | state: new_state}, :on_completion)
+
+  defp adopt_final_result(server_state, {:ok, %State{} = new_state, _extra}),
+    do: adopt_final_result(server_state, {:ok, new_state})
+
+  defp adopt_final_result(server_state, {:interrupt, %State{} = new_state, interrupt_data}),
+    do:
+      maybe_persist_state(
+        %{server_state | state: new_state, interrupt_data: interrupt_data},
+        :on_interrupt
+      )
+
+  defp adopt_final_result(server_state, _other), do: server_state
 
   ## Private Functions
 
@@ -3380,27 +3601,27 @@ defmodule Sagents.AgentServer do
   end
 
   defp maybe_shutdown_if_no_viewers(server_state) do
-    case server_state.presence_config do
-      %{enabled: true, presence_module: presence_mod, topic: topic, check_delay: delay} ->
-        # Check who's viewing this agent's conversation
-        viewers = presence_mod.list(topic)
+    case viewer_count(server_state) do
+      {:ok, 0} ->
+        Logger.info(
+          "Agent #{server_state.agent.agent_id} idle with no viewers, " <>
+            "scheduling shutdown to free resources"
+        )
 
-        if map_size(viewers) == 0 do
-          Logger.info(
-            "Agent #{server_state.agent.agent_id} idle with no viewers, " <>
-              "scheduling shutdown to free resources"
-          )
+        # Schedule shutdown after brief delay (let final events propagate)
+        Process.send_after(self(), :shutdown_no_viewers, server_state.presence_config.check_delay)
 
-          # Schedule shutdown after brief delay (let final events propagate)
-          Process.send_after(self(), :shutdown_no_viewers, delay)
-        else
-          Logger.debug(
-            "Agent #{server_state.agent.agent_id} idle but has #{map_size(viewers)} " <>
-              "viewers, keeping alive"
-          )
-        end
+      {:ok, count} ->
+        Logger.debug(
+          "Agent #{server_state.agent.agent_id} idle but has #{count} viewers, keeping alive"
+        )
 
-      _other ->
+      :unknown ->
+        # Presence is degraded. Stopping now would stop idle agents exactly when
+        # presence cannot be trusted; the inactivity timeout remains the backstop.
+        :ok
+
+      :disabled ->
         # Presence tracking disabled, use standard inactivity timeout
         :ok
     end
@@ -3408,18 +3629,37 @@ defmodule Sagents.AgentServer do
 
   # Whether the conversation this agent backs is currently unwatched.
   #
-  # Answers `false` when presence tracking is off. Callers read a `true` here as
-  # grounds to stop the agent, and "nobody is watching" is only a meaningful
-  # answer when somebody could have been watching.
+  # Answers `false` when presence tracking is off or the viewer list could not
+  # be read. Callers read a `true` here as grounds to stop the agent, and
+  # "nobody is watching" is only a meaningful answer when somebody could have
+  # been watching and we could see them.
   defp no_viewers?(server_state) do
-    case server_state.presence_config do
-      %{enabled: true, presence_module: presence_mod, topic: topic} ->
-        map_size(presence_mod.list(topic)) == 0
-
-      _other ->
-        false
-    end
+    viewer_count(server_state) == {:ok, 0}
   end
+
+  # How many viewers the agent's conversation has.
+  #
+  # Listing is a GenServer.call to a tracker shard, which exits on timeout while
+  # the shard is backed up, and raises when the tracker is not running. Either
+  # one answers `:unknown` rather than taking the agent down.
+  defp viewer_count(%ServerState{
+         presence_config: %{enabled: true, presence_module: presence_mod, topic: topic}
+       }) do
+    {:ok, map_size(presence_mod.list(topic))}
+  rescue
+    error ->
+      Logger.warning("Could not list presence for #{inspect(topic)}: #{inspect(error)}")
+      :unknown
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "Could not list presence for #{inspect(topic)}: #{inspect(reason, limit: 5)}"
+      )
+
+      :unknown
+  end
+
+  defp viewer_count(%ServerState{}), do: :disabled
 
   # Subscribe to the presence topic to receive presence_diff broadcasts
   # This allows the agent to detect when viewers leave while idle
@@ -4679,11 +4919,43 @@ defmodule Sagents.AgentServer do
 
   defp build_middleware_entries(_other), do: []
 
+  # A tool message that answers every call of a trailing placeholder message
+  # (an interrupt's stand-in results) takes that message's place. Appending it
+  # instead would give those calls two results each.
+  defp append_turn_message(messages, %LangChain.Message{role: :tool} = message) do
+    case List.last(messages) do
+      %LangChain.Message{role: :tool, tool_results: [_first | _rest] = placeholders} ->
+        answered = MapSet.new(message.tool_results || [], & &1.tool_call_id)
+
+        if Enum.all?(
+             placeholders,
+             &(&1.is_interrupt and MapSet.member?(answered, &1.tool_call_id))
+           ),
+           do: Enum.drop(messages, -1) ++ [message],
+           else: messages ++ [message]
+
+      _other ->
+        messages ++ [message]
+    end
+  end
+
+  defp append_turn_message(messages, message), do: messages ++ [message]
+
   ## Agent Presence Tracking
   #
   # These functions enable discovery of running agents in real-time
   # via Phoenix.Presence. When presence_module is configured,
   # the agent tracks its presence on the "agent_server:presence" topic.
+  #
+  # Every write goes through Sagents.PresenceWriter, which makes the tracker call
+  # on this process's behalf. A tracker call blocks for up to 5 seconds while
+  # its shard is backed up, and its timeout is an exit, so an agent that made
+  # the call itself would stall on every status change and then terminate.
+  # Presence is advisory; it must never cost the agent its run.
+  #
+  # Each write carries the entry's full metadata. The writer tracks the entry
+  # when the tracker does not have it, so a write lost to a failure is restored
+  # by the next one.
 
   # Track presence for agent discovery
   # Called in handle_continue(:broadcast_initial_state, ...)
@@ -4693,15 +4965,34 @@ defmodule Sagents.AgentServer do
   end
 
   defp track_presence(%ServerState{} = server_state) do
-    presence_mod = server_state.presence_module
-    agent_id = server_state.agent.agent_id
     now = DateTime.utc_now()
+    server_state = %{server_state | presence_started_at: now}
+    put_presence(server_state, server_state.status, now)
+    server_state
+  end
 
-    # Build base metadata with started_at AND last_activity_at
+  # Update presence metadata when status changes
+  # Called whenever status changes (execute, complete, interrupt, error, etc.)
+  defp update_presence_status(%ServerState{presence_module: nil}, _new_status), do: :ok
+
+  defp update_presence_status(%ServerState{} = server_state, new_status) do
+    put_presence(server_state, new_status)
+  end
+
+  # Update last_activity_at without status change (e.g., on touch)
+  # Called from touch handler to update presence metadata for activity tracking
+  defp update_presence_activity(%ServerState{presence_module: nil}), do: :ok
+
+  defp update_presence_activity(%ServerState{} = server_state) do
+    put_presence(server_state, server_state.status)
+  end
+
+  defp put_presence(%ServerState{} = server_state, status, now \\ DateTime.utc_now()) do
+    # Node is always included to ensure correct metadata after Horde migration
     base_metadata = %{
-      started_at: now,
+      started_at: server_state.presence_started_at || now,
       last_activity_at: now,
-      status: server_state.status,
+      status: status,
       conversation_id: server_state.conversation_id,
       node: node()
     }
@@ -4714,112 +5005,58 @@ defmodule Sagents.AgentServer do
         nil -> base_metadata
       end
 
-    case Sagents.Presence.track(
-           presence_mod,
-           @agent_presence_topic,
-           agent_id,
-           metadata
-         ) do
-      {:ok, _ref} ->
-        Logger.debug("Agent #{agent_id} tracked for presence discovery")
-        server_state
-
-      {:error, reason} ->
-        Logger.warning(
-          "Failed to track agent #{agent_id} for presence discovery: #{inspect(reason)}"
-        )
-
-        server_state
-    end
+    PresenceWriter.put(
+      server_state.presence_module,
+      self(),
+      @agent_presence_topic,
+      server_state.agent.agent_id,
+      metadata
+    )
   end
 
-  # Update presence metadata when status changes
-  # Called whenever status changes (execute, complete, interrupt, error, etc.)
-  defp update_presence_status(%ServerState{presence_module: nil}, _new_status) do
-    # No presence module configured, skip update
+  # Release the discovery entry on an orderly stop, so the leave is broadcast
+  # before the node's tracker stops. On a crash there is nothing to do: the
+  # tracker is linked to this process and removes the entry when it exits.
+  defp untrack_presence(%ServerState{presence_module: nil}, _reason), do: :ok
+
+  defp untrack_presence(%ServerState{} = server_state, reason) do
+    if orderly_stop?(reason) do
+      PresenceWriter.remove(
+        server_state.presence_module,
+        self(),
+        @agent_presence_topic,
+        server_state.agent.agent_id
+      )
+    end
+
     :ok
   end
 
-  defp update_presence_status(%ServerState{} = server_state, new_status) do
-    presence_mod = server_state.presence_module
-    agent_id = server_state.agent.agent_id
+  defp orderly_stop?(:normal), do: true
+  defp orderly_stop?(:shutdown), do: true
+  defp orderly_stop?({:shutdown, _detail}), do: true
+  defp orderly_stop?(_reason), do: false
 
-    # Update status, last_activity_at, and node together
-    # Node is always included to ensure correct metadata after Horde migration
-    case Sagents.Presence.update(
-           presence_mod,
-           @agent_presence_topic,
-           agent_id,
-           %{status: new_status, last_activity_at: DateTime.utc_now(), node: node()}
-         ) do
-      {:ok, _ref} ->
-        :ok
-
-      {:error, :not_tracked} ->
-        # Agent not tracked, this can happen in race conditions during shutdown
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Failed to update presence status for #{agent_id}: #{inspect(reason)}")
-        :ok
-    end
-  end
-
-  # Update last_activity_at without status change (e.g., on touch)
-  # Called from touch handler to update presence metadata for activity tracking
-  defp update_presence_activity(%ServerState{presence_module: nil}), do: :ok
-
-  defp update_presence_activity(%ServerState{} = server_state) do
-    presence_mod = server_state.presence_module
-    agent_id = server_state.agent.agent_id
-
-    # Node is always included to ensure correct metadata after Horde migration
-    case Sagents.Presence.update(
-           presence_mod,
-           @agent_presence_topic,
-           agent_id,
-           %{last_activity_at: DateTime.utc_now(), node: node()}
-         ) do
-      {:ok, _ref} ->
-        :ok
-
-      {:error, :not_tracked} ->
-        # Agent not tracked, this can happen in race conditions during shutdown
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Failed to update presence activity for #{agent_id}: #{inspect(reason)}")
-        :ok
-    end
-  end
-
-  # Explicitly untrack presence during terminate/2.
-  # This is synchronous, ensuring the presence_diff is broadcast before the process exits.
-  defp untrack_presence(%ServerState{presence_module: nil}), do: :ok
-
-  defp untrack_presence(%ServerState{} = server_state) do
-    presence_mod = server_state.presence_module
-    agent_id = server_state.agent.agent_id
-
-    Sagents.Presence.untrack(presence_mod, @agent_presence_topic, agent_id)
-  end
-
-  # Wrap GenServer.call against an agent with try/catch so callers get a clear
-  # {:error, :agent_not_running} tuple when the AgentServer has shut down
-  # (inactivity timeout, supervisor restart, Horde migration in flight) instead
-  # of a raw `(EXIT) no process` signal.
+  # Wrap GenServer.call against an agent so a failed call becomes a value the
+  # caller can act on rather than a raw exit signal. The value says whether the
+  # request could have run, because the two cases need opposite responses:
   #
-  # Same intent as the existing pattern in `get_metadata/1` and `get_agent/1`,
-  # but routed through the registry so a single helper covers every
-  # lifecycle-action callsite (execute/1, cancel/1, resume/2, add_message/2,
-  # reset/1).
+  # - `{:error, :agent_not_running}`: the request never reached a live server.
+  #   The lookup found no process, the call exited `:noproc`, or the server
+  #   stopped (`:normal` / `:shutdown`) with the request still in its mailbox.
+  #   No handle_call in this module stops the server, so a request it handled
+  #   was always answered first. Starting the agent and asking again is safe.
+  # - `{:error, {:outcome_unknown, reason}}`: anything else. The server crashed
+  #   while handling the request, the call timed out, or the node went away.
+  #   The request may have taken effect, so repeating it can repeat its work.
+  #   An approved tool may already be running.
   #
   # Resolves the pid through fetch_pid/1 rather than handing GenServer.call a
   # via-tuple. GenServer.call resolves a via name itself, and that resolution
   # raises out of :ets while this node's registry is unavailable, which covers
   # the whole drain window of a rolling deploy. fetch_pid/1 makes it a value the
   # caller can act on, so this helper is the single guard point for the
-  # lifecycle API.
+  # lifecycle API (execute/1, cancel/1, resume/2, add_message/2, reset/1).
   defp safe_call(agent_id, request, timeout \\ 5000) do
     case fetch_pid(agent_id) do
       {:ok, pid} -> GenServer.call(pid, request, timeout)
@@ -4827,8 +5064,15 @@ defmodule Sagents.AgentServer do
       {:error, :registry_unavailable} = error -> error
     end
   catch
-    :exit, _reason -> {:error, :agent_not_running}
+    :exit, {reason, {GenServer, :call, _args}} -> call_exit_error(reason)
+    :exit, reason -> call_exit_error(reason)
   end
+
+  defp call_exit_error(reason) when reason in [:noproc, :normal, :shutdown],
+    do: {:error, :agent_not_running}
+
+  defp call_exit_error({:shutdown, _detail}), do: {:error, :agent_not_running}
+  defp call_exit_error(reason), do: {:error, {:outcome_unknown, reason}}
 
   # For calls whose return shape has no room for an error tuple. Raises a named
   # Sagents.RegistryUnavailableError when the registry cannot answer, so the

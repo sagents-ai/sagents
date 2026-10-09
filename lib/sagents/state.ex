@@ -587,6 +587,20 @@ defmodule Sagents.State do
     demote(tr, :incompatible)
   end
 
+  # An approval whose tools were running when the agent stopped. Unless it is
+  # restored to run again, each call's result says what is known about it.
+  defp maybe_demote(
+         %LangChain.Message.ToolResult{
+           is_interrupt: true,
+           interrupt_data: %{in_flight: _in_flight}
+         } = tr,
+         middleware
+       ) do
+    if interrupt_restorable?(tr.interrupt_data, middleware),
+      do: tr,
+      else: demote(tr, :in_flight)
+  end
+
   defp maybe_demote(
          %LangChain.Message.ToolResult{is_interrupt: true, interrupt_data: data} = tr,
          middleware
@@ -669,6 +683,23 @@ defmodule Sagents.State do
         is_error: true,
         interrupt_data: nil
     }
+  end
+
+  defp demote(%{interrupt_data: %{in_flight: %{outcomes: outcomes}}} = tr, :in_flight) do
+    # Worded like the results a completed run records, so the model reads a
+    # rejected call the same way either way.
+    {content, is_error} =
+      case Map.get(outcomes, tr.tool_call_id) do
+        :rejected ->
+          {"Tool call '#{tr.name}' was rejected by a human reviewer.", false}
+
+        _started ->
+          {"Tool call '#{tr.name}' was approved and started, but the agent stopped " <>
+             "before its result was recorded. Its outcome is unknown: it may or may " <>
+             "not have taken effect. Check before running it again.", true}
+      end
+
+    %{tr | content: content, is_interrupt: false, is_error: is_error, interrupt_data: nil}
   end
 
   defp demote(tr, :incompatible) do
@@ -755,6 +786,7 @@ defmodule Sagents.State do
   defp demote_for_cancel(%LangChain.Message.ToolResult{is_interrupt: true} = tr) do
     case tr.interrupt_data do
       %{type: :halt, message: msg} -> demote(tr, {:halted, msg})
+      %{in_flight: %{outcomes: _outcomes}} -> demote(tr, :in_flight)
       _other -> demote(tr, :user_cancelled)
     end
   end

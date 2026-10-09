@@ -76,6 +76,7 @@ defmodule Sagents.LocalRegistryTest do
         start_detached_supervisor()
       end)
 
+      writer = Process.whereis(Sagents.PresenceWriter)
       before = child_pids()
 
       registry = Process.whereis(Sagents.Registry)
@@ -95,6 +96,10 @@ defmodule Sagents.LocalRegistryTest do
       for {id, old_pid} <- before do
         assert after_[id] != old_pid, "#{inspect(id)} should have been restarted"
       end
+
+      # The presence writer is listed before the registry and holds no
+      # registrations, so it is not part of the chain.
+      assert Process.whereis(Sagents.PresenceWriter) == writer
 
       # And the replacement registry actually answers.
       assert Sagents.ProcessRegistry.available?()
@@ -122,10 +127,12 @@ defmodule Sagents.LocalRegistryTest do
     end
   end
 
+  # The registry and the children that depend on it.
   defp child_pids do
     Sagents.Supervisor
     |> Supervisor.which_children()
     |> Map.new(fn {id, pid, _type, _mods} -> {id, pid} end)
+    |> Map.delete(Sagents.PresenceWriter)
   end
 
   defp wait_for_restart(before, attempts \\ 50) do

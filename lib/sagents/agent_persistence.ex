@@ -23,6 +23,7 @@ defmodule Sagents.AgentPersistence do
   | `:on_cancel` | Execution cancelled by user | Preserves rolling state up to cancel point |
   | `:on_error` | Agent execution fails (status → :error) | Preserves state up to the error |
   | `:on_interrupt` | Execution paused for HITL approval (status → :interrupted) | Preserves interrupt context |
+  | `:on_resume` | Approved tool calls are about to run | Persisted before any approved tool starts. Records the decisions, so a restart before the run finishes applies the tools' recovery policy (see `Sagents.Middleware.HumanInTheLoop`) |
   | `:on_title_generated` | Conversation title auto-generated | State includes updated metadata |
   | `:on_shutdown` | Agent process terminating (inactivity timeout, node shutdown) | Best-effort — DB may also be shutting down |
 
@@ -44,6 +45,7 @@ defmodule Sagents.AgentPersistence do
           | :on_cancel
           | :on_error
           | :on_interrupt
+          | :on_resume
           | :on_title_generated
           | :on_shutdown
 

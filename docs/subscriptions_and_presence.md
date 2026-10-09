@@ -129,6 +129,20 @@ For each entry in `payload.joins`, the subscriber upgrades any matching
 `:pending` subscriptions to `:subscribed` and re-installs the producer
 monitor.
 
+The agent does not make these tracker calls itself. Every `Phoenix.Tracker`
+write is a `GenServer.call` with a 5 second timeout, and every agent's
+discovery entry lives on the same tracker shard, because the tracker shards by
+topic and this topic is constant. Under load that shard falls behind. So the
+agent casts each write to `Sagents.PresenceWriter`, a per-node process started
+by `Sagents.Supervisor`, which makes the call on the agent's behalf. A slow or
+failed write is logged and dropped; it never stalls or stops the agent. Each
+write carries the entry's full metadata and recreates the entry if the tracker
+lost it, so the next status change repairs a dropped one.
+
+Start your `Phoenix.Presence` before `Sagents.Supervisor`. The writer stops
+after the agents and releases their entries on the way down, which needs the
+tracker still running.
+
 This is what makes the load path safe: a LiveView opening a conversation
 can call `Subscriber.subscribe_to_agent(subs, agent_id)` even if the agent
 isn't running yet — the sub is recorded as `:pending`, and the next time
@@ -447,6 +461,12 @@ The agent then:
    `:shutdown_no_viewers` after `check_delay`.
 4. Subscribers receive `{:agent, {:agent_shutdown, %{reason: :no_viewers}}}`
    and the process terminates.
+
+The viewer list is read with a tracker call. If that call fails (it times out
+while the shard is backed up, or the tracker is not running), the agent treats
+the viewer count as unknown and stays up. Stopping on an unknown count would
+stop idle agents exactly when presence cannot be trusted; the inactivity
+timeout still applies.
 
 ### The host's side: track and release on the switch
 

@@ -34,6 +34,41 @@ defmodule Sagents.Middleware.HumanInTheLoop do
   - `:edit` - Execute the tool with modified arguments
   - `:reject` - Skip tool execution entirely
 
+  ### Recovery
+
+  An approved tool can be interrupted by the agent process stopping (a crash,
+  a deploy, a lost node) after it has started and before its result is
+  recorded. `:recovery` says what the next boot does about it:
+
+  - `:report_unknown` (default) - Record a result telling the model the call
+    was started and its outcome is unknown, so the model can check before
+    trying again. The call is never re-run on its own.
+  - `:reexecute` - Run the approved calls again, with the same decisions. Only
+    for tools that are safe to repeat, for example because they are idempotent
+    by `tool_call_id` (available as `context.tool_call_id`).
+
+  A batch is re-run only when every call in it that was started is
+  `:reexecute`. A tool call that does not need approval but was in the same
+  batch counts as `:report_unknown`.
+
+      interrupt_on = %{
+        "set_thermostat" => %{allowed_decisions: [:approve, :reject], recovery: :reexecute},
+        "send_payment" => true
+      }
+
+  ## Durability
+
+  An interrupt survives the agent process. When approval is needed, the
+  conversation gets a tool message holding one placeholder result per pending
+  tool call, each carrying this interrupt's data, and it is persisted with the
+  state. A later boot rebuilds the interrupt from it and comes up
+  `:interrupted`.
+
+  When approval is given, the placeholders are marked as running, with the
+  decisions and the recovery policy, and that is persisted before any tool
+  runs. If the agent stops before the run's result is persisted, the next boot
+  applies the recovery policy instead of asking again or dropping the calls.
+
   ## Usage
 
       # Create agent with HITL middleware
@@ -207,10 +242,12 @@ defmodule Sagents.Middleware.HumanInTheLoop do
   alias Sagents.AgentServer
   alias LangChain.Message
   alias LangChain.Message.ToolCall
+  alias LangChain.Message.ToolResult
   alias LangChain.Chains.LLMChain
 
   @type interrupt_config :: %{
-          allowed_decisions: [atom()]
+          required(:allowed_decisions) => [atom()],
+          optional(:recovery) => :report_unknown | :reexecute
         }
 
   @type interrupt_on_config :: %{
@@ -236,6 +273,9 @@ defmodule Sagents.Middleware.HumanInTheLoop do
         }
 
   @default_decisions [:approve, :edit, :reject]
+  @recovery_policies [:report_unknown, :reexecute]
+
+  @placeholder_content "Waiting for a human to review this tool call."
 
   @doc """
   Conditionally append HumanInTheLoop middleware to a middleware list.
@@ -298,7 +338,12 @@ defmodule Sagents.Middleware.HumanInTheLoop do
     {:ok, config}
   end
 
+  # A batch whose approved calls were running when the agent stopped is
+  # restored only when it is to be run again. Otherwise the stale-interrupt
+  # sweep records each call's outcome (see Sagents.State.clean_stale_interrupts/2).
   @impl true
+  def restorable_interrupt?(%{in_flight: %{recovery: recovery}}), do: recovery == :reexecute
+
   def restorable_interrupt?(%{action_requests: action_requests})
       when is_list(action_requests),
       do: true
@@ -430,7 +475,18 @@ defmodule Sagents.Middleware.HumanInTheLoop do
 
   defp execute_approved_tools(agent, state, decisions, opts) do
     messages = state.messages
-    callbacks = Keyword.get(opts, :callbacks)
+
+    # The approved tools run in a chain built here, outside Agent.execute/3, so
+    # the agent's middleware callbacks are merged in here the same way
+    # execute/3 merges them. Otherwise a middleware's tool callbacks would not
+    # see the very executions a human approved. Agent.resume/4 hands `opts`
+    # on to execute/3 afterwards, which merges them again for its own chain,
+    # so they are not merged before this point.
+    callbacks = AgentUtils.resolve_callbacks(agent.middleware, opts)
+
+    # The placeholders stand in for the results about to be produced. The
+    # chain must not see them, and the real results replace them.
+    {messages, state} = drop_approval_placeholders(messages, state)
 
     if Enum.all?(messages, &is_struct(&1, Message)) do
       with {:ok, chain} <- Agent.build_chain(agent, messages, state, callbacks),
@@ -476,6 +532,156 @@ defmodule Sagents.Middleware.HumanInTheLoop do
     end
   end
 
+  @doc """
+  Append the placeholder tool message for an approval interrupt to `chain`.
+
+  Called by `Sagents.Mode.Steps.check_pre_tool_hitl/2` when it interrupts. The
+  message answers every tool call of the last assistant message with a
+  placeholder result carrying `interrupt_data`, so the interrupt is persisted
+  with the conversation and a later boot can rebuild it. The tool calls are
+  held as a batch, so all of them get one, not only the gated ones.
+  """
+  @spec add_approval_placeholders(LLMChain.t(), interrupt_data()) :: LLMChain.t()
+  def add_approval_placeholders(
+        %LLMChain{last_message: %Message{role: :assistant, tool_calls: [_first | _rest] = calls}} =
+          chain,
+        interrupt_data
+      ) do
+    results =
+      Enum.map(calls, fn %ToolCall{} = call ->
+        ToolResult.new!(%{
+          tool_call_id: call.call_id,
+          name: call.name,
+          content: @placeholder_content,
+          is_interrupt: true,
+          interrupt_data: interrupt_data
+        })
+      end)
+
+    LLMChain.add_message(chain, Message.new_tool_result!(%{content: nil, tool_results: results}))
+  end
+
+  def add_approval_placeholders(%LLMChain{} = chain, _interrupt_data), do: chain
+
+  @doc """
+  The state to persist before approved tool calls start running, or `:none`.
+
+  Marks each placeholder of the pending approval as running: its interrupt data
+  gains `:in_flight`, which records the decisions, what each call is about to
+  do (`:started`, or `:rejected` when a human rejected it), and the batch's
+  recovery policy. A boot that finds the marks applies the policy (see
+  "Recovery" in the moduledoc).
+
+  Returns `:none` when there is nothing to mark: no HumanInTheLoop entry in
+  `middleware`, a pending interrupt that is not an approval, decisions that do
+  not validate (the resume fails before any tool runs), or a conversation that
+  does not end in this approval's placeholders.
+  """
+  @spec resume_checkpoint(State.t(), term(), [Sagents.MiddlewareEntry.t()]) ::
+          {:ok, State.t()} | :none
+  def resume_checkpoint(
+        %State{interrupt_data: %{hitl_tool_call_ids: _ids} = interrupt_data} = state,
+        decisions,
+        middleware
+      )
+      when is_list(decisions) do
+    with %Sagents.MiddlewareEntry{config: config} <- find_entry(middleware),
+         {:ok, _state} <- process_decisions(state, decisions, config),
+         %Message{role: :tool, tool_results: placeholders} <- trailing_placeholders(state),
+         {:ok, pairs} <-
+           AgentUtils.pair_decisions(Map.get(interrupt_data, :action_requests, []), decisions) do
+      decided = Map.new(pairs, fn {request, decision} -> {request.tool_call_id, decision} end)
+
+      outcomes =
+        Map.new(placeholders, fn result ->
+          case Map.get(decided, result.tool_call_id) do
+            %{type: :reject} -> {result.tool_call_id, :rejected}
+            _other -> {result.tool_call_id, :started}
+          end
+        end)
+
+      in_flight = %{
+        decisions: decisions,
+        outcomes: outcomes,
+        recovery: batch_recovery(placeholders, outcomes, config.interrupt_on)
+      }
+
+      marked = Map.put(Map.delete(interrupt_data, :in_flight), :in_flight, in_flight)
+      results = Enum.map(placeholders, &%{&1 | interrupt_data: marked})
+      {:ok, replace_last_message(state, %{List.last(state.messages) | tool_results: results})}
+    else
+      _other -> :none
+    end
+  end
+
+  def resume_checkpoint(%State{}, _decisions, _middleware), do: :none
+
+  @doc """
+  The decisions to run again for an approval that was running when the agent
+  stopped and whose tools allow it, or `:none`.
+
+  Reads the `:in_flight` mark that `resume_checkpoint/3` records. A boot that
+  restores such an interrupt resumes it with these decisions before it
+  announces any status.
+  """
+  @spec in_flight_decisions(map() | nil) :: {:ok, [decision()]} | :none
+  def in_flight_decisions(%{in_flight: %{recovery: :reexecute, decisions: decisions}})
+      when is_list(decisions),
+      do: {:ok, decisions}
+
+  def in_flight_decisions(_interrupt_data), do: :none
+
+  defp find_entry(middleware) do
+    Enum.find(middleware, &match?(%Sagents.MiddlewareEntry{module: __MODULE__}, &1))
+  end
+
+  # The trailing tool message, if it holds only this middleware's placeholders.
+  defp trailing_placeholders(%State{messages: messages}) do
+    case List.last(messages) do
+      %Message{role: :tool, tool_results: [_first | _rest] = results} = message ->
+        if Enum.all?(results, &approval_placeholder?/1), do: message, else: nil
+
+      _other ->
+        nil
+    end
+  end
+
+  defp approval_placeholder?(%ToolResult{
+         is_interrupt: true,
+         interrupt_data: %{hitl_tool_call_ids: _ids}
+       }),
+       do: true
+
+  defp approval_placeholder?(_result), do: false
+
+  defp drop_approval_placeholders(messages, state) do
+    case trailing_placeholders(state) do
+      nil ->
+        {messages, state}
+
+      _placeholders ->
+        kept = Enum.drop(messages, -1)
+        {kept, %{state | messages: kept}}
+    end
+  end
+
+  defp replace_last_message(%State{messages: messages} = state, message) do
+    %{state | messages: Enum.drop(messages, -1) ++ [message]}
+  end
+
+  # Re-running is all or nothing: the calls of a batch were decided together
+  # and are replayed together.
+  defp batch_recovery(placeholders, outcomes, interrupt_on) do
+    started = Enum.filter(placeholders, &(Map.get(outcomes, &1.tool_call_id) == :started))
+
+    if started != [] and
+         Enum.all?(started, fn result ->
+           match?(%{recovery: :reexecute}, Map.get(interrupt_on, result.name))
+         end),
+       do: :reexecute,
+       else: :report_unknown
+  end
+
   # Build full decisions array matching ALL tool calls.
   # Auto-approve non-HITL tools, use human decisions for HITL tools.
   defp build_full_decisions(all_tool_calls, decisions, interrupt_data) do
@@ -490,6 +696,16 @@ defmodule Sagents.Middleware.HumanInTheLoop do
   # Private functions
 
   defp normalize_interrupt_config(interrupt_on) when is_map(interrupt_on) do
+    Enum.each(interrupt_on, fn
+      {tool_name, %{recovery: recovery}} when recovery not in @recovery_policies ->
+        raise ArgumentError,
+              "invalid :recovery #{inspect(recovery)} for #{inspect(tool_name)}, " <>
+                "expected one of #{inspect(@recovery_policies)}"
+
+      _valid ->
+        :ok
+    end)
+
     Map.new(interrupt_on, fn
       {tool_name, true} when is_binary(tool_name) ->
         {tool_name, %{allowed_decisions: @default_decisions}}

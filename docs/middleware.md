@@ -442,6 +442,14 @@ Only return `true` if your resume path needs **no in-memory context** beyond the
 
 The framework looks for either a `:type` discriminator (the recommended convention) or a structural signature. `AskUserQuestion` uses `%{type: :ask_user_question, ...}`; `HumanInTheLoop` matches structurally on `%{action_requests: list, ...}`. Pick whichever cleanly identifies your interrupt without false positives against other middleware's data.
 
+#### Interrupts that come before any tool runs
+
+Restoration reads the interrupted tool results in the conversation's trailing tool message, so an interrupt is durable only if it is recorded there. An interrupt raised from inside a tool is, by the tool's own placeholder result. A `HumanInTheLoop` approval is raised before any tool runs, so `Sagents.Mode.Steps.check_pre_tool_hitl/2` appends a placeholder result for each tool call of the batch, each carrying the approval's `interrupt_data`. A restored approval boots `:interrupted` with the same `interrupt_data` it was raised with, and resuming it replaces the placeholders with the real results.
+
+#### Approved tool calls interrupted mid-run
+
+Before the approved tools start, `HumanInTheLoop` marks the placeholders as running, with the decisions, and the AgentServer persists that (lifecycle `:on_resume`). If the process stops before the run's result is persisted, the next boot applies the tools' `:recovery` policy, configured per tool in `interrupt_on`: by default each started call gets an error result saying its outcome is unknown, and with `recovery: :reexecute` on every started call of the batch, the boot runs the batch again with the recorded decisions. See `Sagents.Middleware.HumanInTheLoop`.
+
 #### Schema evolution and the failure floor
 
 Persisted `interrupt_data` is decoded with `:erlang.binary_to_term/2` in `:safe` mode, which rejects unknown atoms instead of bloating the atom table. If you change the shape of your `interrupt_data` (rename a field, drop an atom value), old persisted rows may fail to decode. Both decode failures and resume-time crashes are caught and demoted to an error result — the conversation continues, the LLM re-asks if needed.

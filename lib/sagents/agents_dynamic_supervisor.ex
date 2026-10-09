@@ -68,7 +68,7 @@ defmodule Sagents.AgentsDynamicSupervisor do
     - `:agent` - The Agent struct (required unless `:builder` is given)
     - `:builder` - `{module, function, args}` that builds the start options on
       the node hosting the agent. See `Sagents.AgentSupervisor.start_link/1`.
-    - `:initial_state` - Initial State for AgentServer (optional)
+    - `:initial_state` - State for a conversation with nothing persisted (optional)
     - `:pubsub` - PubSub configuration as `{module(), atom()}` tuple (optional, used only for `Phoenix.Presence` wiring)
     - `:inactivity_timeout` - Timeout in milliseconds (optional)
     - `:shutdown_delay` - Shutdown delay in milliseconds (optional)
