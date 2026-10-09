@@ -1,5 +1,99 @@
 # Changelog
 
+## v0.17.0
+
+A big release. Two changes make agents more fit for production work that is billed
+and approved:
+
+- **User requests.** Each human message, and all the work done for it, is now
+  one numbered *user request*. It covers every run, model turn, tool call,
+  sub-agent, summarization, and `ask_user` or HITL pause it took. Each message
+  and display row carries its request number. When a request finishes, the
+  host is told its status, final answer, and total token usage, including
+  sub-agents and summarization. That is what you need to fold a finished
+  request's work behind its answer in the UI, or to bill per request. The
+  demo app does both.
+- **Agent resilience and durable approvals.** A slow or backed-up
+  `Phoenix.Presence` can no longer crash an agent. A restarted agent resumes
+  from the latest persisted conversation rather than an older snapshot. A
+  pending HITL approval, and a tool the user already approved, now survive the
+  agent process. An agent that crashes or moves to another node comes back
+  still waiting for the approval, and an approved tool's side effect is never
+  silently lost.
+
+**Neither change is caught by the compiler.** A dependency bump compiles
+cleanly and can still break at runtime. A LiveView with no catch-all
+`handle_info` crashes on the new events. A `persist_state/3` that matches on
+the lifecycle makes every approval fail. A `case` with no fallback raises on
+the new `{:error, {:outcome_unknown, reason}}` result. Read the migration guide
+before upgrading.
+
+### Upgrading from v0.16.x - v0.17.0
+
+Read
+[MIGRATION_PROMPT_v0.16.x_TO_v0.17.0.md](https://github.com/sagents-ai/sagents/blob/main/MIGRATION_PROMPT_v0.16.x_TO_v0.17.0.md).
+It is written to be handed to a coding agent, and it is search-driven: every
+step comes with the searches that find the code it affects.
+
+- **Part 1, user requests,** adds two `display_messages` columns, a new
+  `user_requests` ledger table, three context functions, and the optional
+  `complete_user_request/3` callback. Your generated persistence modules are
+  your own copies, so an existing install gets none of this from the
+  dependency bump. Handling the two new events is required. The rest is opt-in.
+- **Part 2, resilience and approvals,** needs no template or database changes.
+  It covers the new `:outcome_unknown` error and the copy to show for it, the
+  new `:on_resume` persistence lifecycle, `load_state/2` running on every agent
+  start, the placeholder results that now end an interrupted HITL state, and
+  test updates for asynchronous presence.
+
+Each part ends with checks that confirm the upgrade is actually wired up. A
+green test suite alone does not prove it.
+
+### Added
+
+- User requests: per-conversation request numbering on `State`, messages, and
+  display rows, the `{:user_request_started, _}` and
+  `{:user_request_completed, report}` events, the optional
+  `DisplayMessagePersistence.complete_user_request/3` callback, and a generated
+  `user_requests` ledger with token usage summed across sub-agents and
+  summarization.
+  [#213](https://github.com/sagents-ai/sagents/pull/213)
+- `Sagents.PresenceWriter`, a per-node process that makes presence writes for
+  agents so they never wait on the tracker.
+  [#215](https://github.com/sagents-ai/sagents/pull/215)
+- A per-tool `recovery:` policy on `interrupt_on` (`:report_unknown` or
+  `:reexecute`) for an approved tool interrupted by the agent stopping.
+  [#215](https://github.com/sagents-ai/sagents/pull/215)
+
+### Changed
+
+- Lifecycle calls return `{:error, {:outcome_unknown, reason}}` when the agent
+  took the call and then failed. `{:error, :agent_not_running}` now means only
+  that the request never reached a running agent.
+  [#215](https://github.com/sagents-ai/sagents/pull/215)
+- `AgentServer` loads persisted state in its own `init/1` on every start, and
+  `persist_state/3` is called with a new `:on_resume` lifecycle before approved
+  tools run.
+  [#215](https://github.com/sagents-ai/sagents/pull/215)
+- An interrupted HITL state ends with placeholder tool results, which is how
+  the pending approval is persisted.
+  [#215](https://github.com/sagents-ai/sagents/pull/215)
+- A run that errors or crashes stops its sub-agents, as a cancel does.
+  [#213](https://github.com/sagents-ai/sagents/pull/213)
+
+### Fixed
+
+- Agents crash-looping when presence calls timed out under load.
+  [#215](https://github.com/sagents-ai/sagents/pull/215)
+- A restarted agent overwriting newer turns with the state it booted from.
+  [#215](https://github.com/sagents-ai/sagents/pull/215)
+- HITL approvals and approved tool results lost when the agent process
+  stopped, and middleware tool callbacks not firing for approved calls.
+  [#215](https://github.com/sagents-ai/sagents/pull/215)
+- A node using its own view of the cluster instead of the Horde membership set
+  by nodes it cannot see yet.
+  [#211](https://github.com/sagents-ai/sagents/pull/211)
+
 ## v0.16.2
 
 The `ask_user` tool no longer requires a `value` on each option. Some models
