@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.17.1
+
+Human-in-the-loop now only asks a human about tool calls that can actually run.
+
+### Added
+- HITL checks each gated tool call before interrupting, using the tool's own `:parse_args` parser (which can take the tool context) or the required-parameter check. A call the tool refuses is not put to a human. It is answered with the tool's error message so the model can correct it. If no call needs approval, the batch runs immediately. Refused calls in a mixed batch are recorded in `interrupt_data.pre_decided` and stay rejected on resume, including in sub-agents. A new docs section, "Parsing arguments with the tenant scope" in `docs/tool_context_and_state.md`, shows a context-aware parser. https://github.com/sagents-ai/sagents/pull/217
+- `HumanInTheLoop.check_for_interrupt/3` takes a `:parse_arguments` option and can return `{:settle, tool_calls, pre_decided}`. `HumanInTheLoop.pre_decided_decisions/2` and `HumanInTheLoop.remove_approval_placeholders/1` are new. `AgentUtils.build_full_decisions/5` accepts an optional `pre_decided` map. https://github.com/sagents-ai/sagents/pull/217
+
+### Changed
+- Requires `langchain` `>= 0.15.3` for `LLMChain.parse_tool_call_arguments/2`.
+- Deprecated `AgentUtils.check_for_hitl_interrupt/2` in favor of `HumanInTheLoop.check_for_interrupt/3`. https://github.com/sagents-ai/sagents/pull/217
+
 ## v0.17.0
 
 A big release. Two changes make agents more fit for production work that is billed
