@@ -56,6 +56,29 @@ defmodule Sagents.Middleware.HumanInTheLoop do
         "send_payment" => true
       }
 
+  ## Calls that cannot run
+
+  A human is only asked about calls that would actually run. Before
+  interrupting, each gated call's arguments are parsed by its own tool, with
+  the context the tool would run with: its `:parse_args` parser, or the
+  required-parameter check when it has none (see `LangChain.Function`). A
+  call naming a tool the agent does not have is refused the same way.
+
+  A refused call is not put to a human. It is answered with the tool's message
+  as an error result, the same answer it would get if it ran, so the model can
+  correct it. When other calls still need approval, the refused ones are held
+  in the interrupt data under `:pre_decided` and answered when the batch is
+  resumed. They are never executed, even if their arguments would parse by
+  then. When no call needs approval, the batch runs at once.
+
+  The parser runs again when an approved call executes, and only that run's
+  result reaches the tool body. An approval can wait a long time, and data can
+  change in between. A parser therefore runs more than once for one call, and
+  must only read, never write.
+
+  A tool that wants a no-op call ("nothing would change") kept away from the
+  human refuses it from its parser.
+
   ## Durability
 
   An interrupt survives the agent process. When approval is needed, the
@@ -261,10 +284,17 @@ defmodule Sagents.Middleware.HumanInTheLoop do
         }
 
   @type interrupt_data :: %{
-          action_requests: [action_request()],
-          review_configs: %{String.t() => interrupt_config()},
-          hitl_tool_call_ids: [String.t()]
+          required(:action_requests) => [action_request()],
+          required(:review_configs) => %{String.t() => interrupt_config()},
+          required(:hitl_tool_call_ids) => [String.t()],
+          optional(:pre_decided) => %{String.t() => pre_decided_rejection()}
         }
+
+  @typedoc """
+  The decision recorded for a gated call whose arguments its tool refused
+  before any human was asked. See "Calls that cannot run" in the moduledoc.
+  """
+  @type pre_decided_rejection :: %{type: :reject, message: String.t(), is_error: true}
 
   @type decision :: %{
           required(:type) => :approve | :edit | :reject,
@@ -360,13 +390,29 @@ defmodule Sagents.Middleware.HumanInTheLoop do
 
   - `state` - The current agent state
   - `config` - Middleware configuration with interrupt_on map
+  - `opts` - Options:
+    - `:parse_arguments` - A function taking a gated `LangChain.Message.ToolCall`
+      and returning `{:ok, parsed_arguments}` or `{:error, message}`, normally
+      `&LangChain.Chains.LLMChain.parse_tool_call_arguments(chain, &1)`. A
+      gated call it refuses is settled with the message rather than put to a
+      human. Without it, every gated call is put to a human.
 
   ## Returns
 
-  - `{:interrupt, interrupt_data}` - If tools need approval
+  - `{:interrupt, interrupt_data}` - If tools need approval. Gated calls that
+    were refused are in `interrupt_data.pre_decided`.
+  - `{:settle, tool_calls, pre_decided}` - No call needs approval, but some
+    gated calls were refused. `tool_calls` is the whole batch and `pre_decided`
+    maps each refused call's id to its rejection. The caller must run the batch
+    with these decisions instead of executing it normally (see
+    `pre_decided_decisions/2`).
   - `:continue` - If no approval needed
   """
-  def check_for_interrupt(%State{} = state, config) do
+  @spec check_for_interrupt(State.t(), map(), keyword()) ::
+          {:interrupt, interrupt_data()}
+          | {:settle, [ToolCall.t()], %{String.t() => pre_decided_rejection()}}
+          | :continue
+  def check_for_interrupt(%State{} = state, config, opts \\ []) do
     # Check if the last message is an assistant message with tool calls
     case get_last_assistant_message_with_tools(state.messages) do
       nil ->
@@ -376,27 +422,95 @@ defmodule Sagents.Middleware.HumanInTheLoop do
       assistant_message ->
         # Check if any tool calls require human approval
         tool_calls = assistant_message.tool_calls || []
-        interrupt_requests = collect_interrupt_requests(tool_calls, config.interrupt_on)
+        gated_calls = collect_interrupt_requests(tool_calls, config.interrupt_on)
 
-        if interrupt_requests == [] do
-          :continue
-        else
-          # Generate interrupt
-          interrupt_data = build_interrupt_data(interrupt_requests, config.interrupt_on)
+        {interrupt_requests, pre_decided} =
+          settle_unparseable_calls(gated_calls, Keyword.get(opts, :parse_arguments))
 
-          # Broadcast debug event for interrupt
-          tool_names = Enum.map_join(interrupt_data.action_requests, ", ", & &1.tool_name)
+        publish_settled_event(state.agent_id, gated_calls, pre_decided)
 
-          AgentServer.publish_debug_event_from(
-            state.agent_id,
-            {:middleware_action, __MODULE__,
-             {:interrupt_generated,
-              "#{length(interrupt_data.action_requests)} tool(s): #{tool_names}"}}
-          )
+        cond do
+          interrupt_requests != [] ->
+            interrupt_data =
+              interrupt_requests
+              |> build_interrupt_data(config.interrupt_on)
+              |> put_pre_decided(pre_decided)
 
-          {:interrupt, interrupt_data}
+            # Broadcast debug event for interrupt
+            tool_names = Enum.map_join(interrupt_data.action_requests, ", ", & &1.tool_name)
+
+            AgentServer.publish_debug_event_from(
+              state.agent_id,
+              {:middleware_action, __MODULE__,
+               {:interrupt_generated,
+                "#{length(interrupt_data.action_requests)} tool(s): #{tool_names}"}}
+            )
+
+            {:interrupt, interrupt_data}
+
+          map_size(pre_decided) > 0 ->
+            {:settle, tool_calls, pre_decided}
+
+          true ->
+            :continue
         end
     end
+  end
+
+  @doc """
+  The decisions for a batch none of whose calls is waiting on a human: the
+  pre-decided rejection for each settled call, and `:approve` for the rest.
+  One decision per call, in `tool_calls` order, ready for
+  `LangChain.Chains.LLMChain.execute_tool_calls_with_decisions/3`.
+  """
+  @spec pre_decided_decisions([ToolCall.t()], %{String.t() => pre_decided_rejection()}) ::
+          [map()]
+  def pre_decided_decisions(tool_calls, pre_decided) when is_map(pre_decided) do
+    AgentUtils.build_full_decisions(tool_calls, [], [], [], pre_decided)
+  end
+
+  # Splits the gated calls into those to put to a human and those their tool
+  # refuses outright. A refused call cannot run, so asking about it would be a
+  # question with no right answer. It is recorded as decided rather than left
+  # out, because a gated call with no decision would be approved on resume.
+  defp settle_unparseable_calls(gated_calls, nil), do: {gated_calls, %{}}
+
+  defp settle_unparseable_calls(gated_calls, parse_arguments)
+       when is_function(parse_arguments, 1) do
+    Enum.reduce(gated_calls, {[], %{}}, fn %ToolCall{} = call, {to_ask, pre_decided} ->
+      case parse_arguments.(call) do
+        {:ok, _parsed_arguments} ->
+          {[call | to_ask], pre_decided}
+
+        {:error, message} ->
+          rejection = %{type: :reject, message: message, is_error: true}
+          {to_ask, Map.put(pre_decided, call.call_id, rejection)}
+      end
+    end)
+    |> then(fn {to_ask, pre_decided} -> {Enum.reverse(to_ask), pre_decided} end)
+  end
+
+  defp put_pre_decided(interrupt_data, pre_decided) when map_size(pre_decided) == 0,
+    do: interrupt_data
+
+  defp put_pre_decided(interrupt_data, pre_decided),
+    do: Map.put(interrupt_data, :pre_decided, pre_decided)
+
+  defp publish_settled_event(_agent_id, _gated_calls, pre_decided)
+       when map_size(pre_decided) == 0,
+       do: :ok
+
+  defp publish_settled_event(agent_id, gated_calls, pre_decided) do
+    tool_names =
+      gated_calls
+      |> Enum.filter(&Map.has_key?(pre_decided, &1.call_id))
+      |> Enum.map_join(", ", & &1.name)
+
+    AgentServer.publish_debug_event_from(
+      agent_id,
+      {:middleware_action, __MODULE__,
+       {:calls_settled_without_approval, "#{map_size(pre_decided)} tool(s): #{tool_names}"}}
+    )
   end
 
   @doc """
@@ -539,7 +653,8 @@ defmodule Sagents.Middleware.HumanInTheLoop do
   message answers every tool call of the last assistant message with a
   placeholder result carrying `interrupt_data`, so the interrupt is persisted
   with the conversation and a later boot can rebuild it. The tool calls are
-  held as a batch, so all of them get one, not only the gated ones.
+  held as a batch, so all of them get one, not only the gated ones. A call in
+  `interrupt_data.pre_decided` gets its refusal as the placeholder text.
   """
   @spec add_approval_placeholders(LLMChain.t(), interrupt_data()) :: LLMChain.t()
   def add_approval_placeholders(
@@ -547,12 +662,14 @@ defmodule Sagents.Middleware.HumanInTheLoop do
           chain,
         interrupt_data
       ) do
+    pre_decided = Map.get(interrupt_data, :pre_decided, %{})
+
     results =
       Enum.map(calls, fn %ToolCall{} = call ->
         ToolResult.new!(%{
           tool_call_id: call.call_id,
           name: call.name,
-          content: @placeholder_content,
+          content: placeholder_content(pre_decided, call.call_id),
           is_interrupt: true,
           interrupt_data: interrupt_data
         })
@@ -564,12 +681,49 @@ defmodule Sagents.Middleware.HumanInTheLoop do
   def add_approval_placeholders(%LLMChain{} = chain, _interrupt_data), do: chain
 
   @doc """
+  Remove the placeholder tool message `add_approval_placeholders/2` appended,
+  so the chain ends with the assistant message whose tool calls await their
+  decisions. The real results take the placeholders' place when the decisions
+  are run. A chain that does not end in approval placeholders is returned
+  unchanged.
+  """
+  @spec remove_approval_placeholders(LLMChain.t()) :: LLMChain.t()
+  def remove_approval_placeholders(
+        %LLMChain{last_message: %Message{role: :tool, tool_results: [_first | _rest] = results}} =
+          chain
+      ) do
+    if Enum.all?(results, &approval_placeholder?/1) do
+      messages = Enum.drop(chain.messages, -1)
+
+      %LLMChain{
+        chain
+        | messages: messages,
+          exchanged_messages: Enum.drop(chain.exchanged_messages, -1),
+          last_message: List.last(messages)
+      }
+    else
+      chain
+    end
+  end
+
+  def remove_approval_placeholders(%LLMChain{} = chain), do: chain
+
+  # A settled call is not waiting on anyone, so its placeholder says why it
+  # will not run rather than that it awaits review.
+  defp placeholder_content(pre_decided, call_id) do
+    case Map.get(pre_decided, call_id) do
+      %{message: message} -> message
+      nil -> @placeholder_content
+    end
+  end
+
+  @doc """
   The state to persist before approved tool calls start running, or `:none`.
 
   Marks each placeholder of the pending approval as running: its interrupt data
   gains `:in_flight`, which records the decisions, what each call is about to
-  do (`:started`, or `:rejected` when a human rejected it), and the batch's
-  recovery policy. A boot that finds the marks applies the policy (see
+  do (`:started`, or `:rejected` when a human rejected it or it was settled
+  before the interrupt), and the batch's recovery policy. A boot that finds the marks applies the policy (see
   "Recovery" in the moduledoc).
 
   Returns `:none` when there is nothing to mark: no HumanInTheLoop entry in
@@ -590,7 +744,12 @@ defmodule Sagents.Middleware.HumanInTheLoop do
          %Message{role: :tool, tool_results: placeholders} <- trailing_placeholders(state),
          {:ok, pairs} <-
            AgentUtils.pair_decisions(Map.get(interrupt_data, :action_requests, []), decisions) do
-      decided = Map.new(pairs, fn {request, decision} -> {request.tool_call_id, decision} end)
+      decided =
+        interrupt_data
+        |> Map.get(:pre_decided, %{})
+        |> Map.merge(
+          Map.new(pairs, fn {request, decision} -> {request.tool_call_id, decision} end)
+        )
 
       outcomes =
         Map.new(placeholders, fn result ->
@@ -683,13 +842,15 @@ defmodule Sagents.Middleware.HumanInTheLoop do
   end
 
   # Build full decisions array matching ALL tool calls.
-  # Auto-approve non-HITL tools, use human decisions for HITL tools.
+  # Human decisions for HITL tools, recorded rejections for gated calls settled
+  # before the interrupt, and auto-approval for the rest.
   defp build_full_decisions(all_tool_calls, decisions, interrupt_data) do
     AgentUtils.build_full_decisions(
       all_tool_calls,
       Map.get(interrupt_data, :hitl_tool_call_ids, []),
       decisions,
-      Map.get(interrupt_data, :action_requests, [])
+      Map.get(interrupt_data, :action_requests, []),
+      Map.get(interrupt_data, :pre_decided, %{})
     )
   end
 

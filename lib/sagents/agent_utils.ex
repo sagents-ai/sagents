@@ -16,6 +16,9 @@ defmodule Sagents.AgentUtils do
   alias Sagents.Middleware
   alias Sagents.MiddlewareEntry
 
+  @doc deprecated:
+         "Use Sagents.Middleware.HumanInTheLoop.check_for_interrupt/3, which also " <>
+           "settles calls whose tool refuses their arguments instead of asking about them"
   @doc """
   Check if a chain has pending tool calls that require human approval.
 
@@ -84,12 +87,19 @@ defmodule Sagents.AgentUtils do
   This is needed because LLMChain.execute_tool_calls_with_decisions expects a decision
   for EVERY tool call, not just the ones that needed approval.
 
+  A call in `pre_decided` gets its recorded decision. These are gated calls
+  whose tool refused their arguments before any human was asked. They are not
+  in `hitl_tool_call_ids`, and must never fall through to auto-approval: that
+  would run a gated tool no human approved.
+
   ## Parameters
   - all_tool_calls: All tool calls from assistant message (HITL + non-HITL)
   - hitl_tool_call_ids: List of tool_call_ids that needed human approval
   - human_decisions: List of decisions from human, paired with action_requests
     as described in `pair_decisions/2`
   - action_requests: List of action_requests (to map decisions to tool_call_ids)
+  - pre_decided: Map of tool_call_id => decision for calls settled before the
+    interrupt (`interrupt_data.pre_decided`). Defaults to `%{}`
 
   ## Returns
   - List of decisions matching all_tool_calls order
@@ -104,7 +114,13 @@ defmodule Sagents.AgentUtils do
       # => [%{type: :approve}, %{type: :approve}, %{type: :approve}]
       # First is human decision, others are auto-approved
   """
-  def build_full_decisions(all_tool_calls, hitl_tool_call_ids, human_decisions, action_requests) do
+  def build_full_decisions(
+        all_tool_calls,
+        hitl_tool_call_ids,
+        human_decisions,
+        action_requests,
+        pre_decided \\ %{}
+      ) do
     decisions_by_id =
       case pair_decisions(action_requests, human_decisions) do
         {:ok, pairs} ->
@@ -116,12 +132,13 @@ defmodule Sagents.AgentUtils do
 
     # Build full decisions list matching ALL tool calls
     Enum.map(all_tool_calls, fn tc ->
-      if tc.call_id in hitl_tool_call_ids do
+      cond do
+        # Settled before the interrupt; never put to a human
+        Map.has_key?(pre_decided, tc.call_id) -> Map.fetch!(pre_decided, tc.call_id)
         # Use human decision for HITL tool
-        Map.fetch!(decisions_by_id, tc.call_id)
-      else
+        tc.call_id in hitl_tool_call_ids -> Map.fetch!(decisions_by_id, tc.call_id)
         # Auto-approve non-HITL tool
-        %{type: :approve}
+        true -> %{type: :approve}
       end
     end)
   end

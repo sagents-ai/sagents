@@ -45,7 +45,7 @@ Add `sagents` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:sagents, "~> 0.15.1"}
+    {:sagents, "~> 0.17.0"}
   ]
 end
 ```
@@ -309,6 +309,8 @@ Decision types:
 - `:approve` - Execute with original arguments
 - `:edit` - Execute with modified arguments
 - `:reject` - Skip execution, inform agent of rejection
+
+A human is only asked about calls that can run. Each gated call's arguments are first parsed by its own tool (its `:parse_args` parser, which can take the tool context, or the required-parameter check), and a call the tool refuses is answered with the tool's message instead of being put to a human. See "Parsing arguments with the tenant scope" in [Tool Context and State](docs/tool_context_and_state.md).
 
 ## Custom Middleware
 

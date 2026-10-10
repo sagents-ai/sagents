@@ -24,6 +24,12 @@ defmodule Sagents.Mode.Steps do
   call, each carrying `interrupt_data` (see
   `Sagents.Middleware.HumanInTheLoop.add_approval_placeholders/2`), so the
   interrupt is persisted with the conversation.
+
+  Before deciding, each gated call's arguments are parsed by its tool
+  (`LangChain.Chains.LLMChain.parse_tool_call_arguments/2`). A call its tool
+  refuses is not put to a human; it is answered with the tool's message. When
+  that leaves no call needing approval, the batch is run here with those
+  answers recorded, and the returned chain ends with its tool message.
   """
   def check_pre_tool_hitl({:continue, chain}, opts) do
     middleware = Keyword.get(opts, :middleware, [])
@@ -50,12 +56,26 @@ defmodule Sagents.Mode.Steps do
           metadata: %{}
         }
 
-        case module.check_for_interrupt(state, config) do
+        # Each gated call is parsed by its own tool, with the context it would
+        # run with, before anyone is asked about it. A call its tool refuses
+        # cannot run, so it is answered with the tool's message instead.
+        parse_arguments = &LLMChain.parse_tool_call_arguments(chain, &1)
+
+        case module.check_for_interrupt(state, config, parse_arguments: parse_arguments) do
           {:interrupt, interrupt_data} ->
             # No tool has run, so nothing else would record the interrupt in
             # the conversation. The placeholders make it durable.
             {:interrupt, HumanInTheLoop.add_approval_placeholders(chain, interrupt_data),
              interrupt_data}
+
+          {:settle, tool_calls, pre_decided} ->
+            # Nothing needs a human, but the refused gated calls must not be
+            # executed. Running the batch here with their rejections recorded
+            # leaves a tool message as the last message, which execute_tools
+            # passes through untouched.
+            decisions = HumanInTheLoop.pre_decided_decisions(tool_calls, pre_decided)
+
+            {:continue, LLMChain.execute_tool_calls_with_decisions(chain, tool_calls, decisions)}
 
           :continue ->
             {:continue, chain}
