@@ -82,6 +82,8 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
 
   describe "sub-agent HITL propagation" do
     test "parent surfaces sub-agent interrupt and resumes successfully" do
+      test_pid = self()
+
       subagent_config =
         SubAgent.Config.new!(%{
           name: "writer",
@@ -91,7 +93,10 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
             LangChain.Function.new!(%{
               name: "file_write",
               description: "Write a file",
-              function: fn _args, _context -> {:ok, "File written successfully"} end
+              function: fn _args, _context ->
+                send(test_pid, :file_write_ran)
+                {:ok, "File written successfully"}
+              end
             })
           ],
           interrupt_on: %{"file_write" => true}
@@ -180,12 +185,17 @@ defmodule Sagents.SubAgentHitlIntegrationTest do
       # SubAgentServer should still be alive
       assert SubAgentServer.whereis(interrupt_data.sub_agent_id) != nil
 
+      refute_received :file_write_ran
+
       # Resume with approve decision
       decisions = [%{type: :approve}]
       resume_result = Agent.resume(agent, interrupted_state, decisions)
 
       # Should complete successfully
       assert {:ok, final_state} = resume_result
+
+      # The approved call actually ran in the sub-agent
+      assert_received :file_write_ran
 
       # Placeholder should be replaced with real result
       has_remaining_interrupt =

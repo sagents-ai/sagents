@@ -106,6 +106,7 @@ defmodule Sagents.SubAgent do
 
   alias __MODULE__
   alias Sagents.AgentUtils
+  alias Sagents.Middleware.HumanInTheLoop
   alias Sagents.State
   alias LangChain.Chains.LLMChain
   alias LangChain.Message
@@ -624,6 +625,10 @@ defmodule Sagents.SubAgent do
     action_requests = interrupt_data.action_requests
     hitl_tool_call_ids = interrupt_data.hitl_tool_call_ids
 
+    # The interrupted chain ends with the approval placeholders. The decisions
+    # answer the assistant message before them, and their results replace them.
+    chain = HumanInTheLoop.remove_approval_placeholders(chain)
+
     # Get ALL tool calls from the last assistant message (HITL + non-HITL)
     all_tool_calls = AgentUtils.get_tool_calls_from_last_message(chain)
 
@@ -635,7 +640,8 @@ defmodule Sagents.SubAgent do
         all_tool_calls,
         hitl_tool_call_ids,
         decisions,
-        action_requests
+        action_requests,
+        Map.get(interrupt_data, :pre_decided, %{})
       )
 
     # Reset callbacks before re-adding — the chain from the initial execute()

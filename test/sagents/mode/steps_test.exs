@@ -13,14 +13,19 @@ defmodule Sagents.Mode.StepsTest do
 
   # ── Helpers ──────────────────────────────────────────────────────
 
+  # The gated tools these tests call are registered, so that their calls parse
+  # and are put to a human rather than settled as calls to a missing tool.
   defp chain_with_context(messages \\ [], custom_context \\ %{}) do
-    chain = %LLMChain{
+    %LLMChain{
       messages: messages,
       exchanged_messages: messages,
       custom_context: custom_context
     }
+    |> LLMChain.add_tools([noop_tool("write_file"), noop_tool("dangerous_tool")])
+  end
 
-    chain
+  defp noop_tool(name) do
+    LangChain.Function.new!(%{name: name, function: fn _args, _context -> {:ok, "done"} end})
   end
 
   defp assistant_with_tool_call(tool_name, call_id \\ "call_1") do

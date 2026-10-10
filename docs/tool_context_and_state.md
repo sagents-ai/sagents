@@ -257,6 +257,38 @@ def build do
 end
 ```
 
+### Parsing arguments with the tenant scope
+
+A tool's `:parse_args` parser can take the same `context` as its body, as a second argument. That lets it resolve what the model's arguments refer to, for this tenant, before the body runs: fetch the record, refuse an id that does not exist, compute the change. On success it returns the parsed data, and the body receives that instead of the raw arguments.
+
+```elixir
+def build do
+  Function.new!(%{
+    name: "update_project",
+    description: "Rename a project",
+    parameters_schema: %{
+      type: "object",
+      properties: %{id: %{type: "string"}, name: %{type: "string"}},
+      required: ["id", "name"]
+    },
+    parse_args: fn %{"id" => id, "name" => name}, context ->
+      case Projects.get_project(context.scope, id) do
+        nil -> {:error, "No project #{id} exists."}
+        %{name: ^name} -> {:error, "Project #{id} is already named #{name}, so nothing would change."}
+        project -> {:ok, %{project: project, name: name}}
+      end
+    end,
+    function: fn %{project: project, name: name}, context ->
+      Projects.rename(context.scope, project, name)
+    end
+  })
+end
+```
+
+This matters most for a tool gated by `HumanInTheLoop`. Each gated call is parsed before a human is asked about it, and a call the parser refuses is answered with the parser's message rather than shown for approval: approving or rejecting a call that cannot run would be a question with no right answer. An approved call is parsed again when it runs, against the data as it is then, and the body gets that result.
+
+Because a parser runs more than once for one call, it may read but must never write.
+
 ### Reading caller-supplied tool_context
 
 Use `tool_context` for data that comes from outside the agent system and doesn't change during execution:
