@@ -198,12 +198,12 @@ defmodule Sagents.Mode.Steps do
       )
       when is_list(results) do
     hinted =
-      Enum.reduce(results, chain, fn result, acc ->
+      Enum.reduce(results, chain, fn %ToolResult{} = result, acc ->
         case inactive_tool_sets(result, acc, tool_sets) do
           [set | _others] ->
             hint = AbilitySetSwitcher.inactive_tool_hint(config, result.name, set)
 
-            LLMChain.replace_tool_result(acc, result.tool_call_id, %ToolResult{
+            LLMChain.replace_tool_result(acc, result.tool_call_id, %{
               result
               | content: [ContentPart.text!(hint)]
             })

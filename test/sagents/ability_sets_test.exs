@@ -259,7 +259,7 @@ defmodule Sagents.AbilitySetsTest do
           [
             "You are the IT operations assistant.",
             "Rail fragment.",
-            "You work in modes.",
+            "## Modes\n\nYou work in modes.",
             "Current mode: devices.",
             "Devices fragment.",
             "Deployments fragment.",

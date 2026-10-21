@@ -84,6 +84,19 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   entry never runs it twice in one `execute`. At the end, the entries of the
   set active then run `after_model/2`. An entry active only between two
   switches runs `before_model/2` but not `after_model/2` for that call.
+
+  ## Sub-agents
+
+  A dynamic sub-agent started with `Sagents.Middleware.SubAgent` inherits the
+  parent's middleware for the set active when it starts: the rails plus that
+  set's members. Members of other sets are not inherited, and neither is the
+  switcher. The sub-agent therefore works in the parent's current mode for its
+  whole task, with that mode's prompt fragments and tools as ordinary
+  middleware, and has no `switch_mode` tool. With no set active, it inherits
+  the rails only.
+
+  `:block_middleware` on the SubAgent middleware applies as usual, so listing a
+  set member there keeps it out of sub-agents even while its set is active.
   """
 
   @behaviour Sagents.Middleware
@@ -152,6 +165,8 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
       end
 
     """
+    ## Modes
+
     You work in modes. Each mode gives you the tools for one kind of task.
     #{catalog}
 
