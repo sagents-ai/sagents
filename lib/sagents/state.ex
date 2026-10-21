@@ -276,7 +276,9 @@ defmodule Sagents.State do
   ## Merge Rules
 
   - **messages**: Concatenates lists (left + right)
-  - **todos**: Uses right if present, otherwise left
+  - **todos**: Uses right when it is a list, an empty list included, so a delta
+    can clear the todos. A `nil` on the right leaves the left's todos in place.
+    Build deltas with `delta/1`, which leaves them `nil` unless given
   - **metadata**: Deep merges maps
   - **user_request_seq**: The larger of the two
 
@@ -304,9 +306,38 @@ defmodule Sagents.State do
     }
   end
 
+  # A map that does not name the todos leaves them alone, as a `delta/1` does.
   def merge_states(%State{} = state, updates) when is_map(updates) do
-    right = struct(State, updates)
+    right = struct(State, Map.put_new(updates, :todos, nil))
     merge_states(state, right)
+  end
+
+  @doc """
+  Build a state delta: a `%State{}` holding only the changes a tool returns as
+  the third element of `{:ok, result, delta}`.
+
+  Fields the delta does not name are left untouched when it is merged with
+  `merge_states/2`. That matters for the todos. A bare `%State{}` defaults them
+  to `[]`, and an empty list on the right of a merge clears them, so
+  `%State{metadata: %{counter: 1}}` would wipe the agent's todo list. A delta
+  built here sets them to `nil` unless `:todos` is given.
+
+  Keep the delta to the changes. Messages concatenate on merge, so a delta
+  built from `context.state` duplicates every message.
+
+  Raises `KeyError` for a key that is not a `State` field.
+
+  ## Examples
+
+      # Set one metadata key, leaving todos and messages alone
+      State.delta(%{metadata: %{counter: 2}})
+
+      # Clear the todo list
+      State.delta(todos: [])
+  """
+  @spec delta(map() | keyword()) :: t()
+  def delta(changes \\ %{}) when is_map(changes) or is_list(changes) do
+    struct!(State, changes |> Map.new() |> Map.put_new(:todos, nil))
   end
 
   # Private merge functions

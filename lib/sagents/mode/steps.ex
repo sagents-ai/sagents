@@ -3,12 +3,18 @@ defmodule Sagents.Mode.Steps do
   Sagents-specific pipeline steps for custom execution modes.
 
   These steps handle concerns that belong at the agent layer, not the
-  LLMChain layer: HITL interrupts and state propagation from tool results.
+  LLMChain layer: HITL interrupts, state propagation from tool results, and
+  ability set switches.
   """
 
   alias LangChain.Chains.LLMChain
   alias LangChain.LangChainError
   alias LangChain.Message
+  alias LangChain.Message.ContentPart
+  alias LangChain.Message.ToolResult
+  alias Sagents.AbilitySets
+  alias Sagents.AbilitySets.Switch
+  alias Sagents.Middleware.AbilitySetSwitcher
   alias Sagents.State
   alias Sagents.MiddlewareEntry
   alias Sagents.Middleware.HumanInTheLoop
@@ -126,6 +132,98 @@ defmodule Sagents.Mode.Steps do
   end
 
   def check_until_tool_success(terminal, _opts), do: terminal
+
+  # ── Ability Sets ───────────────────────────────────────────────
+
+  @doc """
+  End the chain when a tool batch switched the active ability set.
+
+  Compares the set named by `custom_context.state`, where `propagate_state/2`
+  has just merged the `switch_mode` delta, with `custom_context.ability_sets.active`,
+  the set the chain was built for. When they differ, returns
+  `{:ok, chain, %Sagents.AbilitySets.Switch{}}`, and `Sagents.Agent.execute/3`
+  continues the call on a chain built for the new set. A chain is never edited
+  to carry another set's tools.
+
+  Place it after the interrupt and `until_tool` checks: an interrupt or an
+  `until_tool` hit in the same batch is already terminal and passes through,
+  with the switch recorded in the state for the next chain build.
+
+  A chain without `custom_context.ability_sets` (an agent with no switcher)
+  passes through.
+  """
+  def check_ability_switch(
+        {:continue,
+         %LLMChain{
+           custom_context: %{
+             ability_sets: %{active: active, config: config},
+             state: %State{metadata: metadata}
+           }
+         } = chain},
+        _opts
+      ) do
+    case AbilitySets.resolve(config, metadata) do
+      ^active ->
+        {:continue, chain}
+
+      to ->
+        {:ok, chain,
+         %Switch{from: active, to: to, mode_state: Map.get(chain.custom_context, :mode_state)}}
+    end
+  end
+
+  def check_ability_switch(pipeline_result, _opts), do: pipeline_result
+
+  @doc """
+  Answer a call to a tool from an inactive ability set with a hint to switch.
+
+  A call naming a tool the chain does not have gets LangChain's not-found
+  error. When the tool belongs to a declared set, the error is rewritten to
+  name the set and the switch call that brings it in. A call naming a tool in
+  no set keeps the generic error.
+
+  Runs after `execute_tools/1`, so it also covers a batch the HITL check
+  settled: a gated call to an inactive tool is answered with the not-found
+  error before any human sees it.
+
+  A chain without `custom_context.ability_sets` passes through.
+  """
+  def hint_inactive_tool_calls(
+        {:continue,
+         %LLMChain{
+           custom_context: %{ability_sets: %{config: config, tool_sets: tool_sets}},
+           last_message: %Message{role: :tool, tool_results: results}
+         } = chain},
+        _opts
+      )
+      when is_list(results) do
+    hinted =
+      Enum.reduce(results, chain, fn result, acc ->
+        case inactive_tool_sets(result, acc, tool_sets) do
+          [set | _others] ->
+            hint = AbilitySetSwitcher.inactive_tool_hint(config, result.name, set)
+
+            LLMChain.replace_tool_result(acc, result.tool_call_id, %ToolResult{
+              result
+              | content: [ContentPart.text!(hint)]
+            })
+
+          nil ->
+            acc
+        end
+      end)
+
+    {:continue, hinted}
+  end
+
+  def hint_inactive_tool_calls(pipeline_result, _opts), do: pipeline_result
+
+  # The sets providing a tool the chain does not carry, for an error result.
+  defp inactive_tool_sets(%ToolResult{is_error: true, name: name}, chain, tool_sets) do
+    if Map.has_key?(chain._tool_map, name), do: nil, else: Map.get(tool_sets, name)
+  end
+
+  defp inactive_tool_sets(_result, _chain, _tool_sets), do: nil
 
   # ── Loop Boundary (with until_tool enforcement) ────────────────
 

@@ -12,15 +12,18 @@ defmodule Sagents.Modes.AgentExecution do
      messages
   3. Call the LLM
   4. Check for HITL interrupts (if HumanInTheLoop middleware present)
-  5. Execute tools
+  5. Execute tools, then answer calls to tools from an inactive ability set
+     with a hint to switch
   6. Propagate state updates from tool results
   7. Check if target tool was called (if `until_tool` is set)
-  8. Loop if `needs_response` is true, or error if until_tool contract violated
+  8. End the chain if the tools switched the active ability set (see
+     "Ability set switches")
+  9. Loop if `needs_response` is true, or error if until_tool contract violated
 
   `LLMChain` sets `needs_response` when a message arrives. It is true after tool
   results, and after an assistant message that leaves the model's turn open
   (`LangChain.Message.continues_turn?/1`): the provider reported the turn is
-  not over, or the message is narration only. The loop in step 8 reads that
+  not over, or the message is narration only. The loop in step 9 reads that
   flag and does not inspect the message itself.
 
   A response the provider cut off (status `:length` or `:content_filtered`)
@@ -32,6 +35,14 @@ defmodule Sagents.Modes.AgentExecution do
   response satisfies `until_tool` rather than ending the run with
   `exceeded_max_runs`.
 
+  ## Ability set switches
+
+  An agent with `Sagents.Middleware.AbilitySetSwitcher` builds each chain for one set.
+  When a `switch_mode` call changes the set, step 8 ends the chain with
+  `{:ok, chain, %Sagents.AbilitySets.Switch{}}` and `Sagents.Agent.execute/3`
+  continues the same call on a chain built for the new set. The next chain
+  carries this one's `mode_state`, so the `:max_runs` budget spans both.
+
   ## Resuming after human approval
 
   A resume executes approved tool calls outside this pipeline, then hands the
@@ -41,7 +52,8 @@ defmodule Sagents.Modes.AgentExecution do
   `Sagents.Agent.resume/4`, which builds a fresh chain with a fresh budget.
 
   A chain that arrives ending in a tool message has its results pass through
-  steps 6 and 7, plus the tool-interrupt check, before the loop starts. Their
+  the inactive-tool hint and steps 6 to 8, plus the tool-interrupt check, before
+  the loop starts. Their
   state updates reach the chain's state, a nested interrupt surfaces, and an
   approved target tool completes the run without another LLM call, even when
   the budget is spent.
@@ -134,9 +146,11 @@ defmodule Sagents.Modes.AgentExecution do
     |> check_pause(opts)
     |> check_pre_tool_hitl(opts)
     |> execute_tools()
+    |> hint_inactive_tool_calls(opts)
     |> propagate_state(opts)
     |> check_tool_interrupts(opts)
     |> maybe_check_until_tool(opts)
+    |> check_ability_switch(opts)
     |> continue_or_done_safe(&do_run/2, opts)
   end
 
@@ -170,9 +184,11 @@ defmodule Sagents.Modes.AgentExecution do
          opts
        ) do
     pipeline_result
+    |> hint_inactive_tool_calls(opts)
     |> propagate_state(opts)
     |> check_tool_interrupts(opts)
     |> maybe_check_until_tool(opts)
+    |> check_ability_switch(opts)
   end
 
   defp maybe_process_resumed_tool_results(pipeline_result, _opts), do: pipeline_result

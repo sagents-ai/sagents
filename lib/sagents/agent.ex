@@ -47,10 +47,13 @@ defmodule Sagents.Agent do
   require Logger
 
   alias __MODULE__
+  alias Sagents.AbilitySets
+  alias Sagents.AbilitySets.Switch
   alias Sagents.AgentUtils
   alias Sagents.UserRequest
   alias Sagents.Message.DisplayHelpers
   alias Sagents.Middleware
+  alias Sagents.MiddlewareEntry
   alias Sagents.State
   alias LangChain.LangChainError
   alias LangChain.Message
@@ -96,6 +99,10 @@ defmodule Sagents.Agent do
     # (50 for AgentExecution). Can also be overridden per-invocation via
     # Agent.execute/3 opts.
     field :max_runs, :integer, virtual: true
+    # What each ability set sends (`Sagents.AbilitySets.Index`), computed in
+    # new/2 when the stack holds a `Sagents.Middleware.AbilitySetSwitcher`; nil
+    # otherwise.
+    field :ability_index, :any, virtual: true, default: nil
   end
 
   @type t :: %Agent{}
@@ -297,6 +304,7 @@ defmodule Sagents.Agent do
     |> put_agent_id_if_missing()
     |> validate_required(@required_fields)
     |> build_and_initialize_middleware(opts)
+    |> build_ability_index()
     |> assemble_full_system_prompt()
     |> collect_all_tools()
     |> apply_action(:insert)
@@ -388,11 +396,17 @@ defmodule Sagents.Agent do
           inject_agent_context(user_middleware, agent_id, model, filesystem_scope)
       end
 
-    # Initialize middleware
-    case initialize_middleware_list(middleware_list) do
-      {:ok, initialized} ->
-        put_change(changeset, :middleware, initialized)
+    # A `Sagents.Middleware.AbilitySetSwitcher` entry contributes its sets'
+    # middleware at its own position, each tagged with the sets it belongs to.
+    inject = fn spec ->
+      [injected] = inject_agent_context([spec], agent_id, model, filesystem_scope)
+      injected
+    end
 
+    with {:ok, tagged_list} <- AbilitySets.expand(middleware_list, inject),
+         {:ok, initialized} <- initialize_middleware_list(tagged_list) do
+      put_change(changeset, :middleware, initialized)
+    else
       {:error, reason} ->
         Logger.error("Middleware initialization failed: #{reason}")
         add_error(changeset, :middleware, "initialization failed: #{inspect(reason)}")
@@ -484,15 +498,32 @@ defmodule Sagents.Agent do
     |> HumanInTheLoop.maybe_append(Keyword.get(opts, :interrupt_on))
   end
 
-  defp initialize_middleware_list(middleware_list) do
+  defp initialize_middleware_list(tagged_list) do
     try do
       initialized =
-        middleware_list
-        |> Enum.map(&Middleware.init_middleware/1)
+        Enum.map(tagged_list, fn {spec, ability_sets} ->
+          %MiddlewareEntry{Middleware.init_middleware(spec) | ability_sets: ability_sets}
+        end)
 
       {:ok, initialized}
     rescue
       e -> {:error, Exception.message(e)}
+    end
+  end
+
+  defp build_ability_index(%Ecto.Changeset{valid?: false} = changeset), do: changeset
+
+  defp build_ability_index(changeset) do
+    case AbilitySets.build_index(
+           get_field(changeset, :middleware) || [],
+           get_field(changeset, :tools) || [],
+           get_field(changeset, :base_system_prompt)
+         ) do
+      {:ok, index} ->
+        put_change(changeset, :ability_index, index)
+
+      {:error, reason} ->
+        add_error(changeset, :middleware, reason)
     end
   end
 
@@ -504,7 +535,23 @@ defmodule Sagents.Agent do
   # error message we want the caller to see.
   defp assemble_full_system_prompt(%Ecto.Changeset{valid?: false} = changeset), do: changeset
 
+  # With ability sets, the assembled prompt is the default set's, so readers of
+  # the field see the prompt a new conversation starts with.
   defp assemble_full_system_prompt(changeset) do
+    case get_field(changeset, :ability_index) do
+      %AbilitySets.Index{config: config, effective: effective} ->
+        put_change(
+          changeset,
+          :assembled_system_prompt,
+          Map.fetch!(effective, config.default).system_prompt
+        )
+
+      nil ->
+        assemble_stack_system_prompt(changeset)
+    end
+  end
+
+  defp assemble_stack_system_prompt(changeset) do
     base_prompt = get_field(changeset, :base_system_prompt) || ""
     initialized_middleware = get_field(changeset, :middleware) || []
 
@@ -690,44 +737,88 @@ defmodule Sagents.Agent do
 
   defp do_execute(%Agent{} = agent, %State{} = state, opts) do
     callbacks = AgentUtils.resolve_callbacks(agent.middleware, opts)
+    active = AbilitySets.active(agent, state)
+    %{middleware: middleware} = AbilitySets.effective(agent, active)
 
     with {:ok, validated_opts} <- validate_until_tool(agent, opts),
-         {:ok, prepared_state} <- apply_before_model_hooks(state, agent.middleware) do
+         {:ok, prepared_state} <- apply_before_model_hooks(state, middleware) do
       # Fire callback with post-middleware state (before LLM call)
       fire_callback(callbacks, :on_after_middleware, [prepared_state])
 
-      case execute_model(agent, prepared_state, callbacks, validated_opts) do
-        {:ok, response_state} ->
-          # Normal completion - run after_model hooks
-          apply_after_model_hooks(response_state, agent.middleware)
+      # What this call has done so far, carried across the chains of an
+      # ability set switch.
+      run = %{
+        switches: 0,
+        before_model_ran: MapSet.new(middleware, & &1.id),
+        mode_state: nil
+      }
 
-        {:ok, response_state, extra} ->
-          # 3-tuple completion (e.g., until_tool result) - run after_model hooks
-          # and re-attach extra data
-          case apply_after_model_hooks(response_state, agent.middleware) do
-            {:ok, final_state} ->
-              {:ok, final_state, extra}
-
-            {:interrupt, interrupted_state, interrupt_data} ->
-              {:interrupt, interrupted_state, interrupt_data}
-
-            {:error, reason} ->
-              {:error, reason}
-          end
-
-        {:interrupt, interrupted_state, interrupt_data} ->
-          # Interrupt from execute_model - return immediately without after_model hooks
-          {:interrupt, interrupted_state, interrupt_data}
-
-        {:pause, paused_state} ->
-          # Infrastructure pause - return immediately without after_model hooks
-          {:pause, paused_state}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      agent
+      |> execute_model(prepared_state, callbacks, validated_opts, run)
+      |> finish_execution(agent, callbacks, validated_opts, run)
     end
   end
+
+  # The model switched ability sets. The chain it ended holds every message so
+  # far, ending with the switch tool's result, and its state names the new set.
+  # The call continues on a new chain built for that set, so the new tools are
+  # sent on the very next LLM call.
+  defp finish_execution({:ok, state, %Switch{} = switch}, agent, callbacks, opts, run) do
+    %{middleware: middleware} = AbilitySets.effective(agent, switch.to)
+    entering = Enum.reject(middleware, &MapSet.member?(run.before_model_ran, &1.id))
+
+    # Between chains, State holds the messages, so a hook that rewrites them is
+    # safe here. Entries that already ran this call do not run again.
+    with {:ok, switched_state} <- apply_before_model_hooks(state, entering) do
+      AbilitySets.notify_switch(agent.agent_id, switch)
+      fire_callback(callbacks, :on_after_middleware, [switched_state])
+
+      run = %{
+        run
+        | switches: run.switches + 1,
+          before_model_ran: Enum.into(entering, run.before_model_ran, & &1.id),
+          mode_state: switch.mode_state
+      }
+
+      agent
+      |> execute_model(switched_state, callbacks, opts, run)
+      |> finish_execution(agent, callbacks, opts, run)
+    end
+  end
+
+  # after_model belongs to the set active when the call finishes.
+  defp finish_execution({:ok, response_state}, agent, _callbacks, _opts, _run) do
+    apply_after_model_hooks(response_state, final_middleware(agent, response_state))
+  end
+
+  defp finish_execution({:ok, response_state, extra}, agent, _callbacks, _opts, _run) do
+    # 3-tuple completion (e.g., until_tool result) - run after_model hooks
+    # and re-attach extra data
+    case apply_after_model_hooks(response_state, final_middleware(agent, response_state)) do
+      {:ok, final_state} ->
+        {:ok, final_state, extra}
+
+      {:interrupt, interrupted_state, interrupt_data} ->
+        {:interrupt, interrupted_state, interrupt_data}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Interrupts and infrastructure pauses return immediately without
+  # after_model hooks.
+  defp finish_execution({:interrupt, state, interrupt_data}, _agent, _callbacks, _opts, _run),
+    do: {:interrupt, state, interrupt_data}
+
+  defp finish_execution({:pause, paused_state}, _agent, _callbacks, _opts, _run),
+    do: {:pause, paused_state}
+
+  defp finish_execution({:error, reason}, _agent, _callbacks, _opts, _run),
+    do: {:error, reason}
+
+  defp final_middleware(agent, state),
+    do: AbilitySets.effective(agent, AbilitySets.active(agent, state)).middleware
 
   @doc """
   Resume agent execution after an interrupt.
@@ -815,7 +906,7 @@ defmodule Sagents.Agent do
 
   @doc false
   def build_chain(agent, messages, state, callbacks) do
-    build_chain_impl(agent, messages, state, callbacks)
+    build_chain_impl(agent, messages, state, callbacks, %{switches: 0, mode_state: nil})
   end
 
   # Private functions
@@ -875,20 +966,35 @@ defmodule Sagents.Agent do
     end)
   end
 
-  defp execute_model(%Agent{} = agent, %State{} = state, callbacks, opts) do
+  defp execute_model(%Agent{} = agent, %State{} = state, callbacks, opts, run) do
     with {:ok, langchain_messages} <- validate_messages(state.messages),
-         {:ok, chain} <- build_chain_impl(agent, langchain_messages, state, callbacks) do
+         {:ok, chain} <- build_chain_impl(agent, langchain_messages, state, callbacks, run) do
+      built_for = AbilitySets.active(agent, state)
+      %{middleware: middleware} = AbilitySets.effective(agent, built_for)
+
       # The chain result is kept alongside the converted state because
       # reject_streaming_error/3 announces the partial message a dead stream
       # leaves behind, and `:on_message_processed` handlers are passed the chain
       # that produced it.
-      chain_result = execute_chain(chain, agent.middleware, agent, opts)
+      chain_result = execute_chain(chain, middleware, agent, opts)
 
       chain_result
       |> handle_chain_result(state)
       |> reject_streaming_error(chain_result, callbacks)
+      |> strip_reasoning_if_switched(agent, built_for)
     end
   end
+
+  # A chain whose tools switched the ability set leaves reasoning bound to the
+  # old prompt and tools. It is dropped from the state once, here, so neither
+  # the next chain nor the stored conversation carries it.
+  defp strip_reasoning_if_switched({tag, %State{} = state}, agent, built_for),
+    do: {tag, AbilitySets.strip_reasoning_if_switched(agent, state, built_for)}
+
+  defp strip_reasoning_if_switched({tag, %State{} = state, extra}, agent, built_for),
+    do: {tag, AbilitySets.strip_reasoning_if_switched(agent, state, built_for), extra}
+
+  defp strip_reasoning_if_switched(result, _agent, _built_for), do: result
 
   defp handle_chain_result({:ok, executed_chain}, state),
     do: extract_state_from_chain(executed_chain, state)
@@ -998,10 +1104,18 @@ defmodule Sagents.Agent do
     end
   end
 
-  defp build_chain_impl(agent, messages, state, callbacks) do
+  # The chain is built for the ability set the state names: its system prompt,
+  # tools and inherited middleware are that set's. `run` carries what the
+  # current execute has done so far: the switches made (read by the switch tool)
+  # and, after a switch, the previous chain's `mode_state`, so the `:max_runs`
+  # budget spans both chains.
+  defp build_chain_impl(agent, messages, state, callbacks, run) do
+    active = AbilitySets.active(agent, state)
+    effective = AbilitySets.effective(agent, active)
+
     # Add system message if we have a system prompt
     messages_with_system =
-      case agent.assembled_system_prompt do
+      case effective.system_prompt do
         prompt when is_binary(prompt) and prompt != "" ->
           [Message.new_system!(prompt) | messages]
 
@@ -1018,9 +1132,11 @@ defmodule Sagents.Agent do
           agent.tool_context || %{},
           %{
             state: state,
-            # Make parent agent's middleware and tools available to tools (e.g., SubAgent middleware)
-            parent_middleware: agent.middleware,
-            parent_tools: agent.tools,
+            # Make parent agent's middleware and tools available to tools (e.g., SubAgent middleware).
+            # A dynamic sub-agent inherits the active ability set, without the
+            # ability to switch.
+            parent_middleware: AbilitySets.inheritable_middleware(effective.middleware),
+            parent_tools: effective.tools,
             # Preserve the original tool_context map as an explicit key so
             # SubAgent middleware can extract it cleanly without reconstructing
             # it.
@@ -1044,8 +1160,9 @@ defmodule Sagents.Agent do
             conversation_id: state.conversation_id,
             # Reserved LangChain key: a flat attribute map applied to every span
             # this agent produces.
-            otel_attributes: agent.otel_attributes || %{}
+            otel_attributes: otel_attributes(agent, active)
           }
+          |> put_ability_sets_context(agent, active, run)
         )
     }
 
@@ -1060,13 +1177,37 @@ defmodule Sagents.Agent do
     chain =
       chain_config
       |> LLMChain.new!()
-      |> LLMChain.add_tools(agent.tools)
+      |> LLMChain.add_tools(effective.tools)
       |> LLMChain.add_messages(messages_with_system)
       |> maybe_add_callbacks(callbacks)
 
     {:ok, chain}
   rescue
     error -> {:error, "Failed to build chain: #{inspect(error)}"}
+  end
+
+  defp otel_attributes(agent, active) do
+    attributes = agent.otel_attributes || %{}
+
+    if agent.ability_index && active,
+      do: Map.put(attributes, "sagents.ability_set", active),
+      else: attributes
+  end
+
+  # `ability_sets` exists only on an agent with a switcher, so an agent without
+  # one pays a single map lookup in the loop's switch check. `mode_state` is
+  # present only after a switch; LangChain's ensure_mode_state/1 keeps it.
+  defp put_ability_sets_context(context, agent, active, run) do
+    context =
+      case AbilitySets.chain_context(agent, active, run.switches) do
+        nil -> context
+        ability_sets -> Map.put(context, :ability_sets, ability_sets)
+      end
+
+    case run.mode_state do
+      nil -> context
+      mode_state -> Map.put(context, :mode_state, mode_state)
+    end
   end
 
   # Add each callback map to the LLMChain for LangChain-native key dispatch.

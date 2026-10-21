@@ -6,6 +6,8 @@ defmodule Sagents.MiddlewareEntry do
   - `id`: Unique identifier (module name by default, or custom string)
   - `module`: The middleware module implementing the Middleware behavior
   - `config`: Configuration map returned from middleware's init/1 callback
+  - `ability_sets`: The ability sets the entry belongs to, or `nil` for an entry
+    that is active in every set (a rail). See `Sagents.Middleware.AbilitySetSwitcher`.
 
   ## ID Determination
 
@@ -35,10 +37,11 @@ defmodule Sagents.MiddlewareEntry do
   @type t :: %__MODULE__{
           id: atom() | String.t(),
           module: module(),
-          config: map()
+          config: map(),
+          ability_sets: [String.t()] | nil
         }
 
-  defstruct [:id, :module, :config]
+  defstruct [:id, :module, :config, ability_sets: nil]
 
   @doc """
   Convert a MiddlewareEntry struct back to raw middleware specification.

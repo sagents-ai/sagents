@@ -117,7 +117,42 @@ defmodule Sagents.StateTest do
     end
   end
 
+  describe "delta/1" do
+    setup do
+      %{
+        state:
+          State.new!(%{todos: [%{id: "1", content: "task"}], messages: [Message.new_user!("hi")]})
+      }
+    end
+
+    test "a metadata delta leaves todos and messages alone", %{state: state} do
+      merged = State.merge_states(state, State.delta(%{metadata: %{counter: 1}}))
+
+      assert merged.todos == state.todos
+      assert merged.messages == state.messages
+      assert merged.metadata.counter == 1
+    end
+
+    test "a todos delta replaces the todos, and an empty list clears them", %{state: state} do
+      replaced = State.merge_states(state, State.delta(todos: [%{id: "2", content: "new"}]))
+      assert [%{id: "2"}] = replaced.todos
+
+      assert State.merge_states(state, State.delta(todos: [])).todos == []
+    end
+
+    test "rejects a key that is not a State field" do
+      assert_raise KeyError, fn -> State.delta(%{system_prompt: "x"}) end
+    end
+  end
+
   describe "merge_states/2 with map updates" do
+    test "a map that does not name the todos leaves them alone" do
+      state = State.new!(%{todos: [%{id: "1", content: "task"}]})
+
+      assert State.merge_states(state, %{metadata: %{key: "value"}}).todos == state.todos
+      assert State.merge_states(state, %{todos: []}).todos == []
+    end
+
     test "merges map into state" do
       state = State.new!(%{messages: [Message.new_user!("hello")]})
 

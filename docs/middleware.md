@@ -165,15 +165,22 @@ defmodule MyApp.Middleware.Counter do
     current = State.get_metadata(state, :counter, 0)
     new_count = current + 1
 
-    # Return updated state as third element
-    updated_state = State.put_metadata(state, :counter, new_count)
+    # Return only the change as the third element
+    delta = State.delta(%{metadata: %{counter: new_count}})
 
-    {:ok, "Counter is now #{new_count}", updated_state}
+    {:ok, "Counter is now #{new_count}", delta}
   end
 end
 ```
 
-The state delta is automatically merged back into the main state.
+The state delta is merged back into the main state with `State.merge_states/2`.
+Build it with `State.delta/1` and keep it to the changes:
+
+- Returning `context.state`, or anything built from it, duplicates every
+  message, because messages concatenate on merge.
+- A bare `%State{metadata: ...}` clears the todo list. `%State{}` defaults
+  `todos` to `[]`, and an empty list replaces the current todos.
+  `State.delta/1` leaves them untouched unless you pass `:todos`.
 
 ### Configurable Tools
 
