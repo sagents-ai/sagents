@@ -413,6 +413,12 @@ defmodule Sagents.Agent do
     end
   end
 
+  @doc false
+  # The keys `inject_agent_context/4` adds to every middleware's options, for
+  # middleware that reject options they do not know.
+  @spec injected_context_keys() :: [atom()]
+  def injected_context_keys, do: [:agent_id, :model, :filesystem_scope]
+
   # Inject agent_id, model, and filesystem_scope into user middleware configurations
   defp inject_agent_context(middleware_list, agent_id, model, filesystem_scope) do
     base_context =
@@ -770,7 +776,6 @@ defmodule Sagents.Agent do
     # Between chains, State holds the messages, so a hook that rewrites them is
     # safe here. Entries that already ran this call do not run again.
     with {:ok, switched_state} <- apply_before_model_hooks(state, entering) do
-      AbilitySets.notify_switch(agent.agent_id, switch)
       fire_callback(callbacks, :on_after_middleware, [switched_state])
 
       run = %{
@@ -857,6 +862,10 @@ defmodule Sagents.Agent do
     result =
       case apply_handle_resume_hooks(agent, state, resume_data, agent.middleware, opts) do
         {:ok, updated_state} ->
+          # A switch held by the interrupt takes effect when the resume runs
+          # the approved calls. The execute that follows is built for the new
+          # set, so it is announced here.
+          announce_switch({:ok, updated_state}, agent, AbilitySets.active(agent, state))
           execute(agent, %{updated_state | interrupt_data: nil}, opts)
 
         {:interrupt, interrupted_state, new_interrupt_data} ->
@@ -982,8 +991,28 @@ defmodule Sagents.Agent do
       |> handle_chain_result(state)
       |> reject_streaming_error(chain_result, callbacks)
       |> strip_reasoning_if_switched(agent, built_for)
+      |> announce_switch(agent, built_for)
     end
   end
+
+  # Every switch a chain records is announced once, here, however the chain
+  # ended: with a Switch result that continues on a new chain, or with a switch
+  # made in the same tool batch as an interrupt, an until_tool hit or a pause,
+  # which ends the call without a new chain.
+  defp announce_switch(result, agent, built_for) do
+    with %State{} = state <- result_state(result),
+         to when to != built_for <- AbilitySets.active(agent, state) do
+      AbilitySets.notify_switch(agent, %Switch{from: built_for, to: to})
+    end
+
+    result
+  end
+
+  defp result_state({:ok, %State{} = state}), do: state
+  defp result_state({:ok, %State{} = state, _extra}), do: state
+  defp result_state({:interrupt, %State{} = state, _data}), do: state
+  defp result_state({:pause, %State{} = state}), do: state
+  defp result_state(_result), do: nil
 
   # A chain whose tools switched the ability set leaves reasoning bound to the
   # old prompt and tools. It is dropped from the state once, here, so neither

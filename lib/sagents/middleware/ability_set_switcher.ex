@@ -1,5 +1,5 @@
 defmodule Sagents.Middleware.AbilitySetSwitcher do
-  @moduledoc """
+  @moduledoc ~S"""
   Lets an agent work in one of several modes, each a named set of middleware.
 
   An **ability set** is a curated set of middleware with a short "when to use".
@@ -24,17 +24,18 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
             MyApp.Middleware.UserContext,
             {Sagents.Middleware.AbilitySetSwitcher,
              sets: %{
-               "devices" => %{
-                 name: "Devices",
-                 when_to_use: "Device inventory, packages, and deployments to devices.",
-                 middleware: [MyApp.Middleware.Devices, MyApp.Middleware.Deployments]
-               },
-               "billing" => %{
-                 name: "Billing",
-                 when_to_use: "Invoices, balances, and payment status.",
-                 switch_message: "Switching to focus on billing questions.",
-                 middleware: [MyApp.Middleware.Billing]
-               }
+               "devices" =>
+                 AbilitySet.new!(%{
+                   name: "Devices",
+                   when_to_use: "Device inventory, packages, and deployments to devices.",
+                   middleware: [MyApp.Middleware.Devices, MyApp.Middleware.Deployments]
+                 }),
+               "billing" =>
+                 AbilitySet.new!(%{
+                   name: "Billing",
+                   when_to_use: "Invoices, balances, and payment status.",
+                   middleware: [MyApp.Middleware.Billing]
+                 })
              },
              default: nil}
           ]
@@ -49,15 +50,11 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
 
   ## Options
 
-  - `:sets` - Map of set name to set definition (required). A name matches
-    `^[a-z][a-z0-9_]{0,63}$`. A definition holds:
-    - `:when_to_use` - One line telling the model when the set applies (required)
-    - `:name` - Display name, used in tool results and hints (default: the
-      capitalized set name)
-    - `:switch_message` - The tool result the model reads after switching to
-      the set, such as `"Switching to focus on billing questions."` (default:
-      `"Switched to the <name> mode. Its tools are available now."`)
-    - `:middleware` - The set's middleware specs (default: `[]`)
+  - `:sets` - Map of set name to `Sagents.AbilitySet` (required). A name
+    matches `^[a-z][a-z0-9_]{0,63}$`. A set may also be given as a plain map or
+    keyword list of the struct's fields, and is validated the same way. A set's
+    `:switch_message` defaults to `"Switched to the <name> mode."` followed by
+    the tools the switch makes available (see "Switch messages").
   - `:default` - The set active when the state names none. `nil` (the default)
     means rails only.
   - `:max_switches_per_run` - Switches the model may make within one
@@ -65,6 +62,67 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   - `:state_key` - The `State.metadata` key holding the active set (default:
     `"active_ability_set"`).
   - `:tool_name` - Name of the switching tool (default: `"switch_mode"`).
+  - `:on_switch` - A callback run once for each switch (see "Reacting to a
+    switch") (default: `nil`).
+
+  An option or set field the switcher does not know is an error, so a
+  misspelled key fails `Sagents.Agent.new/2` instead of being ignored.
+
+  A callback is a 1-arity function or a `{module, function, args}` tuple. A
+  tuple is called as `apply(module, function, [info | args])`. Prefer the tuple
+  under Horde: an agent's options travel between nodes, and an anonymous
+  function can only be called by the build that created it.
+
+  ## Switch messages
+
+  A successful `switch_mode` call returns the target set's `:switch_message`
+  to the model. The default names the mode and lists the tools that became
+  available, the target set's tools that the previous set did not have:
+
+      Switched to the Billing mode. Tools now available: get_invoice, list_invoices.
+
+  A callback receives a map and returns the text:
+
+  - `:from` - the set switched from (`nil` for rails only)
+  - `:to` - the set switched to
+  - `:name` - the target set's display name
+  - `:tools` - the names of the tools that became available, sorted
+
+  ```elixir
+  switch_message: fn %{name: name, tools: tools} ->
+    "Switching to focus on #{name}. You can now use #{Enum.join(tools, ", ")}."
+  end
+  ```
+
+  A callback that raises or returns anything but a non-empty string falls back
+  to the default message, with a warning.
+
+  ## Reacting to a switch
+
+  `:on_switch` runs once for every switch, in the process executing the agent,
+  when the switch is announced with `{:agent, {:ability_set_changed, from, to}}`.
+  That covers a switch that continues the run on a new chain and a switch
+  recorded in the same tool batch as an interrupt, an `until_tool` hit or a
+  pause. It receives a map with `:agent_id`, `:from`, `:to` and `:mid_run`.
+
+  It suits work that must happen once per switch whatever is watching, such as
+  adding a message to the conversation's transcript:
+
+  ```elixir
+  on_switch: {MyApp.Modes, :announce, []}
+
+  # in MyApp.Modes
+  def announce(%{agent_id: agent_id, to: to}) do
+    Sagents.AgentServer.save_synthetic_message_from(agent_id, %{
+      message_type: "assistant",
+      content_type: "text",
+      content: %{"text" => announcement(to)}
+    })
+  end
+  ```
+
+  Its return value is ignored. An exception is logged and does not affect the
+  run. Keep it quick: the next LLM call waits for it.
 
   ## The active set
 
@@ -105,30 +163,41 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
 
   @behaviour Sagents.Middleware
 
+  require Logger
+
   alias LangChain.Function
+  alias Sagents.AbilitySet
   alias Sagents.State
+
+  @typedoc "A 1-arity function or a `{module, function, args}` tuple."
+  @type callback :: (map() -> term()) | {module(), atom(), list()}
 
   @set_name_pattern ~r/^[a-z][a-z0-9_]{0,63}$/
 
   @default_state_key "active_ability_set"
   @default_tool_name "switch_mode"
 
+  @option_keys [:sets, :default, :max_switches_per_run, :state_key, :tool_name, :on_switch, :id]
+
   @impl true
   def init(opts) do
-    with {:ok, sets} <- validate_sets(Keyword.get(opts, :sets)),
+    with :ok <- validate_option_keys(opts),
+         {:ok, sets} <- validate_sets(Keyword.get(opts, :sets)),
          {:ok, default} <- validate_default(Keyword.get(opts, :default), sets),
          {:ok, max_switches} <-
            validate_max_switches(Keyword.get(opts, :max_switches_per_run, 1)),
          {:ok, state_key} <-
            validate_string(:state_key, Keyword.get(opts, :state_key, @default_state_key)),
          {:ok, tool_name} <-
-           validate_string(:tool_name, Keyword.get(opts, :tool_name, @default_tool_name)) do
+           validate_string(:tool_name, Keyword.get(opts, :tool_name, @default_tool_name)),
+         {:ok, on_switch} <- validate_on_switch(Keyword.get(opts, :on_switch)) do
       config = %{
         sets: sets,
         default: default,
         max_switches_per_run: max_switches,
         state_key: state_key,
-        tool_name: tool_name
+        tool_name: tool_name,
+        on_switch: on_switch
       }
 
       config =
@@ -246,7 +315,14 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
          "Mode already switched in this turn. Continue with the current tools or answer the user."}
 
       true ->
-        {:ok, switch_message(config, mode), State.delta(%{metadata: %{config.state_key => mode}})}
+        info = %{
+          from: current,
+          to: mode,
+          name: display_name(config, mode),
+          tools: tools_added(context, current, mode)
+        }
+
+        {:ok, switch_message(config, info), State.delta(%{metadata: %{config.state_key => mode}})}
     end
   end
 
@@ -266,15 +342,71 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
 
   defp display_name(config, set), do: config.sets[set].name
 
-  defp switch_message(config, set) do
-    case config.sets[set] do
-      %{switch_message: message} when is_binary(message) ->
-        message
+  # The target set's tools that the current set does not already provide. The
+  # chain context carries the tool-to-sets map; outside an agent chain there is
+  # none, and no tools are listed.
+  defp tools_added(%{ability_sets: %{tool_sets: tool_sets}}, current, mode)
+       when is_map(tool_sets) do
+    for({tool, sets} <- tool_sets, mode in sets, current not in sets, do: tool)
+    |> Enum.sort()
+  end
 
-      _set ->
-        "Switched to the #{display_name(config, set)} mode."
+  defp tools_added(_context, _current, _mode), do: []
+
+  defp switch_message(config, info) do
+    case config.sets[info.to].switch_message do
+      nil -> default_switch_message(info)
+      message when is_binary(message) -> message
+      callback -> callback_switch_message(callback, info)
     end
   end
+
+  defp callback_switch_message(callback, info) do
+    case apply_callback(callback, info) do
+      {:ok, message} when is_binary(message) and message != "" ->
+        message
+
+      {:ok, other} ->
+        Logger.warning(
+          "switch_message callback for ability set #{inspect(info.to)} returned " <>
+            "#{inspect(other)}, not a non-empty string; using the default message"
+        )
+
+        default_switch_message(info)
+
+      {:error, _reason} ->
+        default_switch_message(info)
+    end
+  end
+
+  defp default_switch_message(%{name: name, tools: []}), do: "Switched to the #{name} mode."
+
+  defp default_switch_message(%{name: name, tools: tools}),
+    do: "Switched to the #{name} mode. Tools now available: #{Enum.join(tools, ", ")}."
+
+  @doc false
+  # Call a `:switch_message` or `:on_switch` callback with `info`. An exception,
+  # throw or exit is logged and returned as `{:error, reason}`, so a faulty
+  # callback never ends the run.
+  @spec apply_callback(callback(), map()) :: {:ok, term()} | {:error, term()}
+  def apply_callback(callback, info) do
+    {:ok, invoke(callback, info)}
+  rescue
+    exception ->
+      Logger.error(
+        "Ability set callback #{inspect(callback)} raised: " <>
+          Exception.format(:error, exception, __STACKTRACE__)
+      )
+
+      {:error, exception}
+  catch
+    kind, reason ->
+      Logger.error("Ability set callback #{inspect(callback)} failed: #{inspect({kind, reason})}")
+      {:error, {kind, reason}}
+  end
+
+  defp invoke(fun, info) when is_function(fun, 1), do: fun.(info)
+  defp invoke({module, function, args}, info), do: apply(module, function, [info | args])
 
   # ── Validation ─────────────────────────────────────────────────
 
@@ -291,40 +423,47 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
     do:
       {:error, ":sets must be a non-empty map of set name to definition, got: #{inspect(other)}"}
 
-  defp validate_set(name, definition) when is_list(definition),
-    do: validate_set(name, Map.new(definition))
-
+  # The config keeps each set's catalog fields. Its :middleware is emptied: the
+  # members are entries of `agent.middleware`, tagged with their sets.
   defp validate_set(name, definition)
-       when is_map(definition) and (is_atom(name) or is_binary(name)) do
+       when (is_atom(name) or is_binary(name)) and
+              (is_map(definition) or is_list(definition)) do
     set_name = set_name(name)
 
-    cond do
-      not Regex.match?(@set_name_pattern, set_name) ->
-        {:error,
-         "ability set name #{inspect(set_name)} must match #{inspect(Regex.source(@set_name_pattern))}"}
+    if Regex.match?(@set_name_pattern, set_name) do
+      case AbilitySet.cast_set(definition) do
+        {:ok, %AbilitySet{} = set} ->
+          {:ok, set_name,
+           %AbilitySet{set | name: set.name || String.capitalize(set_name), middleware: []}}
 
-      not non_empty_string?(Map.get(definition, :when_to_use)) ->
-        {:error, "ability set #{inspect(set_name)} needs a :when_to_use description"}
-
-      not (is_nil(Map.get(definition, :name)) or non_empty_string?(Map.get(definition, :name))) ->
-        {:error, "ability set #{inspect(set_name)} has an invalid :name"}
-
-      not (is_nil(Map.get(definition, :switch_message)) or
-               non_empty_string?(Map.get(definition, :switch_message))) ->
-        {:error, "ability set #{inspect(set_name)} has an invalid :switch_message"}
-
-      true ->
-        {:ok, set_name,
-         %{
-           name: Map.get(definition, :name) || String.capitalize(set_name),
-           when_to_use: definition.when_to_use,
-           switch_message: Map.get(definition, :switch_message)
-         }}
+        {:error, reason} ->
+          {:error, "ability set #{inspect(set_name)}: #{reason}"}
+      end
+    else
+      {:error,
+       "ability set name #{inspect(set_name)} must match #{inspect(Regex.source(@set_name_pattern))}"}
     end
   end
 
   defp validate_set(name, definition),
     do: {:error, "invalid ability set #{inspect(name)}: #{inspect(definition)}"}
+
+  # An option the switcher does not know is an error, so a misspelled key such
+  # as `:on_swich` cannot be dropped without a trace. `Sagents.Agent.new/2`
+  # adds its own context keys to every middleware's options.
+  defp validate_option_keys(opts) do
+    known = @option_keys ++ Sagents.Agent.injected_context_keys()
+
+    case Enum.reject(Keyword.keys(opts), &(&1 in known)) do
+      [] ->
+        :ok
+
+      unknown ->
+        {:error,
+         "unknown #{inspect(__MODULE__)} options #{inspect(unknown)}; " <>
+           "valid options are #{inspect(@option_keys)}"}
+    end
+  end
 
   defp validate_default(nil, _sets), do: {:ok, nil}
 
@@ -349,6 +488,17 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
     if non_empty_string?(value),
       do: {:ok, value},
       else: {:error, "#{inspect(key)} must be a non-empty string, got: #{inspect(value)}"}
+  end
+
+  defp validate_on_switch(nil), do: {:ok, nil}
+
+  defp validate_on_switch(callback) do
+    if AbilitySet.callback?(callback),
+      do: {:ok, callback},
+      else:
+        {:error,
+         ":on_switch must be a 1-arity function or a {module, function, args} tuple, " <>
+           "got: #{inspect(callback)}"}
   end
 
   defp non_empty_string?(value), do: is_binary(value) and value != ""

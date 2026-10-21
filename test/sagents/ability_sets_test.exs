@@ -8,6 +8,7 @@ defmodule Sagents.AbilitySetsTest do
   alias LangChain.Message.ContentPart
   alias LangChain.Message.ToolCall
   alias LangChain.Message.ToolResult
+  alias Sagents.AbilitySet
   alias Sagents.AbilitySets
   alias Sagents.Agent
   alias Sagents.Middleware.AbilitySetSwitcher
@@ -88,7 +89,7 @@ defmodule Sagents.AbilitySetsTest do
                Enum.find(agent.middleware, &(&1.id == "devices_mw"))
 
       switcher = Enum.find(agent.middleware, &(&1.id == AbilitySetSwitcher))
-      refute Enum.any?(Map.values(switcher.config.sets), &Map.has_key?(&1, :middleware))
+      assert Enum.all?(Map.values(switcher.config.sets), &(&1.middleware == []))
     end
 
     test "agent.tools is the union of every set's tools" do
@@ -155,7 +156,7 @@ defmodule Sagents.AbilitySetsTest do
 
     test "rejects a set without when_to_use" do
       sets = %{"devices" => %{middleware: []}}
-      assert errors_text(new_agent(sets: sets)) =~ "needs a :when_to_use"
+      assert errors_text(new_agent(sets: sets)) =~ "when_to_use: can't be blank"
     end
 
     test "rejects a default naming no set" do
@@ -411,6 +412,8 @@ defmodule Sagents.AbilitySetsTest do
     end
   end
 
+  def switch_text(%{name: name}, greeting), do: "#{greeting}, #{name}."
+
   describe "Sagents.Middleware.AbilitySetSwitcher" do
     defp switcher_config(opts \\ []) do
       {:ok, config} = AbilitySetSwitcher.init(Keyword.merge([sets: sets()], opts))
@@ -472,12 +475,135 @@ defmodule Sagents.AbilitySetsTest do
                tool.function.(%{"mode" => "devices"}, context)
     end
 
-    test "init/1 rejects a switch_message that is not a non-empty string" do
-      for bad <- ["", 42] do
+    test "the default switch_message lists the tools the target set adds" do
+      tool = switch_tool(switcher_config())
+
+      # "lookup" is in both sets, so switching between them does not add it.
+      tool_sets = %{
+        "list_devices" => ["devices"],
+        "deploy_package" => ["devices"],
+        "lookup" => ["billing", "devices"],
+        "list_invoices" => ["billing"]
+      }
+
+      from_rails = %{ability_sets: %{active: nil, switches: 0, tool_sets: tool_sets}}
+      from_billing = %{ability_sets: %{active: "billing", switches: 0, tool_sets: tool_sets}}
+
+      assert {:ok,
+              "Switched to the Devices mode. Tools now available: deploy_package, list_devices, lookup.",
+              _delta} = tool.function.(%{"mode" => "devices"}, from_rails)
+
+      assert {:ok,
+              "Switched to the Devices mode. Tools now available: deploy_package, list_devices.",
+              _delta} = tool.function.(%{"mode" => "devices"}, from_billing)
+    end
+
+    test "a switch_message callback builds the text from the switch" do
+      test_pid = self()
+
+      message = fn info ->
+        send(test_pid, {:switch_info, info})
+        "Focusing on #{info.name}: #{Enum.join(info.tools, ", ")}."
+      end
+
+      sets = put_in(sets(), ["billing", :switch_message], message)
+      tool = switch_tool(switcher_config(sets: sets))
+      tool_sets = %{"list_invoices" => ["billing"], "list_devices" => ["devices"]}
+      context = %{ability_sets: %{active: "devices", switches: 0, tool_sets: tool_sets}}
+
+      assert {:ok, "Focusing on Billing: list_invoices.", _delta} =
+               tool.function.(%{"mode" => "billing"}, context)
+
+      assert_received {:switch_info,
+                       %{
+                         from: "devices",
+                         to: "billing",
+                         name: "Billing",
+                         tools: ["list_invoices"]
+                       }}
+    end
+
+    test "a switch_message may be a {module, function, args} tuple" do
+      sets = put_in(sets(), ["billing", :switch_message], {__MODULE__, :switch_text, ["Ahoy"]})
+      tool = switch_tool(switcher_config(sets: sets))
+      context = %{ability_sets: %{active: nil, switches: 0}}
+
+      assert {:ok, "Ahoy, Billing.", _delta} = tool.function.(%{"mode" => "billing"}, context)
+    end
+
+    test "a switch_message callback that fails falls back to the default" do
+      context = %{ability_sets: %{active: nil, switches: 0}}
+
+      for callback <- [fn _info -> raise "boom" end, fn _info -> :not_text end] do
+        sets = put_in(sets(), ["billing", :switch_message], callback)
+        tool = switch_tool(switcher_config(sets: sets))
+
+        capture_log(fn ->
+          assert {:ok, "Switched to the Billing mode.", _delta} =
+                   tool.function.(%{"mode" => "billing"}, context)
+        end)
+      end
+    end
+
+    test "init/1 accepts an on_switch function or tuple and rejects anything else" do
+      on_switch = fn _info -> :ok end
+
+      assert switcher_config(on_switch: on_switch).on_switch == on_switch
+
+      assert switcher_config(on_switch: {__MODULE__, :switch_text, []}).on_switch ==
+               {__MODULE__, :switch_text, []}
+
+      assert switcher_config().on_switch == nil
+
+      for bad <- ["announce", fn -> :ok end, {__MODULE__, :switch_text}] do
+        assert {:error, message} = AbilitySetSwitcher.init(sets: sets(), on_switch: bad)
+        assert message =~ ":on_switch"
+      end
+    end
+
+    test "init/1 accepts AbilitySet structs and fills in the display name" do
+      sets = %{
+        "billing" => AbilitySet.new!(%{when_to_use: "Invoices."}),
+        "devices" => AbilitySet.new!(%{name: "Device Fleet", when_to_use: "Devices."})
+      }
+
+      config = switcher_config(sets: sets)
+
+      assert %AbilitySet{name: "Billing", when_to_use: "Invoices."} = config.sets["billing"]
+      assert config.sets["devices"].name == "Device Fleet"
+      assert {:ok, ^config} = AbilitySetSwitcher.init(Map.to_list(config))
+    end
+
+    test "init/1 rejects an unknown key in a plain-map set" do
+      sets = put_in(sets(), ["billing", :switch_mesage], "Typo.")
+
+      assert {:error, message} = AbilitySetSwitcher.init(sets: sets)
+      assert message =~ ~s(ability set "billing")
+      assert message =~ "unknown keys [:switch_mesage]"
+    end
+
+    test "init/1 rejects an unknown option and accepts the keys Agent.new injects" do
+      assert {:error, message} =
+               AbilitySetSwitcher.init(sets: sets(), on_swich: fn _info -> :ok end)
+
+      assert message =~ "unknown"
+      assert message =~ ":on_swich"
+
+      assert {:ok, _config} =
+               AbilitySetSwitcher.init(
+                 sets: sets(),
+                 agent_id: "a1",
+                 model: nil,
+                 filesystem_scope: nil
+               )
+    end
+
+    test "init/1 rejects a switch_message that is not a string or a callback" do
+      for bad <- ["", 42, fn -> "no arity" end] do
         sets = put_in(sets(), ["billing", :switch_message], bad)
 
         assert {:error, message} = AbilitySetSwitcher.init(sets: sets)
-        assert message =~ ":switch_message"
+        assert message =~ "switch_message: must be"
       end
     end
 

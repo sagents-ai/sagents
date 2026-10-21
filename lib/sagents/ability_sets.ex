@@ -153,23 +153,31 @@ defmodule Sagents.AbilitySets do
 
   @doc """
   Announce a switch: publish `{:ability_set_changed, from, to}` on the agent's
-  main channel and emit the `[:sagents, :ability_sets, :switched]` telemetry
-  event.
+  main channel, emit the `[:sagents, :ability_sets, :switched]` telemetry
+  event, and run the switcher's `:on_switch` callback.
 
-  The telemetry metadata holds `:agent_id`, `:from`, `:to` and `:mid_run`,
-  which is `true` when the model switched during a run.
+  The telemetry metadata and the callback's argument hold `:agent_id`, `:from`,
+  `:to` and `:mid_run`, which is `true` when the model switched during a run.
+  A failing callback is logged and does not affect the caller.
   """
-  @spec notify_switch(String.t() | nil, Switch.t(), keyword()) :: :ok
-  def notify_switch(agent_id, %Switch{from: from, to: to}, opts \\ []) do
+  @spec notify_switch(Sagents.Agent.t(), Switch.t(), keyword()) :: :ok
+  def notify_switch(agent, %Switch{from: from, to: to}, opts \\ []) do
+    agent_id = agent.agent_id
+
     if agent_id,
       do: Sagents.AgentServer.publish_event_from(agent_id, {:ability_set_changed, from, to})
 
-    :telemetry.execute(@switched_event, %{count: 1}, %{
-      agent_id: agent_id,
-      from: from,
-      to: to,
-      mid_run: Keyword.get(opts, :mid_run, true)
-    })
+    info = %{agent_id: agent_id, from: from, to: to, mid_run: Keyword.get(opts, :mid_run, true)}
+
+    :telemetry.execute(@switched_event, %{count: 1}, info)
+
+    case agent.ability_index do
+      %Index{config: %{on_switch: on_switch}} when not is_nil(on_switch) ->
+        AbilitySetSwitcher.apply_callback(on_switch, info)
+
+      _no_callback ->
+        :ok
+    end
 
     :ok
   end

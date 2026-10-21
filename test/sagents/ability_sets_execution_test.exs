@@ -314,6 +314,7 @@ defmodule Sagents.AbilitySetsExecutionTest do
 
       assert interrupted_state.metadata["active_ability_set"] == "devices"
       assert [_only_call] = received_llm_calls()
+      assert_received {:switched, %{count: 1}, %{from: nil, to: "devices"}}
       refute_received {:switched, _measurements, _metadata}
     end
 
@@ -389,6 +390,22 @@ defmodule Sagents.AbilitySetsExecutionTest do
 
       assert final_state.metadata["active_ability_set"] == "devices"
       assert [_only_call] = received_llm_calls()
+      assert_received {:switched, %{count: 1}, %{from: nil, to: "devices"}}
+      refute_received {:switched, _measurements, _metadata}
+    end
+
+    test "the switch result lists the tools the switch makes available", %{agent: agent} do
+      expect_responses([
+        tool_calls_message([switch_call("s1", "devices")]),
+        Message.new_assistant!("Done")
+      ])
+
+      assert {:ok, final_state} = Agent.execute(agent, state())
+
+      assert [%ToolResult{name: "switch_mode"} = result] = tool_results(final_state.messages)
+
+      assert ContentPart.content_to_string(result.content) ==
+               "Switched to the Devices mode. Tools now available: deploy_package, list_devices."
     end
 
     test "a batched call to the new set's tool gets a hint, and the retry succeeds", %{
@@ -522,6 +539,89 @@ defmodule Sagents.AbilitySetsExecutionTest do
       assert_received {:tool_ran, "whoami", %{ability_sets: %{active: "devices", switches: 1}}}
     end
   end
+
+  describe "on_switch" do
+    defp on_switch_agent!(on_switch, opts \\ []) do
+      new_agent!(Keyword.merge([switcher: [on_switch: on_switch]], opts))
+    end
+
+    defp report_to(test_pid), do: fn info -> send(test_pid, {:on_switch, info}) end
+
+    test "runs once for a switch that continues on a new chain" do
+      agent = on_switch_agent!(report_to(self()))
+
+      expect_responses([
+        tool_calls_message([switch_call("s1", "devices")]),
+        Message.new_assistant!("Done")
+      ])
+
+      assert {:ok, _state} = Agent.execute(agent, state())
+
+      assert_received {:on_switch, info}
+      assert info == %{agent_id: agent.agent_id, from: nil, to: "devices", mid_run: true}
+      refute_received {:on_switch, _info}
+    end
+
+    test "accepts a {module, function, args} tuple, called with the info first" do
+      agent = on_switch_agent!({__MODULE__, :report_switch, [self()]})
+
+      expect_responses([
+        tool_calls_message([switch_call("s1", "devices")]),
+        Message.new_assistant!("Done")
+      ])
+
+      assert {:ok, _state} = Agent.execute(agent, state())
+      assert_received {:on_switch, %{to: "devices"}}
+    end
+
+    test "runs for a switch in the same batch as an interrupt" do
+      agent = on_switch_agent!(report_to(self()))
+
+      expect_responses([
+        tool_calls_message([switch_call("s1", "devices"), {"c1", "ask_human", %{}}])
+      ])
+
+      assert {:interrupt, _state, _data} = Agent.execute(agent, state())
+      assert_received {:on_switch, %{from: nil, to: "devices"}}
+      refute_received {:on_switch, _info}
+    end
+
+    test "runs when a switch held by an interrupt takes effect on resume" do
+      agent = on_switch_agent!(report_to(self()), interrupt_on: %{"approve_me" => true})
+
+      expect_responses([
+        tool_calls_message([switch_call("s1", "devices"), {"c1", "approve_me", %{}}])
+      ])
+
+      assert {:interrupt, interrupted_state, _data} = Agent.execute(agent, state())
+      refute_received {:on_switch, _info}
+
+      expect_responses([Message.new_assistant!("Done")])
+
+      assert {:ok, _state} = Agent.resume(agent, interrupted_state, [%{type: :approve}])
+      assert_received {:on_switch, %{from: nil, to: "devices"}}
+      refute_received {:on_switch, _info}
+    end
+
+    test "a failing callback is logged and the run completes" do
+      agent = on_switch_agent!(fn _info -> raise "announcement failed" end)
+
+      expect_responses([
+        tool_calls_message([switch_call("s1", "devices")]),
+        Message.new_assistant!("Done")
+      ])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, final_state} = Agent.execute(agent, state())
+          assert final_state.metadata["active_ability_set"] == "devices"
+        end)
+
+      assert log =~ "announcement failed"
+    end
+  end
+
+  def report_switch(info, test_pid), do: send(test_pid, {:on_switch, info})
 
   describe "an entry in two sets" do
     test "does not run before_model again when the call switches into another of its sets" do
