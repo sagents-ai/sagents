@@ -80,6 +80,12 @@ defmodule Sagents.Middleware.SubAgent do
   3. **Blocked middleware is excluded** - Any modules listed in `:block_middleware`
      are filtered out before passing to the subagent.
 
+  4. **Only the active ability set is inherited** - When the parent uses
+     `Sagents.Middleware.AbilitySetSwitcher`, the subagent inherits the rails
+     plus the members of the set active when it starts, as ordinary middleware.
+     The switcher and the members of other sets are left out, so the subagent
+     works in the parent's current mode and cannot switch.
+
   Exclusions apply to *inheritance* only. A pre-configured subagent that names
   one of these in its own `:middleware` list still receives it.
 
