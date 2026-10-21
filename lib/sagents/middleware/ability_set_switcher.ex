@@ -32,6 +32,7 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
                "billing" => %{
                  name: "Billing",
                  when_to_use: "Invoices, balances, and payment status.",
+                 switch_message: "Switching to focus on billing questions.",
                  middleware: [MyApp.Middleware.Billing]
                }
              },
@@ -53,6 +54,9 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
     - `:when_to_use` - One line telling the model when the set applies (required)
     - `:name` - Display name, used in tool results and hints (default: the
       capitalized set name)
+    - `:switch_message` - The tool result the model reads after switching to
+      the set, such as `"Switching to focus on billing questions."` (default:
+      `"Switched to the <name> mode. Its tools are available now."`)
     - `:middleware` - The set's middleware specs (default: `[]`)
   - `:default` - The set active when the state names none. `nil` (the default)
     means rails only.
@@ -242,8 +246,7 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
          "Mode already switched in this turn. Continue with the current tools or answer the user."}
 
       true ->
-        {:ok, "Switched to the #{display_name(config, mode)} mode. Its tools are available now.",
-         State.delta(%{metadata: %{config.state_key => mode}})}
+        {:ok, switch_message(config, mode), State.delta(%{metadata: %{config.state_key => mode}})}
     end
   end
 
@@ -262,6 +265,16 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   defp run_position(config, _context), do: {config.default, 0}
 
   defp display_name(config, set), do: config.sets[set].name
+
+  defp switch_message(config, set) do
+    case config.sets[set] do
+      %{switch_message: message} when is_binary(message) ->
+        message
+
+      _set ->
+        "Switched to the #{display_name(config, set)} mode."
+    end
+  end
 
   # ── Validation ─────────────────────────────────────────────────
 
@@ -296,11 +309,16 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
       not (is_nil(Map.get(definition, :name)) or non_empty_string?(Map.get(definition, :name))) ->
         {:error, "ability set #{inspect(set_name)} has an invalid :name"}
 
+      not (is_nil(Map.get(definition, :switch_message)) or
+               non_empty_string?(Map.get(definition, :switch_message))) ->
+        {:error, "ability set #{inspect(set_name)} has an invalid :switch_message"}
+
       true ->
         {:ok, set_name,
          %{
            name: Map.get(definition, :name) || String.capitalize(set_name),
-           when_to_use: definition.when_to_use
+           when_to_use: definition.when_to_use,
+           switch_message: Map.get(definition, :switch_message)
          }}
     end
   end

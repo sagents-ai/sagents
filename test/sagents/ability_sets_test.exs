@@ -449,13 +449,43 @@ defmodule Sagents.AbilitySetsTest do
       tool = switch_tool(switcher_config())
       context = %{ability_sets: %{active: nil, switches: 0}}
 
-      assert {:ok, "Switched to the Devices mode. Its tools are available now.",
+      assert {:ok, "Switched to the Devices mode.",
               %State{todos: nil, metadata: %{"active_ability_set" => "devices"}} = delta} =
                tool.function.(%{"mode" => "devices"}, context)
 
       todo = Sagents.Todo.new!(%{id: 1, content: "Keep me"})
       state = State.new!(%{todos: [todo]})
       assert State.merge_states(state, delta).todos == [todo]
+    end
+
+    test "a set's switch_message is the tool result for switching to it" do
+      sets =
+        put_in(sets(), ["billing", :switch_message], "Switching to focus on billing questions.")
+
+      tool = switch_tool(switcher_config(sets: sets))
+      context = %{ability_sets: %{active: nil, switches: 0}}
+
+      assert {:ok, "Switching to focus on billing questions.", _delta} =
+               tool.function.(%{"mode" => "billing"}, context)
+
+      assert {:ok, "Switched to the Devices mode.", _delta} =
+               tool.function.(%{"mode" => "devices"}, context)
+    end
+
+    test "init/1 rejects a switch_message that is not a non-empty string" do
+      for bad <- ["", 42] do
+        sets = put_in(sets(), ["billing", :switch_message], bad)
+
+        assert {:error, message} = AbilitySetSwitcher.init(sets: sets)
+        assert message =~ ":switch_message"
+      end
+    end
+
+    test "init/1 is idempotent with a switch_message" do
+      sets = put_in(sets(), ["billing", :switch_message], "Switching to billing.")
+      config = switcher_config(sets: sets)
+
+      assert {:ok, ^config} = AbilitySetSwitcher.init(Map.to_list(config))
     end
 
     test "switching to the current mode is an error" do
