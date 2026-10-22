@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.18.1
+
+Ability sets can hold any number of tools without a warning.
+
+### Changed
+- An ability set with more than 15 tools no longer logs a warning when the agent is built. A large set is a valid setup. https://github.com/sagents-ai/sagents/pull/222
+
 ## v0.18.0
 
 Ability sets let an agent work in modes. Each mode is a named set of middleware. The model switches between modes with a `switch_mode` tool, so each LLM call sends only the active mode's tools and prompt fragments. Switching uses ordinary function calling, so it shortens the tool list on every chat model, including OpenAI-compatible services that have no tool search. It is opt-in: an agent without the switcher behaves as before.
