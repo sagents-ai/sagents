@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.18.0
+
+Ability sets let an agent work in modes. Each mode is a named set of middleware. The model switches between modes with a `switch_mode` tool, so each LLM call sends only the active mode's tools and prompt fragments. Switching uses ordinary function calling, so it shortens the tool list on every chat model, including OpenAI-compatible services that have no tool search. It is opt-in: an agent without the switcher behaves as before.
+
+### Added
+- `Sagents.Middleware.AbilitySetSwitcher` and `Sagents.AbilitySet` for declaring ability sets. Middleware outside every set stay active in all of them. The active set is stored in `state.metadata["active_ability_set"]`, so it persists with the conversation. A switch continues the same `execute` on a chain built for the new set, and the new tools are available on the next LLM call. Calls to a tool from an inactive set get a hint naming the mode to switch to. Dynamic sub-agents inherit the parent's active set but cannot switch. See the switcher's moduledoc. https://github.com/sagents-ai/sagents/pull/220
+- Each switch publishes `{:agent, {:ability_set_changed, from, to}}`, emits `[:sagents, :ability_sets, :switched]` telemetry, and runs the optional `:on_switch` callback. Spans carry a `sagents.ability_set` attribute. The tool result for a switch lists the newly available tools, and can be customized per set with `:switch_message`. https://github.com/sagents-ai/sagents/pull/220
+- `State.delta/1` builds a tool's state delta holding only the changes. It leaves the todos untouched unless `:todos` is given. `docs/middleware.md` now uses it, and explains why returning `context.state` or a bare `%State{}` causes problems. https://github.com/sagents-ai/sagents/pull/220
+- `MiddlewareEntry` has a new `ability_sets` field. It is `nil` for middleware outside every set. https://github.com/sagents-ai/sagents/pull/220
+
+### Changed
+- `State.merge_states/2`, given a plain map without a `:todos` key, now leaves the todos untouched. It used to clear them. Merging a `%State{}` struct works as before: its default `todos: []` still clears the list, so use `State.delta/1` for tool deltas. https://github.com/sagents-ai/sagents/pull/220
+- Requires `langchain` `>= 0.15.4`.
+
 ## v0.17.1
 
 Human-in-the-loop now only asks a human about tool calls that can actually run.
