@@ -26,9 +26,6 @@ defmodule Sagents.AbilitySets do
   alias Sagents.MiddlewareEntry
   alias Sagents.State
 
-  # A set's point is a short tool list. Past this many tools, say so.
-  @large_set_tool_count 15
-
   @switched_event [:sagents, :ability_sets, :switched]
 
   @doc """
@@ -306,7 +303,7 @@ defmodule Sagents.AbilitySets do
   @doc false
   # Build the index for an initialized stack, or `{:ok, nil}` when it has no
   # switcher. Validates that no tool name is provided twice where a set member
-  # is involved, and warns about sets with many tools.
+  # is involved.
   @spec build_index([MiddlewareEntry.t()], list(), String.t() | nil) ::
           {:ok, Index.t() | nil} | {:error, String.t()}
   def build_index(entries, base_tools, base_prompt) do
@@ -318,8 +315,6 @@ defmodule Sagents.AbilitySets do
         contributions = Enum.map(entries, &{&1, Middleware.get_tools(&1)})
 
         with :ok <- validate_unique_tools(contributions, base_tools) do
-          warn_about_large_sets(contributions, config)
-
           effective =
             [nil | AbilitySetSwitcher.set_names(config)]
             |> Map.new(fn set ->
@@ -391,27 +386,6 @@ defmodule Sagents.AbilitySets do
            "(#{Enum.map_join(owned, ", ", &inspect(elem(&1, 1)))}); tool names must be " <>
            "unique across ability sets"}
     end
-  end
-
-  defp warn_about_large_sets(contributions, config) do
-    for set <- AbilitySetSwitcher.set_names(config) do
-      count =
-        contributions
-        |> Enum.filter(fn {entry, _tools} ->
-          is_list(entry.ability_sets) and set in entry.ability_sets
-        end)
-        |> Enum.map(fn {_entry, tools} -> length(tools) end)
-        |> Enum.sum()
-
-      if count > @large_set_tool_count do
-        Logger.warning(
-          "Ability set #{inspect(set)} has #{count} tools. A set exists to keep the tool " <>
-            "list short; consider splitting it."
-        )
-      end
-    end
-
-    :ok
   end
 
   # ── Helpers ────────────────────────────────────────────────────

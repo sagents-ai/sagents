@@ -199,14 +199,6 @@ defmodule Sagents.AbilitySetsTest do
 
       assert errors_text(new_agent(sets: sets)) =~ "different options"
     end
-
-    test "warns about a set with many tools" do
-      tools = Enum.map(1..16, &"tool_#{&1}")
-      sets = put_in(sets(), ["billing", :middleware], [mw("billing_mw", tools)])
-
-      log = capture_log(fn -> assert {:ok, _agent} = new_agent(sets: sets) end)
-      assert log =~ "Ability set \"billing\" has 16 tools"
-    end
   end
 
   describe "active/2" do
