@@ -532,6 +532,39 @@ defmodule Sagents.Middleware do
   """
   @callback debug_summary(middleware_config()) :: map() | String.t()
 
+  @doc """
+  Optional. Declares this middleware's tools as one provider tool search
+  namespace, used when the agent's stack includes
+  `Sagents.Middleware.ToolSearch`.
+
+  Return `nil` (the default) to keep the tools always visible, or a keyword
+  list:
+
+  - `:namespace` - the namespace name, matching `^[a-z][a-z0-9_]{0,63}$`
+    (required)
+  - `:description` - what the namespace is for, shown to the model before
+    any of its tools load (required)
+  - `:system_prompt` - `:omit` (default) or `:keep`, whether this
+    middleware's system prompt fragment is sent while its tools are deferred
+
+  Each `LangChain.Function` the middleware returns from `tools/1` is then
+  deferred and placed in the namespace. Options a function sets itself win, so
+  a middleware can keep one tool visible with `defer_loading: false` or split
+  its tools across namespaces.
+
+      @impl true
+      def tool_search(_config) do
+        [
+          namespace: "devices",
+          description: "Find, inspect, and restart the managed devices at a site."
+        ]
+      end
+
+  Without `Sagents.Middleware.ToolSearch` in the stack, this callback is not
+  called.
+  """
+  @callback tool_search(middleware_config()) :: keyword() | nil
+
   @optional_callbacks [
     init: 1,
     system_prompt: 1,
@@ -545,7 +578,8 @@ defmodule Sagents.Middleware do
     callbacks: 1,
     handle_resume: 5,
     restorable_interrupt?: 1,
-    debug_summary: 1
+    debug_summary: 1,
+    tool_search: 1
   ]
 
   @doc """
@@ -631,14 +665,34 @@ defmodule Sagents.Middleware do
 
   @doc """
   Get tools from middleware.
+
+  When the entry is a tool search namespace (`MiddlewareEntry.tool_search`),
+  each `LangChain.Function` comes back deferred and in that namespace. See
+  `Sagents.ToolSearch.stamp/2`.
   """
-  def get_tools(%MiddlewareEntry{module: module, config: config}) do
+  def get_tools(%MiddlewareEntry{module: module, config: config} = entry) do
     # Don't use function_exported? as it can return false positives
     # in test environments due to code reloading issues
+    tools =
+      try do
+        module.tools(config)
+      rescue
+        UndefinedFunctionError -> []
+      end
+
+    Sagents.ToolSearch.stamp(tools, entry.tool_search)
+  end
+
+  @doc """
+  Get a middleware's tool search declaration from its `tool_search/1`
+  callback, or `nil` when it does not implement one.
+  """
+  @spec get_tool_search(MiddlewareEntry.t()) :: keyword() | nil
+  def get_tool_search(%MiddlewareEntry{module: module, config: config}) do
     try do
-      module.tools(config)
+      module.tool_search(config)
     rescue
-      UndefinedFunctionError -> []
+      UndefinedFunctionError -> nil
     end
   end
 

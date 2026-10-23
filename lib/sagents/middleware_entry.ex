@@ -8,6 +8,10 @@ defmodule Sagents.MiddlewareEntry do
   - `config`: Configuration map returned from middleware's init/1 callback
   - `ability_sets`: The ability sets the entry belongs to, or `nil` for an entry
     that is active in every set (a rail). See `Sagents.Middleware.AbilitySetSwitcher`.
+  - `tool_search`: The entry's tool search namespace,
+    `%{namespace: _, description: _, system_prompt: :omit | :keep}`, or `nil`
+    when its tools are always visible. Resolved by `Sagents.Agent.new/2` when
+    the stack holds `Sagents.Middleware.ToolSearch`. See `Sagents.ToolSearch`.
 
   ## ID Determination
 
@@ -38,10 +42,11 @@ defmodule Sagents.MiddlewareEntry do
           id: atom() | String.t(),
           module: module(),
           config: map(),
-          ability_sets: [String.t()] | nil
+          ability_sets: [String.t()] | nil,
+          tool_search: map() | nil
         }
 
-  defstruct [:id, :module, :config, ability_sets: nil]
+  defstruct [:id, :module, :config, ability_sets: nil, tool_search: nil]
 
   @doc """
   Convert a MiddlewareEntry struct back to raw middleware specification.
