@@ -99,6 +99,15 @@ defmodule Sagents.Middleware.ToolSearch do
   `Sagents.AgentServer` and through `Sagents.Agent.execute/3` alike, and for
   sub-agents that inherit this middleware.
 
+  ## Display
+
+  `Sagents.Message.DisplayHelpers.extract_display_items(message, tool_search:
+  true)` adds a `:tool_search` display item for each search, with the tools
+  and namespaces it loaded and the query, so a transcript can show "Searched
+  tools: devices". The persistence module and `DisplayMessage` schema that
+  `mix sagents.gen.persistence` generates pass the option and accept the
+  `"tool_search"` content type.
+
   ## Validation
 
   `Sagents.Agent.new/2` fails when a namespace has no description, when its

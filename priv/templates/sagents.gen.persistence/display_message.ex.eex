@@ -23,6 +23,8 @@ defmodule <%= @context_module %>.DisplayMessage do
   - `"todo_snapshot"` - Point-in-time snapshot of an agent's todo list,
     emitted by `Sagents.Middleware.TodoList` when configured with
     `inline: true`
+  - `"tool_search"` - A provider tool search, or tools loaded by a tool's
+    `:tool_reference` result. See `Sagents.Middleware.ToolSearch`
 
   ## Content Structure
 
@@ -35,6 +37,9 @@ defmodule <%= @context_module %>.DisplayMessage do
   - File: `%{"path" => "/path", "name" => "report.pdf"}`
   - Tool call: `%{"call_id" => "call_123", "name" => "search", "arguments" => %{...}}`
   - Tool result: `%{"tool_call_id" => "call_123", "name" => "search", "content" => "...", "is_error" => false}`
+  - Tool search: `%{"tools" => ["devices_list"], "namespaces" => ["devices"], "provider" => "openai", "query" => "devices"}`.
+    `"provider"` and `"query"` are absent for a load made by a tool result, which
+    carries `"tool_call_id"` instead. `"error" => true` marks a failed search.
   - Todo snapshot: `%{"todos" => [%{"id" => 1, "content" => "Plan", "status" => "completed"}, ...], "summary" => %{"total" => 3, "pending" => 1, "in_progress" => 1, "completed" => 1, "cancelled" => 0}}`
 
   ## Content Keys Written By The Framework
@@ -149,7 +154,7 @@ defmodule <%= @context_module %>.DisplayMessage do
   @foreign_key_type :binary_id
 
   # Valid content types
-  @content_types ~w(text thinking image file_reference structured_data notification error tool_call tool_result todo_snapshot)
+  @content_types ~w(text thinking image file_reference structured_data notification error tool_call tool_result todo_snapshot tool_search)
 
   # Valid TODO statuses (matches Sagents.Todo.status enum)
   @todo_statuses ~w(pending in_progress completed cancelled)
@@ -267,6 +272,10 @@ defmodule <%= @context_module %>.DisplayMessage do
       do: :ok,
       else: {:error, "todo_snapshot has invalid todo entries"}
   end
+
+  defp validate_content("tool_search", %{"tools" => tools, "namespaces" => namespaces})
+       when is_list(tools) and is_list(namespaces),
+       do: :ok
 
   defp validate_content(content_type, _content),
     do: {:error, "invalid structure for content_type #{content_type}"}

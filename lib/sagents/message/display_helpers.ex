@@ -46,6 +46,8 @@ defmodule Sagents.Message.DisplayHelpers do
   alias LangChain.LangChainError
   alias LangChain.Message
   alias LangChain.Message.ContentPart
+  alias LangChain.Message.ToolResult
+  alias Sagents.ToolSearch
 
   @typedoc """
   Why a message stopped, normalized from `LangChain.Message.status`.
@@ -176,7 +178,8 @@ defmodule Sagents.Message.DisplayHelpers do
   ## Return Format
 
   Each map contains atom keys:
-  - `:type` - One of: :text, :thinking, :tool_call, :tool_result
+  - `:type` - One of: :text, :thinking, :tool_call, :tool_result, and
+    :tool_search with the `:tool_search` option
   - `:message_type` - Role-based: :user, :assistant, :tool, :system
   - `:content` - Map with type-specific content (string keys for JSONB storage)
 
@@ -218,6 +221,34 @@ defmodule Sagents.Message.DisplayHelpers do
   single response can hold a narration part and an answer part, and they are
   two items with different labels.
 
+  ## Options
+
+  - `:tool_search` - `true` to add a `:tool_search` item for each provider
+    tool search the message holds (default: `false`). See "Tool search".
+
+  ## Tool search
+
+  With `tool_search: true`, each search result in the message becomes a
+  `:tool_search` item, so a transcript can show "Searched tools: devices".
+  It is opt-in because a host's display schema must accept the
+  `"tool_search"` content type; the generated `DisplayMessage` schema and
+  persistence module do.
+
+  An item's `content`:
+
+  - `"tools"` - the tool names the search loaded, possibly empty
+  - `"namespaces"` - the namespaces it loaded. Only OpenAI names them, so an
+    Anthropic search has `[]`
+  - `"provider"` - `"anthropic"` or `"openai"`, or absent for a load made by
+    a tool's `:tool_reference` result
+  - `"query"` - what the model searched for, when the provider reports it
+  - `"error"` - `true` when the search failed, absent otherwise
+  - `"tool_call_id"` - for a load made by a tool result, the call it answers
+
+  A provider search sits among the text and thinking items in the order the
+  model produced it. A load made by a tool result follows that result's
+  `:tool_result` item. Keys that do not apply are absent rather than `nil`.
+
   ## Examples
 
       # Assistant message with text and tool calls
@@ -250,18 +281,20 @@ defmodule Sagents.Message.DisplayHelpers do
       #   %{type: :tool_result, message_type: :tool, content: %{"tool_call_id" => "2", "name" => "weather", "content" => "Sunny", "is_error" => false}}
       # ]
   """
-  @spec extract_display_items(Message.t()) :: [map()]
-  def extract_display_items(%Message{} = message) do
+  @spec extract_display_items(Message.t(), keyword()) :: [map()]
+  def extract_display_items(%Message{} = message, opts \\ []) do
+    tool_search? = Keyword.get(opts, :tool_search, false)
+
     items = []
 
-    # Extract text/thinking content if present
-    items = items ++ extract_content_items(message)
+    # Extract text/thinking content if present, with searches in place
+    items = items ++ extract_content_items(message, tool_search?)
 
     # Extract tool_calls if present (assistant messages)
     items = items ++ extract_tool_call_items(message)
 
     # Extract tool_results if present (tool messages)
-    items = items ++ extract_tool_result_items(message)
+    items = items ++ extract_tool_result_items(message, tool_search?)
 
     mark_last_item(items, stop_reason(message), stop_details(message))
   end
@@ -297,7 +330,63 @@ defmodule Sagents.Message.DisplayHelpers do
 
   defp put_utterance(content, _utterance), do: content
 
-  # Extract text and thinking content from message.content
+  # Extract text and thinking content from message.content. With tool search
+  # display on, search results are kept in their place among them.
+  defp extract_content_items(%Message{content: parts, role: role}, true) when is_list(parts) do
+    message_type = role_to_message_type(role)
+
+    {items, _queries} =
+      Enum.reduce(parts, {[], %{}}, fn part, {items, queries} ->
+        case part do
+          %ContentPart{type: :provider_item} ->
+            provider = Keyword.get(part.options || [], :provider)
+
+            case ToolSearch.read_search_item(ContentPart.provider_item_block(part)) do
+              {:call, %{id: id, query: query}} ->
+                {items, Map.put(queries, id, query)}
+
+              {:result, result} ->
+                item = provider_search_item(message_type, provider, result, part, queries)
+                {[item | items], queries}
+
+              nil ->
+                {items, queries}
+            end
+
+          %ContentPart{type: type} when type in [:text, :thinking] ->
+            {Enum.reverse(content_part_items([part], message_type), items), queries}
+
+          _other ->
+            {items, queries}
+        end
+      end)
+
+    Enum.reverse(items)
+  end
+
+  defp extract_content_items(%Message{} = message, _tool_search?),
+    do: extract_content_items(message)
+
+  # An Anthropic result names its call through `tool_use_id`; an OpenAI result
+  # follows its call, which carries no id.
+  defp provider_search_item(message_type, provider, result, part, queries) do
+    item = ContentPart.provider_item_block(part)
+    query = Map.get(queries, item["tool_use_id"])
+
+    %{
+      type: :tool_search,
+      message_type: message_type,
+      content:
+        %{"tools" => result.tools, "namespaces" => result.namespaces}
+        |> put_present("provider", provider)
+        |> put_present("query", query)
+        |> put_present("error", if(result.error?, do: true))
+    }
+  end
+
+  defp put_present(content, _key, nil), do: content
+  defp put_present(content, key, value), do: Map.put(content, key, value)
+
   defp extract_content_items(%Message{content: content, role: role}) do
     message_type = role_to_message_type(role)
 
@@ -314,20 +403,24 @@ defmodule Sagents.Message.DisplayHelpers do
 
       # List of ContentParts (text, thinking, etc.)
       parts when is_list(parts) ->
-        parts
-        |> Enum.filter(fn part -> part.type in [:text, :thinking] end)
-        |> Enum.reject(fn part -> is_nil(part.content) or part.content == "" end)
-        |> Enum.map(fn part ->
-          %{
-            type: part.type,
-            message_type: message_type,
-            content: put_utterance(%{"text" => part.content}, ContentPart.utterance(part))
-          }
-        end)
+        content_part_items(parts, message_type)
 
       _other ->
         []
     end
+  end
+
+  defp content_part_items(parts, message_type) do
+    parts
+    |> Enum.filter(fn part -> part.type in [:text, :thinking] end)
+    |> Enum.reject(fn part -> is_nil(part.content) or part.content == "" end)
+    |> Enum.map(fn part ->
+      %{
+        type: part.type,
+        message_type: message_type,
+        content: put_utterance(%{"text" => part.content}, ContentPart.utterance(part))
+      }
+    end)
   end
 
   # Extract tool_calls into display items
@@ -349,7 +442,40 @@ defmodule Sagents.Message.DisplayHelpers do
 
   defp extract_tool_call_items(_message), do: []
 
-  # Extract tool_results into display items
+  # Extract tool_results into display items. With tool search display on, a
+  # result returning `:tool_reference` parts is followed by the load it made.
+  defp extract_tool_result_items(%Message{} = message, true) do
+    message
+    |> extract_tool_result_items()
+    |> Enum.flat_map(fn
+      %{type: :tool_result, message_type: message_type, content: %{"tool_call_id" => id}} = item ->
+        [item | reference_search_items(message, id, message_type)]
+
+      item ->
+        [item]
+    end)
+  end
+
+  defp extract_tool_result_items(%Message{} = message, _tool_search?),
+    do: extract_tool_result_items(message)
+
+  defp reference_search_items(%Message{tool_results: results}, tool_call_id, message_type) do
+    for %ToolResult{tool_call_id: ^tool_call_id, content: content} <- results,
+        names =
+          for(%ContentPart{type: :tool_reference, content: name} <- List.wrap(content), do: name),
+        names != [] do
+      %{
+        type: :tool_search,
+        message_type: message_type,
+        content: %{
+          "tools" => Enum.uniq(names),
+          "namespaces" => [],
+          "tool_call_id" => tool_call_id
+        }
+      }
+    end
+  end
+
   defp extract_tool_result_items(%Message{tool_results: tool_results, role: role})
        when is_list(tool_results) and tool_results != [] do
     message_type = role_to_message_type(role)

@@ -395,6 +395,61 @@ defmodule Sagents.ToolSearch do
 
   defp item_loads(_item), do: []
 
+  @doc """
+  Read one provider search block or item.
+
+  - A search result (`tool_search_output`, `tool_search_tool_result`) returns
+    `{:result, %{namespaces: [...], tools: [...], error?: boolean}}`. The
+    namespaces are the ones the provider named, which only OpenAI does.
+  - A search call (`tool_search_call`, `server_tool_use` for a tool search)
+    returns `{:call, %{id: id | nil, query: String.t() | nil}}`. An Anthropic
+    result refers back to its call's `id` through `"tool_use_id"`.
+  - Anything else returns `nil`.
+
+  `item` is the map `LangChain.Message.ContentPart.provider_item_block/1`
+  returns.
+  """
+  @spec read_search_item(map() | nil) ::
+          {:result, %{namespaces: [String.t()], tools: [String.t()], error?: boolean()}}
+          | {:call, %{id: String.t() | nil, query: String.t() | nil}}
+          | nil
+  def read_search_item(%{"type" => type} = item)
+      when type in ["tool_search_output", "tool_search_tool_result"] do
+    loads = item_loads(item)
+
+    {:result,
+     %{
+       namespaces: for({:namespace, name} <- loads, do: name) |> Enum.uniq(),
+       tools: for({:tool, name} <- loads, do: name) |> Enum.uniq(),
+       error?: search_error?(item)
+     }}
+  end
+
+  def read_search_item(%{"type" => "tool_search_call"} = item),
+    do: {:call, %{id: nil, query: search_query(item["arguments"])}}
+
+  def read_search_item(
+        %{"type" => "server_tool_use", "name" => "tool_search_tool_" <> _variant} = item
+      ),
+      do: {:call, %{id: item["id"], query: search_query(item["input"])}}
+
+  def read_search_item(_item), do: nil
+
+  defp search_error?(%{"type" => "tool_search_tool_result", "content" => %{"type" => type}}),
+    do: type == "tool_search_tool_result_error"
+
+  defp search_error?(_item), do: false
+
+  # Anthropic's BM25 search sends a `query`, its regex search a `pattern`.
+  # OpenAI's hosted search sends the `paths` it looked up.
+  defp search_query(%{"query" => query}) when is_binary(query), do: query
+  defp search_query(%{"pattern" => pattern}) when is_binary(pattern), do: pattern
+
+  defp search_query(%{"paths" => paths}) when is_list(paths) and paths != [],
+    do: Enum.join(paths, ", ")
+
+  defp search_query(_arguments), do: nil
+
   defp search_results(%Message{} = message) do
     items =
       for %ContentPart{type: :provider_item} = part <- List.wrap(message.content),
