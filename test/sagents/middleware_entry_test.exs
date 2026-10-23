@@ -45,7 +45,7 @@ defmodule Sagents.MiddlewareEntryTest do
       refute Keyword.has_key?(opts, :middleware_id)
     end
 
-    test "removes internal keys but preserves all user options" do
+    test "removes internal keys but preserves all user options, including a custom id" do
       entry = %MiddlewareEntry{
         id: "custom_id",
         module: MyMiddleware,
@@ -67,9 +67,21 @@ defmodule Sagents.MiddlewareEntryTest do
       assert Keyword.get(opts, :model) == :some_model
       assert Keyword.get(opts, :custom_option) == "value"
       assert Keyword.get(opts, :another_option) == 42
-      # Internal keys should be removed
-      refute Keyword.has_key?(opts, :id)
+      # A custom id is the caller's option, so the rebuilt entry keeps it
+      assert Keyword.get(opts, :id) == "custom_id"
       refute Keyword.has_key?(opts, :middleware_id)
+    end
+
+    test "a re-initialized entry keeps its custom id" do
+      entry =
+        Sagents.Middleware.init_middleware({Sagents.TestNamespacedMiddleware, id: "billing_mw"})
+
+      rebuilt =
+        entry
+        |> MiddlewareEntry.to_raw_spec()
+        |> Sagents.Middleware.init_middleware()
+
+      assert rebuilt.id == "billing_mw"
     end
 
     test "passes through raw module atom unchanged" do

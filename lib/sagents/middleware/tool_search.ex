@@ -85,7 +85,14 @@ defmodule Sagents.Middleware.ToolSearch do
   `Sagents.Agent.new/2` fails when a namespace has no description, when its
   name does not match `^[a-z][a-z0-9_]{0,63}$`, when two declarations give one
   namespace different descriptions, or when a `:namespaces` key names no entry
-  in the stack. A namespace holding ten or more functions logs a warning:
+  in the stack.
+
+  A dynamic sub-agent rebuilds its stack from the parent's middleware and
+  inherits this middleware with the overrides already checked. It may not
+  inherit every entry an override names (`block_middleware`, or an ability set
+  that is not active), and such an override applies to nothing in the
+  sub-agent. Entries keep their custom ids when rebuilt, so an override keyed
+  by a custom id applies in the sub-agent as it does in the parent. A namespace holding ten or more functions logs a warning:
   OpenAI recommends fewer than ten.
   """
 
@@ -94,7 +101,10 @@ defmodule Sagents.Middleware.ToolSearch do
   alias LangChain.NativeTool
 
   @variants [:bm25, :regex]
-  @option_keys [:id, :variant, :catalog, :namespaces] ++ Sagents.Agent.injected_context_keys()
+  # `:overrides_checked` is set by `Sagents.Agent.new/2`, not by callers. It
+  # reaches a dynamic sub-agent's rebuilt switch with the rest of the config.
+  @option_keys [:id, :variant, :catalog, :namespaces, :overrides_checked] ++
+                 Sagents.Agent.injected_context_keys()
 
   @impl true
   def init(opts) do
@@ -103,6 +113,11 @@ defmodule Sagents.Middleware.ToolSearch do
          {:ok, catalog} <- validate_catalog(Keyword.get(opts, :catalog, true)),
          {:ok, namespaces} <- validate_namespaces(Keyword.get(opts, :namespaces, %{})) do
       config = %{variant: variant, catalog: catalog, namespaces: namespaces}
+
+      config =
+        if Keyword.get(opts, :overrides_checked) == true,
+          do: Map.put(config, :overrides_checked, true),
+          else: config
 
       config =
         case Keyword.fetch(opts, :id) do

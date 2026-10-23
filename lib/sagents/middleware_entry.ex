@@ -54,6 +54,9 @@ defmodule Sagents.MiddlewareEntry do
   This is useful when middleware needs to be re-initialized in a new context,
   such as when creating a SubAgent that inherits parent middleware.
 
+  A custom `:id` is kept in the options, so the re-initialized entry has the
+  same id. An `:id` equal to the module is the default and is left out.
+
   ## Parameters
 
   - `entry` - A MiddlewareEntry struct or raw middleware spec
@@ -91,11 +94,16 @@ defmodule Sagents.MiddlewareEntry do
   """
   @spec to_raw_spec(t() | module() | {module(), keyword()}) :: module() | {module(), keyword()}
   def to_raw_spec(%__MODULE__{module: module, config: config}) when is_map(config) do
-    # Remove internal keys that are added during initialization
-    # and shouldn't be passed back to init/1
+    # `:middleware_id` is added during initialization and is not an option.
+    # An `:id` equal to the module is the default id. A custom `:id` came from
+    # the caller's options and is passed back, so the rebuilt entry keeps the
+    # id that routes messages to it and that other configuration names it by.
     opts =
       config
-      |> Map.drop([:id, :middleware_id])
+      |> Map.delete(:middleware_id)
+      |> then(fn config ->
+        if Map.get(config, :id) == module, do: Map.delete(config, :id), else: config
+      end)
       |> Map.to_list()
 
     # Return just the module if no options remain

@@ -150,11 +150,12 @@ defmodule Sagents.ToolSearch do
     ids = MapSet.new(entries, & &1.id)
 
     with :ok <- validate_switch_is_rail(switch),
-         :ok <- validate_override_ids(overrides, ids) do
+         :ok <- validate_override_ids(overrides, ids, config) do
       Enum.reduce_while(entries, {:ok, []}, fn %MiddlewareEntry{} = entry, {:ok, acc} ->
         case resolve_entry(entry, overrides) do
           {:ok, tool_search} ->
-            {:cont, {:ok, [%MiddlewareEntry{entry | tool_search: tool_search} | acc]}}
+            entry = %MiddlewareEntry{mark_overrides_checked(entry) | tool_search: tool_search}
+            {:cont, {:ok, [entry | acc]}}
 
           {:error, reason} ->
             {:halt, {:error, reason}}
@@ -167,6 +168,14 @@ defmodule Sagents.ToolSearch do
     end
   end
 
+  # The switch's config records that its overrides were checked. It reaches a
+  # dynamic sub-agent through `Sagents.MiddlewareEntry.to_raw_spec/1`.
+  defp mark_overrides_checked(%MiddlewareEntry{config: config} = entry) do
+    if switch?(entry),
+      do: %MiddlewareEntry{entry | config: Map.put(config, :overrides_checked, true)},
+      else: entry
+  end
+
   # The search tool must reach every chain the agent builds. An ability set
   # sends only the rails plus its own entries, so a switch inside a set would
   # leave the other sets sending deferred tools with no search tool, which the
@@ -176,7 +185,16 @@ defmodule Sagents.ToolSearch do
   defp validate_switch_is_rail(%MiddlewareEntry{}),
     do: {:error, "Sagents.Middleware.ToolSearch must not be in an ability set"}
 
-  defp validate_override_ids(overrides, ids) do
+  # The check catches a misspelled id in the caller's own configuration. A
+  # dynamic sub-agent rebuilds its stack from the parent's initialized
+  # middleware, and it may inherit only some of the entries the overrides name:
+  # `block_middleware` removes some, and only the active ability set's entries
+  # are inherited. Those overrides were checked when the parent was built, so a
+  # rebuilt switch skips the check, and an override for an entry that is not
+  # there applies to nothing.
+  defp validate_override_ids(_overrides, _ids, %{overrides_checked: true}), do: :ok
+
+  defp validate_override_ids(overrides, ids, _config) do
     case Enum.reject(Map.keys(overrides), &MapSet.member?(ids, &1)) do
       [] ->
         :ok

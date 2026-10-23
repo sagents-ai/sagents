@@ -650,7 +650,8 @@ defmodule Sagents.AbilitySetsTest do
         ability_sets: ["devices"]
       }
 
-      assert MiddlewareEntry.to_raw_spec(entry) == {TestAbilityMiddleware, [tools: []]}
+      assert MiddlewareEntry.to_raw_spec(entry) ==
+               {TestAbilityMiddleware, [id: "devices_mw", tools: []]}
     end
   end
 end

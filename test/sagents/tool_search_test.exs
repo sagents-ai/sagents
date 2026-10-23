@@ -137,6 +137,11 @@ defmodule Sagents.ToolSearchTest do
       assert stamp(function(agent, "devices_list")) == {false, nil, nil}
     end
 
+    test "a switch configured by the caller has its overrides checked" do
+      assert {:ok, config} = ToolSearch.init(namespaces: %{"devices_mw" => false})
+      refute Map.has_key?(config, :overrides_checked)
+    end
+
     test "an override naming no entry is an error" do
       result =
         new_agent([
@@ -289,8 +294,9 @@ defmodule Sagents.ToolSearchTest do
 
       assert {:ok, config} = ToolSearch.init(opts)
 
-      keys = [:variant, :catalog, :namespaces]
+      keys = [:variant, :catalog, :namespaces, :overrides_checked]
       assert Map.take(config, keys) == Map.take(switch.config, keys)
+      assert config.overrides_checked == true
     end
   end
 

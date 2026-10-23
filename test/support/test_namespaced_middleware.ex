@@ -5,7 +5,7 @@ defmodule Sagents.TestNamespacedMiddleware do
 
   ## Options
 
-  - `:id` - the entry id (required)
+  - `:id` - the entry id (default: the module)
   - `:tools` - names of the tools it provides (default: `[]`)
   - `:tool_options` - map of tool name to the `LangChain.Function` options that
     tool sets itself (default: `%{}`)
@@ -19,14 +19,17 @@ defmodule Sagents.TestNamespacedMiddleware do
 
   @impl true
   def init(opts) do
-    {:ok,
-     %{
-       id: Keyword.fetch!(opts, :id),
-       tools: Keyword.get(opts, :tools, []),
-       tool_options: Keyword.get(opts, :tool_options, %{}),
-       tool_search: Keyword.get(opts, :tool_search),
-       prompt: Keyword.get(opts, :prompt, "")
-     }}
+    config = %{
+      tools: Keyword.get(opts, :tools, []),
+      tool_options: Keyword.get(opts, :tool_options, %{}),
+      tool_search: Keyword.get(opts, :tool_search),
+      prompt: Keyword.get(opts, :prompt, "")
+    }
+
+    case Keyword.fetch(opts, :id) do
+      {:ok, id} -> {:ok, Map.put(config, :id, id)}
+      :error -> {:ok, config}
+    end
   end
 
   @impl true
