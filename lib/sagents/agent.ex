@@ -55,6 +55,7 @@ defmodule Sagents.Agent do
   alias Sagents.Middleware
   alias Sagents.MiddlewareEntry
   alias Sagents.State
+  alias Sagents.ToolSearch
   alias LangChain.LangChainError
   alias LangChain.Message
   alias LangChain.Message.ToolResult
@@ -103,6 +104,10 @@ defmodule Sagents.Agent do
     # new/2 when the stack holds a `Sagents.Middleware.AbilitySetSwitcher`; nil
     # otherwise.
     field :ability_index, :any, virtual: true, default: nil
+    # The tool search namespaces the agent's tools declare
+    # (`Sagents.ToolSearch.index/0`), computed in new/2 when the stack holds a
+    # `Sagents.Middleware.ToolSearch`; nil otherwise.
+    field :tool_search_index, :any, virtual: true, default: nil
   end
 
   @type t :: %Agent{}
@@ -304,8 +309,10 @@ defmodule Sagents.Agent do
     |> put_agent_id_if_missing()
     |> validate_required(@required_fields)
     |> build_and_initialize_middleware(opts)
+    |> resolve_tool_search()
     |> build_ability_index()
     |> assemble_full_system_prompt()
+    |> build_tool_search_index()
     |> collect_all_tools()
     |> apply_action(:insert)
   end
@@ -517,6 +524,32 @@ defmodule Sagents.Agent do
     end
   end
 
+  # Each entry's tool search namespace is resolved before anything collects
+  # tools, because `Middleware.get_tools/1` stamps from it and ability sets
+  # collect their own.
+  defp resolve_tool_search(%Ecto.Changeset{valid?: false} = changeset), do: changeset
+
+  defp resolve_tool_search(changeset) do
+    case ToolSearch.resolve(get_field(changeset, :middleware) || []) do
+      {:ok, entries} -> put_change(changeset, :middleware, entries)
+      {:error, reason} -> add_error(changeset, :middleware, reason)
+    end
+  end
+
+  defp build_tool_search_index(%Ecto.Changeset{valid?: false} = changeset), do: changeset
+
+  # Runs before `collect_all_tools/1`, while `:tools` still holds only the
+  # base tools.
+  defp build_tool_search_index(changeset) do
+    middleware = get_field(changeset, :middleware) || []
+    base_tools = get_field(changeset, :tools) || []
+
+    case ToolSearch.build_index(middleware, base_tools) do
+      {:ok, index} -> put_change(changeset, :tool_search_index, index)
+      {:error, reason} -> add_error(changeset, :tools, reason)
+    end
+  end
+
   defp build_ability_index(%Ecto.Changeset{valid?: false} = changeset), do: changeset
 
   defp build_ability_index(changeset) do
@@ -557,13 +590,26 @@ defmodule Sagents.Agent do
     end
   end
 
+  # The tool search switch's fragment is its catalog of the tools this prompt
+  # goes out with: the base tools plus every middleware's stamped tools.
   defp assemble_stack_system_prompt(changeset) do
     base_prompt = get_field(changeset, :base_system_prompt) || ""
     initialized_middleware = get_field(changeset, :middleware) || []
 
+    tools =
+      if ToolSearch.enabled?(initialized_middleware),
+        do:
+          (get_field(changeset, :tools) || []) ++
+            Enum.flat_map(initialized_middleware, &Middleware.get_tools/1),
+        else: []
+
     middleware_prompts =
       initialized_middleware
-      |> Enum.map(&Middleware.get_system_prompt/1)
+      |> Enum.map(fn entry ->
+        if ToolSearch.switch?(entry),
+          do: ToolSearch.switch_prompt(entry, tools),
+          else: Middleware.get_system_prompt(entry)
+      end)
       |> Enum.reject(&(&1 == ""))
 
     full_prompt =

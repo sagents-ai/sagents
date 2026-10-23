@@ -16,7 +16,9 @@ defmodule <%= module %> do
 
   @impl true
   def save_message(scope, %Message{} = message, context) do
-    display_items = DisplayHelpers.extract_display_items(message)
+    # `tool_search: true` adds a "tool_search" row for each provider tool
+    # search. The DisplayMessage schema accepts that content type.
+    display_items = DisplayHelpers.extract_display_items(message, tool_search: true)
 
     if Enum.empty?(display_items) do
       {:ok, []}

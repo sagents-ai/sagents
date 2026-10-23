@@ -8,6 +8,10 @@ defmodule Sagents.MiddlewareEntry do
   - `config`: Configuration map returned from middleware's init/1 callback
   - `ability_sets`: The ability sets the entry belongs to, or `nil` for an entry
     that is active in every set (a rail). See `Sagents.Middleware.AbilitySetSwitcher`.
+  - `tool_search`: The entry's tool search namespace,
+    `%{namespace: _, description: _}`, or `nil`
+    when its tools are always visible. Resolved by `Sagents.Agent.new/2` when
+    the stack holds `Sagents.Middleware.ToolSearch`. See `Sagents.ToolSearch`.
 
   ## ID Determination
 
@@ -38,16 +42,20 @@ defmodule Sagents.MiddlewareEntry do
           id: atom() | String.t(),
           module: module(),
           config: map(),
-          ability_sets: [String.t()] | nil
+          ability_sets: [String.t()] | nil,
+          tool_search: map() | nil
         }
 
-  defstruct [:id, :module, :config, ability_sets: nil]
+  defstruct [:id, :module, :config, ability_sets: nil, tool_search: nil]
 
   @doc """
   Convert a MiddlewareEntry struct back to raw middleware specification.
 
   This is useful when middleware needs to be re-initialized in a new context,
   such as when creating a SubAgent that inherits parent middleware.
+
+  A custom `:id` is kept in the options, so the re-initialized entry has the
+  same id. An `:id` equal to the module is the default and is left out.
 
   ## Parameters
 
@@ -86,11 +94,16 @@ defmodule Sagents.MiddlewareEntry do
   """
   @spec to_raw_spec(t() | module() | {module(), keyword()}) :: module() | {module(), keyword()}
   def to_raw_spec(%__MODULE__{module: module, config: config}) when is_map(config) do
-    # Remove internal keys that are added during initialization
-    # and shouldn't be passed back to init/1
+    # `:middleware_id` is added during initialization and is not an option.
+    # An `:id` equal to the module is the default id. A custom `:id` came from
+    # the caller's options and is passed back, so the rebuilt entry keeps the
+    # id that routes messages to it and that other configuration names it by.
     opts =
       config
-      |> Map.drop([:id, :middleware_id])
+      |> Map.delete(:middleware_id)
+      |> then(fn config ->
+        if Map.get(config, :id) == module, do: Map.delete(config, :id), else: config
+      end)
       |> Map.to_list()
 
     # Return just the module if no options remain
