@@ -544,8 +544,6 @@ defmodule Sagents.Middleware do
     (required)
   - `:description` - what the namespace is for, shown to the model before
     any of its tools load (required)
-  - `:system_prompt` - `:omit` (default) or `:keep`, whether this
-    middleware's system prompt fragment is sent while its tools are deferred
 
   Each `LangChain.Function` the middleware returns from `tools/1` is then
   deferred and placed in the namespace. Options a function sets itself win, so
@@ -559,6 +557,12 @@ defmodule Sagents.Middleware do
           description: "Find, inspect, and restart the managed devices at a site."
         ]
       end
+
+  The middleware's `system_prompt/1` fragment is sent as it is with or without
+  a namespace, and it cannot change when the namespace loads, because that
+  would change the cached prompt. Write it for tools the model has not loaded
+  yet, for example to say when the namespace is worth loading, or return no
+  fragment.
 
   Without `Sagents.Middleware.ToolSearch` in the stack, this callback is not
   called.

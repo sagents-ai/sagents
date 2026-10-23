@@ -32,7 +32,13 @@ defmodule Sagents.Middleware.ToolSearch do
 
   Deferral hides tool definitions; it does not unmount a middleware. A
   namespaced middleware's model hooks, callbacks, state and messages all work
-  as they do without tool search.
+  as they do without tool search, and its system prompt fragment is always
+  sent. The prompt cannot change when a namespace loads, so write a
+  namespaced middleware's fragment for tools the model has not loaded yet,
+  or leave it out. It can say when the namespace is worth loading:
+
+      "To restart a device that is not responding, load the devices tools."
+
 
   Tool search is independent of `Sagents.Middleware.AbilitySetSwitcher`. A
   middleware in an ability set may also declare a namespace, and its tools are
@@ -44,17 +50,35 @@ defmodule Sagents.Middleware.ToolSearch do
   - `:variant` - `:bm25` (default) or `:regex`, how the model writes its
     search on providers that offer a choice (see
     `LangChain.NativeTool.tool_search/1`).
+  - `:catalog` - `true` (default) to add a system prompt fragment listing each
+    namespace with its description (see "The catalog"). `false` leaves it out.
   - `:namespaces` - Map of middleware entry id to a namespace declaration,
     which overrides or supplies the middleware's own `tool_search/1`. A
     declaration takes the keys `tool_search/1` returns. Keys it leaves out are
     taken from the middleware's own declaration. `false` keeps an entry's
-    tools visible even though its middleware declares a namespace. An override
-    for a middleware without `tool_search/1` keeps that middleware's system
-    prompt fragment unless it sets `system_prompt: :omit`, since its author
-    did not write the fragment for deferred tools. Default: `%{}`.
+    tools visible even though its middleware declares a namespace. Default:
+    `%{}`.
 
   An option the middleware does not know is an error, so a misspelled key
   fails `Sagents.Agent.new/2` instead of being ignored.
+
+  ## The catalog
+
+  Anthropic's models see nothing about a deferred tool until they search, so
+  the system prompt says what is worth searching for:
+
+      Some tools load on demand. Search for tools when you need one of these:
+      - devices: Find, inspect, and restart the managed devices at a site.
+      - billing: Invoices and balances.
+
+  The catalog is a Sagents fragment, not part of either provider's API. It
+  sits at this middleware's position in the prompt and lists the namespaces
+  with at least one deferred function among the tools sent, in the order they
+  first appear. With ability sets, each set's prompt lists only the namespaces
+  of the tools that set sends. OpenAI shows a namespace's name and description
+  itself, so there the catalog repeats it; `catalog: false` leaves it out. The
+  catalog is built once in `Sagents.Agent.new/2` and stays the same for the
+  life of a conversation, so it does not disturb the prompt cache.
 
   ## Validation
 
@@ -70,14 +94,15 @@ defmodule Sagents.Middleware.ToolSearch do
   alias LangChain.NativeTool
 
   @variants [:bm25, :regex]
-  @option_keys [:id, :variant, :namespaces] ++ Sagents.Agent.injected_context_keys()
+  @option_keys [:id, :variant, :catalog, :namespaces] ++ Sagents.Agent.injected_context_keys()
 
   @impl true
   def init(opts) do
     with :ok <- validate_option_keys(opts),
          {:ok, variant} <- validate_variant(Keyword.get(opts, :variant, :bm25)),
+         {:ok, catalog} <- validate_catalog(Keyword.get(opts, :catalog, true)),
          {:ok, namespaces} <- validate_namespaces(Keyword.get(opts, :namespaces, %{})) do
-      config = %{variant: variant, namespaces: namespaces}
+      config = %{variant: variant, catalog: catalog, namespaces: namespaces}
 
       config =
         case Keyword.fetch(opts, :id) do
@@ -99,7 +124,8 @@ defmodule Sagents.Middleware.ToolSearch do
 
       unknown ->
         {:error,
-         "unknown option(s) #{inspect(unknown)}; expected #{inspect([:variant, :namespaces])}"}
+         "unknown option(s) #{inspect(unknown)}; " <>
+           "expected #{inspect([:variant, :catalog, :namespaces])}"}
     end
   end
 
@@ -107,6 +133,11 @@ defmodule Sagents.Middleware.ToolSearch do
 
   defp validate_variant(other),
     do: {:error, ":variant must be one of #{inspect(@variants)}, got: #{inspect(other)}"}
+
+  defp validate_catalog(catalog) when is_boolean(catalog), do: {:ok, catalog}
+
+  defp validate_catalog(other),
+    do: {:error, ":catalog must be a boolean, got: #{inspect(other)}"}
 
   defp validate_namespaces(namespaces) when is_map(namespaces) do
     Enum.reduce_while(namespaces, {:ok, %{}}, fn

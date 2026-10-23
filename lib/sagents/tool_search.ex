@@ -22,8 +22,7 @@ defmodule Sagents.ToolSearch do
   alias Sagents.MiddlewareEntry
 
   @namespace_pattern ~r/^[a-z][a-z0-9_]{0,63}$/
-  @declaration_keys [:namespace, :description, :system_prompt]
-  @system_prompt_values [:omit, :keep]
+  @declaration_keys [:namespace, :description]
   @recommended_max_functions 10
 
   @typedoc """
@@ -72,6 +71,63 @@ defmodule Sagents.ToolSearch do
   """
   @spec enabled?([MiddlewareEntry.t()]) :: boolean()
   def enabled?(entries), do: Enum.any?(entries, &switch?/1)
+
+  @doc """
+  True when `entry` is the `Sagents.Middleware.ToolSearch` entry.
+  """
+  @spec switch?(term()) :: boolean()
+  def switch?(%MiddlewareEntry{module: Switch}), do: true
+  def switch?(_entry), do: false
+
+  @doc """
+  The `Sagents.Middleware.ToolSearch` entry's system prompt fragment for a
+  chain that sends `tools`: the catalog (see `catalog_prompt/1`), or `""` when
+  the switch is configured with `catalog: false`.
+
+  The fragment is rendered where prompts are assembled, from the tools each
+  prompt goes out with, so an ability set's prompt lists only its own
+  namespaces.
+  """
+  @spec switch_prompt(MiddlewareEntry.t(), [term()]) :: String.t()
+  def switch_prompt(%MiddlewareEntry{config: %{catalog: false}}, _tools), do: ""
+  def switch_prompt(%MiddlewareEntry{}, tools), do: catalog_prompt(tools)
+
+  @doc """
+  The catalog of tool search namespaces among `tools`, for the system prompt.
+
+  Lists each namespace with at least one deferred function in `tools`, with
+  its description, in the order the namespaces first appear. A namespace
+  whose functions are all visible is not listed. Returns `""` when nothing is
+  deferred into a namespace.
+
+  Anthropic's models see nothing about a deferred tool until they search, so
+  the catalog is how they learn what is worth searching for. OpenAI shows a
+  namespace's name and description itself; there the catalog repeats it.
+  """
+  @spec catalog_prompt([term()]) :: String.t()
+  def catalog_prompt(tools) do
+    namespaced = Enum.filter(tools, &(match?(%Function{}, &1) and Function.namespace(&1)))
+    groups = Enum.group_by(namespaced, &Function.namespace/1)
+
+    listed =
+      namespaced
+      |> Enum.map(&Function.namespace/1)
+      |> Enum.uniq()
+      |> Enum.filter(fn name -> Enum.any?(groups[name], &Function.deferred?/1) end)
+
+    case listed do
+      [] ->
+        ""
+
+      names ->
+        lines =
+          Enum.map_join(names, "\n", fn name ->
+            "- #{name}: #{Enum.find_value(groups[name], &Function.namespace_description/1)}"
+          end)
+
+        "Some tools load on demand. Search for tools when you need one of these:\n" <> lines
+    end
+  end
 
   @doc """
   Resolve each entry's tool search namespace and store it on the entry.
@@ -142,18 +198,16 @@ defmodule Sagents.ToolSearch do
     end
   end
 
-  # A middleware's own declaration omits its prompt fragment by default; its
-  # author wrote the fragment knowing the tools are deferred. An override for a
-  # middleware that declares nothing keeps the fragment by default.
+  # An override's keys replace the middleware's own; `false` keeps the entry's
+  # tools visible.
   defp declaration(_entry, false), do: nil
 
   defp declaration(entry, override) do
     case {Middleware.get_tool_search(entry), override} do
-      {nil, nil} -> nil
-      {own, _override} when not is_list(own) and not is_nil(own) -> own
-      {nil, override} -> Keyword.merge([system_prompt: :keep], override)
-      {own, nil} -> Keyword.merge([system_prompt: :omit], own)
-      {own, override} -> [system_prompt: :omit] |> Keyword.merge(own) |> Keyword.merge(override)
+      {own, nil} -> own
+      {nil, override} -> override
+      {own, _override} when not is_list(own) -> own
+      {own, override} -> Keyword.merge(own, override)
     end
   end
 
@@ -162,7 +216,6 @@ defmodule Sagents.ToolSearch do
   defp validate_declaration(declaration, id) when is_list(declaration) do
     namespace = Keyword.get(declaration, :namespace)
     description = Keyword.get(declaration, :description)
-    system_prompt = Keyword.get(declaration, :system_prompt)
 
     cond do
       not Keyword.keyword?(declaration) ->
@@ -181,13 +234,8 @@ defmodule Sagents.ToolSearch do
       not (is_binary(description) and String.trim(description) != "") ->
         {:error, "tool search namespace #{inspect(namespace)} needs a :description"}
 
-      system_prompt not in @system_prompt_values ->
-        {:error,
-         "tool search :system_prompt for #{inspect(id)} must be one of " <>
-           "#{inspect(@system_prompt_values)}, got: #{inspect(system_prompt)}"}
-
       true ->
-        {:ok, %{namespace: namespace, description: description, system_prompt: system_prompt}}
+        {:ok, %{namespace: namespace, description: description}}
     end
   end
 
@@ -284,7 +332,4 @@ defmodule Sagents.ToolSearch do
 
     :ok
   end
-
-  defp switch?(%MiddlewareEntry{module: Switch}), do: true
-  defp switch?(_entry), do: false
 end

@@ -102,7 +102,7 @@ defmodule Sagents.ToolSearchTest do
   end
 
   describe "overrides" do
-    test "an override makes a middleware without tool_search/1 a namespace and keeps its prompt" do
+    test "an override makes a middleware without tool_search/1 a namespace" do
       {:ok, agent} =
         new_agent([
           {ToolSearch,
@@ -112,7 +112,7 @@ defmodule Sagents.ToolSearchTest do
 
       assert {true, "billing", "Invoices."} = stamp(function(agent, "billing_invoices"))
 
-      assert %MiddlewareEntry{tool_search: %{namespace: "billing", system_prompt: :keep}} =
+      assert %MiddlewareEntry{tool_search: %{namespace: "billing", description: "Invoices."}} =
                Enum.find(agent.middleware, &(&1.id == "billing_mw"))
     end
 
@@ -125,9 +125,6 @@ defmodule Sagents.ToolSearchTest do
 
       assert {true, "fleet", "Find and restart managed devices."} =
                stamp(function(agent, "devices_list"))
-
-      assert %MiddlewareEntry{tool_search: %{system_prompt: :omit}} =
-               Enum.find(agent.middleware, &(&1.id == "devices_mw"))
     end
 
     test "false keeps a declaring middleware's tools visible" do
@@ -239,7 +236,7 @@ defmodule Sagents.ToolSearchTest do
       assert errors_text(result) =~ ~s(namespace "devices" has no description)
     end
 
-    test "an unknown declaration key or system_prompt value is an error" do
+    test "an unknown declaration key is an error" do
       result =
         new_agent([
           ToolSearch,
@@ -254,7 +251,7 @@ defmodule Sagents.ToolSearchTest do
           mw("devices_mw", ["devices_list"], tool_search: @devices ++ [system_prompt: :drop])
         ])
 
-      assert errors_text(result) =~ ":system_prompt"
+      assert errors_text(result) =~ "unknown key(s) [:system_prompt]"
     end
 
     test "a tool_search/1 that returns something other than a keyword list is an error" do
@@ -282,6 +279,7 @@ defmodule Sagents.ToolSearchTest do
         new_agent([
           {ToolSearch,
            variant: :regex,
+           catalog: false,
            namespaces: %{"billing_mw" => [namespace: "billing", description: "Invoices."]}},
           mw("billing_mw", ["billing_invoices"])
         ])
@@ -291,8 +289,102 @@ defmodule Sagents.ToolSearchTest do
 
       assert {:ok, config} = ToolSearch.init(opts)
 
-      assert Map.take(config, [:variant, :namespaces]) ==
-               Map.take(switch.config, [:variant, :namespaces])
+      keys = [:variant, :catalog, :namespaces]
+      assert Map.take(config, keys) == Map.take(switch.config, keys)
+    end
+  end
+
+  describe "the catalog" do
+    @billing [namespace: "billing", description: "Invoices and balances."]
+
+    test "lists each namespace with deferred tools, in stack order, at the switch's position" do
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: mock_model(),
+            base_system_prompt: "You are the IT operations assistant.",
+            middleware: [
+              mw("rail_mw", ["whoami"], prompt: "Rail fragment."),
+              ToolSearch,
+              mw("billing_mw", ["billing_invoices"], tool_search: @billing),
+              mw("devices_mw", ["devices_list"],
+                tool_search: @devices,
+                prompt: "To restart a device that is not responding, load the devices tools."
+              )
+            ]
+          },
+          replace_default_middleware: true
+        )
+
+      assert agent.assembled_system_prompt ==
+               """
+               You are the IT operations assistant.
+
+               Rail fragment.
+
+               Some tools load on demand. Search for tools when you need one of these:
+               - billing: Invoices and balances.
+               - devices: Find and restart managed devices.
+
+               To restart a device that is not responding, load the devices tools.\
+               """
+    end
+
+    test "a namespace whose tools are all visible is not listed" do
+      {:ok, agent} =
+        new_agent([
+          ToolSearch,
+          mw("devices_mw", ["devices_lookup"],
+            tool_search: @devices,
+            tool_options: %{"devices_lookup" => [defer_loading: false]}
+          ),
+          mw("billing_mw", ["billing_invoices"], tool_search: @billing)
+        ])
+
+      refute agent.assembled_system_prompt =~ "- devices:"
+      assert agent.assembled_system_prompt =~ "- billing: Invoices and balances."
+    end
+
+    test "a base tool's own namespace is listed" do
+      base =
+        Function.new!(%{
+          name: "reports_run",
+          options: [defer_loading: true, namespace: "reports", namespace_description: "Reports."],
+          function: fn _args, _context -> {:ok, "ok"} end
+        })
+
+      {:ok, agent} = new_agent([ToolSearch], [base])
+
+      assert agent.assembled_system_prompt =~ "- reports: Reports."
+    end
+
+    test "nothing deferred means no catalog" do
+      {:ok, agent} = new_agent([ToolSearch, mw("rail_mw", ["whoami"], prompt: "Rail fragment.")])
+      assert agent.assembled_system_prompt == "Rail fragment."
+    end
+
+    test "catalog: false leaves it out, and the namespace's own fragment is still sent" do
+      {:ok, agent} =
+        new_agent([
+          {ToolSearch, catalog: false},
+          mw("devices_mw", ["devices_list"], tool_search: @devices, prompt: "Devices fragment.")
+        ])
+
+      assert agent.assembled_system_prompt == "Devices fragment."
+    end
+
+    test "the assembled prompt is the same for two agents with the same config" do
+      middleware = [
+        ToolSearch,
+        mw("billing_mw", ["billing_invoices"], tool_search: @billing),
+        mw("devices_mw", ["devices_list"], tool_search: @devices)
+      ]
+
+      {:ok, first} = new_agent(middleware)
+      {:ok, second} = new_agent(middleware)
+
+      assert first.assembled_system_prompt == second.assembled_system_prompt
+      assert first.assembled_system_prompt =~ "- billing:"
     end
   end
 
@@ -331,6 +423,31 @@ defmodule Sagents.ToolSearchTest do
                stamp(Enum.find(devices_tools, &(&1.name == "devices_list")))
 
       assert {false, nil, nil} = stamp(Enum.find(billing_tools, &(&1.name == "billing_invoices")))
+    end
+
+    test "each set's prompt lists only the namespaces of the tools that set sends" do
+      {:ok, agent} =
+        new_agent([
+          ToolSearch,
+          mw("rail_mw", ["whoami"]),
+          mw("reports_mw", ["reports_run"],
+            tool_search: [namespace: "reports", description: "Reports."]
+          ),
+          {AbilitySetSwitcher, sets: sets()}
+        ])
+
+      devices_prompt = AbilitySets.effective(agent, "devices").system_prompt
+      billing_prompt = AbilitySets.effective(agent, "billing").system_prompt
+      rails_prompt = AbilitySets.effective(agent, nil).system_prompt
+
+      assert devices_prompt =~ "- reports: Reports."
+      assert devices_prompt =~ "- devices: Find and restart managed devices."
+
+      assert billing_prompt =~ "- reports: Reports."
+      refute billing_prompt =~ "- devices: Find and restart managed devices."
+
+      assert rails_prompt =~ "- reports: Reports."
+      refute rails_prompt =~ "- devices: Find and restart managed devices."
     end
 
     test "the switch inside an ability set is an error" do

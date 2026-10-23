@@ -590,13 +590,26 @@ defmodule Sagents.Agent do
     end
   end
 
+  # The tool search switch's fragment is its catalog of the tools this prompt
+  # goes out with: the base tools plus every middleware's stamped tools.
   defp assemble_stack_system_prompt(changeset) do
     base_prompt = get_field(changeset, :base_system_prompt) || ""
     initialized_middleware = get_field(changeset, :middleware) || []
 
+    tools =
+      if ToolSearch.enabled?(initialized_middleware),
+        do:
+          (get_field(changeset, :tools) || []) ++
+            Enum.flat_map(initialized_middleware, &Middleware.get_tools/1),
+        else: []
+
     middleware_prompts =
       initialized_middleware
-      |> Enum.map(&Middleware.get_system_prompt/1)
+      |> Enum.map(fn entry ->
+        if ToolSearch.switch?(entry),
+          do: ToolSearch.switch_prompt(entry, tools),
+          else: Middleware.get_system_prompt(entry)
+      end)
       |> Enum.reject(&(&1 == ""))
 
     full_prompt =

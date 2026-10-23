@@ -25,6 +25,7 @@ defmodule Sagents.AbilitySets do
   alias Sagents.Middleware.AbilitySetSwitcher
   alias Sagents.MiddlewareEntry
   alias Sagents.State
+  alias Sagents.ToolSearch
 
   @switched_event [:sagents, :ability_sets, :switched]
 
@@ -329,17 +330,21 @@ defmodule Sagents.AbilitySets do
   defp effective_for(set, contributions, base_tools, base_prompt, config) do
     active = Enum.filter(contributions, fn {entry, _tools} -> active_in?(entry, set) end)
     middleware = Enum.map(active, &elem(&1, 0))
+    tools = base_tools ++ Enum.flat_map(active, &elem(&1, 1))
 
+    # The tool search catalog lists the namespaces of this set's tools only.
     fragments =
       Enum.map(middleware, fn entry ->
-        if switcher?(entry),
-          do: AbilitySetSwitcher.catalog_prompt(config, set),
-          else: Middleware.get_system_prompt(entry)
+        cond do
+          switcher?(entry) -> AbilitySetSwitcher.catalog_prompt(config, set)
+          ToolSearch.switch?(entry) -> ToolSearch.switch_prompt(entry, tools)
+          true -> Middleware.get_system_prompt(entry)
+        end
       end)
 
     %{
       middleware: middleware,
-      tools: base_tools ++ Enum.flat_map(active, &elem(&1, 1)),
+      tools: tools,
       system_prompt:
         [base_prompt || "" | fragments]
         |> Enum.reject(&(&1 == ""))
