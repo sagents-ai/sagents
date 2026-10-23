@@ -201,11 +201,15 @@ defmodule Sagents.Middleware do
   @callback system_prompt(middleware_config) :: String.t() | [String.t()]
 
   @doc """
-  Provide tools (Functions) that this middleware adds to the agent.
+  Provide tools that this middleware adds to the agent.
+
+  Usually `LangChain.Function`s. A `LangChain.NativeTool`, a tool the
+  provider defines and runs, may be returned too, as
+  `Sagents.Middleware.ToolSearch` does with the provider's search tool.
 
   Defaults to empty list if not implemented.
   """
-  @callback tools(middleware_config) :: [LangChain.Function.t()]
+  @callback tools(middleware_config) :: [LangChain.Function.t() | LangChain.NativeTool.t()]
 
   @doc """
   Process state before it's sent to the LLM.
@@ -690,8 +694,11 @@ defmodule Sagents.Middleware do
   @doc """
   Get a middleware's tool search declaration from its `tool_search/1`
   callback, or `nil` when it does not implement one.
+
+  Returns what the callback returned, unchecked; `Sagents.Agent.new/2`
+  validates it and reports a declaration that is not a keyword list.
   """
-  @spec get_tool_search(MiddlewareEntry.t()) :: keyword() | nil
+  @spec get_tool_search(MiddlewareEntry.t()) :: term()
   def get_tool_search(%MiddlewareEntry{module: module, config: config}) do
     try do
       module.tool_search(config)
