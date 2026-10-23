@@ -17,9 +17,12 @@ defmodule Sagents.ToolSearch do
   require Logger
 
   alias LangChain.Function
+  alias LangChain.Message
+  alias LangChain.Message.{ContentPart, ToolCall, ToolResult}
   alias Sagents.Middleware
   alias Sagents.Middleware.ToolSearch, as: Switch
   alias Sagents.MiddlewareEntry
+  alias Sagents.State
 
   @namespace_pattern ~r/^[a-z][a-z0-9_]{0,63}$/
   @declaration_keys [:namespace, :description]
@@ -261,6 +264,151 @@ defmodule Sagents.ToolSearch do
     do:
       {:error,
        "tool search declaration for #{inspect(id)} must be a keyword list, got: #{inspect(other)}"}
+
+  @typedoc """
+  What a conversation has loaded through tool search: namespace names and
+  tool names, each in the order first loaded.
+  """
+  @type loaded :: %{namespaces: [String.t()], tools: [String.t()]}
+
+  @doc """
+  The namespaces and tools a conversation has loaded through tool search.
+
+  Reads the history, so it works on a restored conversation and needs no
+  bookkeeping. `source` is a `Sagents.State` or a list of messages. `tools`
+  is the agent's tools (`agent.tools`); it maps a tool to its namespace and
+  says which tools are deferred.
+
+  A tool counts as loaded when:
+
+  - an OpenAI `tool_search_output` item lists it, alone or inside a namespace,
+  - an Anthropic `tool_search_tool_result` block references it,
+  - a tool result returns a `:tool_reference` part naming it, or
+  - the model called it while it is deferred in `tools`. This covers a search
+    that summarization removed, and a history whose search items were not
+    kept: the provider accepts the call, so the tool is in use.
+
+  A namespace counts as loaded when an OpenAI search returns it, or when one
+  of its tools is loaded. Without `tools`, Anthropic loads report tool names
+  only, since Anthropic does not name a namespace.
+
+      Sagents.ToolSearch.loaded(state, agent.tools)
+      #=> %{namespaces: ["devices"], tools: ["devices_list", "devices_get"]}
+  """
+  @spec loaded(State.t() | [Message.t()], [term()]) :: loaded()
+  def loaded(source, tools \\ [])
+
+  def loaded(%State{messages: messages}, tools), do: loaded(messages || [], tools)
+
+  def loaded(messages, tools) when is_list(messages) do
+    functions = for %Function{} = function <- tools, into: %{}, do: {function.name, function}
+
+    {namespaces, loaded_tools} =
+      messages
+      |> Enum.flat_map(&message_loads(&1, functions))
+      |> Enum.reduce({[], []}, fn
+        {:namespace, name}, {namespaces, tools} ->
+          {[name | namespaces], tools}
+
+        {:tool, name}, {namespaces, tools} ->
+          {namespace_of(namespaces, name, functions), [name | tools]}
+      end)
+
+    %{
+      namespaces: namespaces |> Enum.reverse() |> Enum.uniq(),
+      tools: loaded_tools |> Enum.reverse() |> Enum.uniq()
+    }
+  end
+
+  @doc """
+  The searches in one message: the number of search results it holds, and the
+  namespaces and tools they loaded (see `loaded/2`). Calls to deferred tools
+  are not counted here; they are not searches.
+  """
+  @spec searches(Message.t(), [term()]) :: %{count: non_neg_integer(), loaded: loaded()}
+  def searches(%Message{} = message, tools \\ []) do
+    results = search_results(message)
+
+    %{
+      count: length(results),
+      loaded: loaded([%Message{message | tool_calls: nil}], tools)
+    }
+  end
+
+  defp namespace_of(namespaces, name, functions) do
+    case Map.get(functions, name) do
+      %Function{} = function ->
+        case Function.namespace(function) do
+          nil -> namespaces
+          namespace -> [namespace | namespaces]
+        end
+
+      nil ->
+        namespaces
+    end
+  end
+
+  # The loads a message records, as `{:namespace, name}` and `{:tool, name}`
+  # in the order they appear.
+  defp message_loads(%Message{} = message, functions) do
+    item_loads =
+      for %ContentPart{type: :provider_item} = part <- List.wrap(message.content),
+          load <- item_loads(ContentPart.provider_item_block(part)),
+          do: load
+
+    reference_loads =
+      for %ToolResult{content: content} <- List.wrap(message.tool_results),
+          %ContentPart{type: :tool_reference, content: name} <- List.wrap(content),
+          do: {:tool, name}
+
+    call_loads =
+      for %ToolCall{name: name} <- List.wrap(message.tool_calls),
+          match?(%Function{}, functions[name]) and Function.deferred?(functions[name]),
+          do: {:tool, name}
+
+    item_loads ++ reference_loads ++ call_loads
+  end
+
+  defp message_loads(_other, _functions), do: []
+
+  # OpenAI: the tools a search returned, each a function or a namespace of
+  # functions.
+  defp item_loads(%{"type" => "tool_search_output", "tools" => tools}) when is_list(tools) do
+    Enum.flat_map(tools, fn
+      %{"type" => "namespace", "name" => namespace} = entry ->
+        nested = for %{"name" => name} <- List.wrap(entry["tools"]), do: {:tool, name}
+        [{:namespace, namespace} | nested]
+
+      %{"name" => name} ->
+        [{:tool, name}]
+
+      _other ->
+        []
+    end)
+  end
+
+  # Anthropic: the tools a server-side search referenced. An error result
+  # references none.
+  defp item_loads(%{"type" => "tool_search_tool_result", "content" => content}) do
+    for %{"tool_name" => name} <- List.wrap(content["tool_references"]), do: {:tool, name}
+  end
+
+  defp item_loads(_item), do: []
+
+  defp search_results(%Message{} = message) do
+    items =
+      for %ContentPart{type: :provider_item} = part <- List.wrap(message.content),
+          %{"type" => type} <- [ContentPart.provider_item_block(part)],
+          type in ["tool_search_output", "tool_search_tool_result"],
+          do: type
+
+    references =
+      for %ToolResult{content: content} <- List.wrap(message.tool_results),
+          Enum.any?(List.wrap(content), &match?(%ContentPart{type: :tool_reference}, &1)),
+          do: :tool_reference
+
+    items ++ references
+  end
 
   @doc """
   Index the namespaces of an agent's tools, and validate them.

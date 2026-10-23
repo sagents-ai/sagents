@@ -80,6 +80,25 @@ defmodule Sagents.Middleware.ToolSearch do
   catalog is built once in `Sagents.Agent.new/2` and stays the same for the
   life of a conversation, so it does not disturb the prompt cache.
 
+  ## Observing loads
+
+  `Sagents.ToolSearch.loaded/2` reads the namespaces and tools a conversation
+  has loaded from its history:
+
+      Sagents.ToolSearch.loaded(state, agent.tools)
+      #=> %{namespaces: ["devices"], tools: ["devices_list"]}
+
+  Each message holding search results emits a `:telemetry` event:
+
+  - Event: `[:sagents, :tool_search, :loaded]`
+  - Measurements: `%{count: n}`, the search results in the message
+  - Metadata: `%{agent_id: _, namespaces: [...], tools: [...]}`, what those
+    results loaded. A search that found nothing has empty lists.
+
+  It is emitted in the process running the agent, for runs through
+  `Sagents.AgentServer` and through `Sagents.Agent.execute/3` alike, and for
+  sub-agents that inherit this middleware.
+
   ## Validation
 
   `Sagents.Agent.new/2` fails when a namespace has no description, when its
@@ -131,6 +150,29 @@ defmodule Sagents.Middleware.ToolSearch do
 
   @impl true
   def tools(config), do: [NativeTool.tool_search(variant: config.variant)]
+
+  @impl true
+  def callbacks(_config), do: %{on_message_processed: &__MODULE__.emit_loaded/2}
+
+  @loaded_event [:sagents, :tool_search, :loaded]
+
+  @doc false
+  # Emits `[:sagents, :tool_search, :loaded]` for a message holding search
+  # results. A named capture, so the callback survives a move between nodes.
+  @spec emit_loaded(LangChain.Chains.LLMChain.t(), LangChain.Message.t()) :: :ok
+  def emit_loaded(chain, message) do
+    case Sagents.ToolSearch.searches(message, chain.tools || []) do
+      %{count: 0} ->
+        :ok
+
+      %{count: count, loaded: loaded} ->
+        :telemetry.execute(@loaded_event, %{count: count}, %{
+          agent_id: Map.get(chain.custom_context || %{}, :agent_id),
+          namespaces: loaded.namespaces,
+          tools: loaded.tools
+        })
+    end
+  end
 
   defp validate_option_keys(opts) do
     case Keyword.keys(opts) -- @option_keys do
