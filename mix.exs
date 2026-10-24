@@ -204,6 +204,7 @@ defmodule Sagents.MixProject do
       "docs/using_with_a_react_front_end.md",
       "docs/middleware.md",
       "docs/middleware_messaging.md",
+      "docs/tool_context_and_state.md",
       "docs/observability.md",
       "docs/persistence.md",
       "docs/forking.md",
