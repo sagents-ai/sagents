@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.19.0
+
+Provider tool search. An agent declares every tool up front, keeps most of them out of the model's context, and lets the model load the ones it needs by searching. The tool list and system prompt stay the same for the life of a conversation, so the prompt cache and earlier reasoning survive a load. Add `Sagents.Middleware.ToolSearch` to the stack and declare a namespace on a middleware with the new `tool_search/1` callback. It works on Anthropic and the OpenAI Responses API (`ChatAnthropic`, `ChatOpenAIResponses`, and `ChatReqLLM` on either), and every other chat model falls back to sending every tool. It is opt-in: an agent without the middleware behaves as before. Tool search is independent of ability sets, and the two compose.
+
+**One change is not caught by the compiler.** A middleware given a custom `:id` now keeps it in a dynamic sub-agent. Code in a sub-agent that routed to such a middleware by its module name must use the custom id. The display support for searches is opt-in and needs changes to your generated persistence files to use.
+
+### Upgrading from v0.18.x - v0.19.0
+
+Read
+[MIGRATION_PROMPT_v0.18.x_TO_v0.19.0.md](https://github.com/sagents-ai/sagents/blob/main/MIGRATION_PROMPT_v0.18.x_TO_v0.19.0.md).
+It is written to be handed to a coding agent, and it is search-driven: every
+step comes with the searches that find the code it affects.
+
+- **Tool search** needs no changes to existing code. Adding the middleware and declaring namespaces is opt-in.
+- **Search display rows** are opt-in. Your generated `DisplayMessage` schema and persistence module are your own copies, so an existing install gets none of the template changes from the dependency bump. The guide covers the `"tool_search"` content type, its content validation, the `extract_display_items/2` option, and the trailing-answer scan.
+- **Custom middleware ids in dynamic sub-agents** are the one behavior change to check for.
+
+### Added
+- `Sagents.Middleware.ToolSearch` turns on provider tool search. It adds the provider's search tool, and its options are `:variant` (`:bm25` or `:regex`), `:catalog`, and `:namespaces` (overrides keyed by middleware entry id, where `false` keeps a middleware's tools visible). It must sit outside every ability set. https://github.com/sagents-ai/sagents/pull/224
+- The optional `Sagents.Middleware.tool_search/1` callback declares a middleware's tools as one namespace, with `:namespace` and `:description`. Its `LangChain.Function`s are deferred and grouped under that namespace. Options a function sets itself win, so a middleware can keep one tool visible or split its tools across namespaces. A middleware's system prompt fragment is always sent. https://github.com/sagents-ai/sagents/pull/224
+- A catalog fragment in the system prompt lists each namespace with deferred tools among the tools sent, for Anthropic models, which see nothing about deferred tools until they search. Each ability set's prompt lists only its own namespaces. https://github.com/sagents-ai/sagents/pull/224
+- `Agent.new/2` validates namespaces: the name pattern, a missing or conflicting description, an unknown declaration key, and a `:namespaces` key naming no entry. It warns at ten or more functions in one namespace. The resolved index is `agent.tool_search_index`. https://github.com/sagents-ai/sagents/pull/224
+- `Sagents.ToolSearch.loaded/2` reads the namespaces and tools a conversation has loaded from its history. Each message holding search results emits `[:sagents, :tool_search, :loaded]` telemetry, for `AgentServer` runs, direct `Agent.execute/3` runs, and inherited sub-agents. https://github.com/sagents-ai/sagents/pull/224
+- `DisplayHelpers.extract_display_items/2` with `tool_search: true` adds a `:tool_search` display item for each search, in content order, with the tools, namespaces, provider, and query. The generator templates pass the option and accept the `"tool_search"` content type. https://github.com/sagents-ai/sagents/pull/224
+- `MiddlewareEntry` has a new `tool_search` field, the entry's resolved namespace, or `nil`. https://github.com/sagents-ai/sagents/pull/224
+
+### Changed
+- `MiddlewareEntry.to_raw_spec/1` keeps a custom `:id`, and drops only an `:id` equal to the module. A middleware with a custom id used to come back in a dynamic sub-agent under its module name, and two instances of one module shared one id there. https://github.com/sagents-ai/sagents/pull/224
+- The `Sagents.Middleware.tools/1` callback may return `LangChain.NativeTool`s as well as `LangChain.Function`s. https://github.com/sagents-ai/sagents/pull/224
+- Requires `langchain` `>= 0.15.5`, the release with provider tool search.
+
 ## v0.18.1
 
 Ability sets can hold any number of tools without a warning.
