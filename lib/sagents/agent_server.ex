@@ -105,7 +105,9 @@ defmodule Sagents.AgentServer do
 
     - `shutdown_data.agent_id` - The agent identifier
     - `shutdown_data.reason` - Shutdown reason (`:inactivity` | `:no_viewers`
-      | the `terminate/2` reason term)
+      | the `terminate/2` reason term). `{:shutdown, :name_conflict}` means
+      another process won this agent's registered name; the agent is still
+      running there.
     - `shutdown_data.status` - The server's status at shutdown
     - `shutdown_data.interrupt_restorable` - `true` when the server is
       shutting down `:interrupted` **and** the pending interrupt can be
@@ -124,6 +126,9 @@ defmodule Sagents.AgentServer do
     - `:executing` → `tool_info` contains `:call_id`, `:name`, `:display_text`, `:arguments`
     - `:completed` → `tool_info` contains `:call_id`, `:name`, `:result`
     - `:failed` → `tool_info` contains `:call_id`, `:name`, `:error`
+
+  - `{:agent, {:tool_progress, tool_call_id, payload}}` - Progress reported by a
+    running tool through `report_tool_progress/2`. The payload is the tool's own.
 
   - `{:agent, {:display_message_updated, display_msg}}` - Tool status updated in DB
     (only when `display_message_persistence` is configured)
@@ -313,6 +318,12 @@ defmodule Sagents.AgentServer do
   # Topic for agent presence tracking - enables discovery of running agents
   @agent_presence_topic "agent_server:presence"
 
+  # Presence carries last_activity_at for discovery. Each presence write is
+  # broadcast to every node, so activity writes it at most this often; a tool
+  # reporting progress per item would otherwise produce a cluster-wide write
+  # per item. Status changes write presence immediately.
+  @presence_activity_interval_ms 30_000
+
   defmodule ServerState do
     @moduledoc false
     defstruct [
@@ -329,6 +340,8 @@ defmodule Sagents.AgentServer do
       :inactivity_timeout,
       :inactivity_timer_ref,
       :last_activity_at,
+      # Monotonic ms of the last presence write made for activity, or nil
+      :last_presence_activity_at,
       :shutdown_delay,
       :task,
       :middleware_registry,
@@ -421,6 +434,7 @@ defmodule Sagents.AgentServer do
             inactivity_timeout: pos_integer() | nil | :infinity,
             inactivity_timer_ref: reference() | nil,
             last_activity_at: DateTime.t() | nil,
+            last_presence_activity_at: integer() | nil,
             shutdown_delay: pos_integer() | nil,
             task: Task.t() | nil,
             middleware_registry: %{(atom() | String.t()) => MiddlewareEntry.t()},
@@ -475,6 +489,9 @@ defmodule Sagents.AgentServer do
   - `:name` - Server name registration (optional, defaults to `get_name(agent.agent_id)`)
   - `:inactivity_timeout` - Timeout in milliseconds for automatic shutdown due to inactivity (default: 300_000 - 5 minutes)
     Set to `nil` or `:infinity` to disable automatic shutdown
+    An agent that is running a turn is never stopped by it; the countdown
+    starts over when the turn ends. Published events and `touch/1` count as
+    activity and restart it.
   - `:shutdown_delay` - Delay in milliseconds to allow the supervisor to gracefully stop all children (default: 5000)
   - `:conversation_id` - Optional conversation identifier for message persistence (default: nil)
   - `:agent_persistence` - Module implementing `Sagents.AgentPersistence` for state snapshots (default: nil).
@@ -844,11 +861,50 @@ defmodule Sagents.AgentServer do
 
   A PubSub message is only broadcast if the AgentServer is configured with
   PubSub.
+
+  A published event is the agent producing output, so it counts as activity:
+  it resets the inactivity timer, the same as `touch/1`. Debug events
+  (`publish_debug_event_from/2`) and middleware messages
+  (`notify_middleware/3`) do not.
   """
   @spec publish_event_from(String.t(), term()) :: :ok
   def publish_event_from(agent_id, event) do
     GenServer.cast(get_name(agent_id), {:publish_event, event})
   end
+
+  @doc """
+  Report progress from inside a running tool.
+
+  Publishes `{:tool_progress, tool_call_id, payload}` to the agent's
+  subscribers, who receive it as `{:agent, {:tool_progress, tool_call_id,
+  payload}}`. Like any published event, it counts as agent activity and resets
+  the inactivity timer, so a long tool that reports progress keeps its agent
+  alive.
+
+  Pass the tool's own `context`; its `:agent_id` and `:tool_call_id` address
+  the event. Call it from the tool's function or from any process the tool
+  started. The payload is whatever the tool's UI needs.
+
+  Returns `:ok`. When the context has no `:agent_id` (a chain run outside an
+  AgentServer), it does nothing.
+
+  ## Examples
+
+      function: fn %{"devices" => devices}, context ->
+        for {device, index} <- Enum.with_index(devices, 1) do
+          run_on(device)
+          AgentServer.report_tool_progress(context, %{done: index, total: length(devices)})
+        end
+
+        {:ok, "Ran on \#{length(devices)} devices"}
+      end
+  """
+  @spec report_tool_progress(map(), term()) :: :ok
+  def report_tool_progress(%{agent_id: agent_id} = context, payload) when is_binary(agent_id) do
+    publish_event_from(agent_id, {:tool_progress, Map.get(context, :tool_call_id), payload})
+  end
+
+  def report_tool_progress(_context, _payload), do: :ok
 
   @doc """
   Persist a synthetic display message and broadcast it to subscribers.
@@ -1499,7 +1555,11 @@ defmodule Sagents.AgentServer do
 
   This is useful when external events indicate activity (e.g., user viewing
   the agent in the UI, clicking tabs, etc.) to keep the agent alive and
-  prevent automatic shutdown due to inactivity.
+  prevent automatic shutdown due to inactivity. A tool can call it with
+  `context.agent_id` to keep its agent alive during long work.
+
+  Presence `last_activity_at` is updated too, at most once every 30 seconds,
+  since each presence write is broadcast across the cluster.
 
   Returns `:ok` immediately (non-blocking).
 
@@ -2729,7 +2789,7 @@ defmodule Sagents.AgentServer do
           server_state
       end
 
-    {:noreply, server_state}
+    {:noreply, note_activity(server_state)}
   end
 
   @impl true
@@ -2813,10 +2873,7 @@ defmodule Sagents.AgentServer do
 
   @impl true
   def handle_cast(:touch, server_state) do
-    # Reset the inactivity timer to keep the agent alive
-    # Also update presence activity for real-time discovery
-    update_presence_activity(server_state)
-    {:noreply, reset_inactivity_timer(server_state)}
+    {:noreply, note_activity(server_state)}
   end
 
   @impl true
@@ -2826,7 +2883,7 @@ defmodule Sagents.AgentServer do
 
     # If we're already cancelled, ignore the task result (race condition)
     if server_state.status == :cancelled do
-      {:noreply, Map.delete(server_state, :task)}
+      {:noreply, %{server_state | task: nil}}
     else
       handle_execution_result(result, server_state)
     end
@@ -2849,6 +2906,25 @@ defmodule Sagents.AgentServer do
     # Process exited normally (we trap exits), this is expected when shutting
     # down for inactivity
     {:noreply, server_state}
+  end
+
+  # Horde resolves a name registered on two nodes at once by keeping one
+  # process and sending the other this exit. The winner now owns the
+  # conversation, so the loser stops without persisting (see terminate/2), and
+  # stops its own supervisor by pid: the supervisor's name belongs to the
+  # winner's tree now, and the losing supervisor ignores its own conflict exit
+  # because it comes from neither its parent nor a child.
+  @impl true
+  def handle_info(
+        {:EXIT, _pid, {:name_conflict, {_key, _value}, _registry, winner}},
+        server_state
+      ) do
+    Logger.warning(
+      "AgentServer #{server_state.agent.agent_id} lost a registry name conflict " <>
+        "to #{inspect(winner)}; stopping"
+    )
+
+    {:stop, {:shutdown, :name_conflict}, stop_supervisor(server_state)}
   end
 
   @impl true
@@ -2881,7 +2957,20 @@ defmodule Sagents.AgentServer do
     {:noreply, server_state}
   end
 
+  # The timer measures time since the last turn boundary, so it fires during a
+  # long turn whether or not the turn is making progress. Stopping here would
+  # end the turn through a supervisor stop and lose its results. Every path
+  # that ends a turn resets the timer, so the idle countdown starts from then.
   @impl true
+  def handle_info(:inactivity_timeout, %ServerState{status: :running} = server_state) do
+    Logger.debug(
+      "Agent #{server_state.agent.agent_id} reached its inactivity timeout while running; " <>
+        "timer re-armed"
+    )
+
+    {:noreply, rearm_inactivity_timer(server_state)}
+  end
+
   def handle_info(:inactivity_timeout, server_state) do
     agent_id = server_state.agent.agent_id
     Logger.info("Agent #{agent_id} shutting down due to inactivity")
@@ -2987,7 +3076,31 @@ defmodule Sagents.AgentServer do
     {:noreply, server_state}
   end
 
+  # A process that lost a name conflict does not own its conversation. Its
+  # state is not persisted, because that would write over the winner's, and its
+  # running task is killed rather than awaited, because its results belong to
+  # no agent. Presence is untracked by this pid, so it does not touch the
+  # winner's entry. Subscribers are told the agent shut down, so they can find
+  # the winner.
   @impl true
+  def terminate({:shutdown, :name_conflict} = reason, server_state) do
+    case server_state.task do
+      %Task{} = task -> Task.shutdown(task, :brutal_kill)
+      nil -> :ok
+    end
+
+    server_state = cancel_inactivity_timer(server_state)
+    untrack_presence(server_state, reason)
+
+    try do
+      broadcast_event(server_state, {:agent_shutdown, shutdown_payload(server_state, reason)})
+    rescue
+      _error -> :ok
+    end
+
+    :ok
+  end
+
   def terminate(reason, server_state) do
     agent_id = server_state.agent.agent_id
 
@@ -3142,7 +3255,7 @@ defmodule Sagents.AgentServer do
     # Task crashed or was killed.
     # If status is already :cancelled, this is expected (brutal_kill side effect).
     if server_state.status == :cancelled do
-      {:noreply, Map.delete(server_state, :task)}
+      {:noreply, %{server_state | task: nil}}
     else
       Logger.error("Agent execution task crashed: #{inspect(reason)}")
 
@@ -3160,27 +3273,58 @@ defmodule Sagents.AgentServer do
       report_user_request_complete(new_state, :error)
       broadcast_event(new_state, {:status_changed, :error, reason})
 
-      {:noreply, Map.delete(new_state, :task)}
+      {:noreply, %{new_state | task: nil}}
     end
   end
 
   # Stop the parent AgentSupervisor asynchronously to avoid deadlock.
   # We can't call it synchronously because the supervisor would try to stop us
   # while we're waiting for the stop call to return.
+  #
+  # The supervisor is found by pid, never by name. A registered name can move
+  # to another process (a name conflict hands it to the winner's tree), and a
+  # lookup by agent_id would then stop an agent that is not this one.
   defp stop_supervisor(server_state) do
     agent_id = server_state.agent.agent_id
     shutdown_delay = server_state.shutdown_delay
 
-    spawn(fn ->
-      case AgentSupervisor.stop(agent_id, shutdown_delay) do
-        :ok -> :ok
-        {:error, :not_found} -> Logger.debug("AgentSupervisor for #{agent_id} already stopped")
-      end
-    end)
+    case own_supervisor_pid() do
+      nil ->
+        Logger.debug("AgentServer #{agent_id} has no AgentSupervisor to stop")
+
+      supervisor_pid ->
+        spawn(fn ->
+          try do
+            Supervisor.stop(supervisor_pid, :normal, shutdown_delay)
+          catch
+            :exit, _reason ->
+              Logger.debug("AgentSupervisor for #{agent_id} already stopped")
+          end
+        end)
+    end
 
     # return the server_state to make it pipe-friendly
     server_state
   end
+
+  # The AgentSupervisor this process was started under, or nil when it was
+  # started some other way (directly, or under a test supervisor). proc_lib
+  # records the parent as the first `$ancestors` entry, and a supervisor
+  # records `{:supervisor, module, arity}` as its `$initial_call`.
+  defp own_supervisor_pid do
+    with [parent | _rest] <- Process.get(:"$ancestors"),
+         pid when is_pid(pid) <- resolve_ancestor(parent),
+         {:dictionary, dictionary} <- Process.info(pid, :dictionary),
+         {:supervisor, AgentSupervisor, _arity} <- Keyword.get(dictionary, :"$initial_call") do
+      pid
+    else
+      _other -> nil
+    end
+  end
+
+  defp resolve_ancestor(pid) when is_pid(pid), do: pid
+  defp resolve_ancestor(name) when is_atom(name), do: Process.whereis(name)
+  defp resolve_ancestor(_other), do: nil
 
   @doc false
   # Build PubSub callback handlers that forward LLM events to subscribers.
@@ -3477,7 +3621,7 @@ defmodule Sagents.AgentServer do
         # Broadcast debug event for state update
         broadcast_debug_event(idle_state, {:agent_state_update, idle_state.state})
 
-        {:noreply, Map.delete(idle_state, :task)}
+        {:noreply, %{idle_state | task: nil}}
     end
   end
 
@@ -3524,7 +3668,7 @@ defmodule Sagents.AgentServer do
     # Broadcast debug event for state update
     broadcast_debug_event(updated_state, {:agent_state_update, interrupted_state})
 
-    {:noreply, Map.delete(updated_state, :task)}
+    {:noreply, %{updated_state | task: nil}}
   end
 
   # Queue policy: HOLD. An infrastructure pause (node draining) is not a
@@ -3553,7 +3697,7 @@ defmodule Sagents.AgentServer do
     # Broadcast debug event for state update
     broadcast_debug_event(updated_state, {:agent_state_update, paused_state})
 
-    {:noreply, Map.delete(updated_state, :task)}
+    {:noreply, %{updated_state | task: nil}}
   end
 
   # Queue policy: HOLD, and surface. Delivering a queued message into a failed
@@ -3591,7 +3735,7 @@ defmodule Sagents.AgentServer do
     # Reset activity timer after error
     updated_state = reset_inactivity_timer(updated_state)
 
-    {:noreply, Map.delete(updated_state, :task)}
+    {:noreply, %{updated_state | task: nil}}
   end
 
   # Broadcast state changes - broadcasts todos and debug state update
@@ -4858,25 +5002,47 @@ defmodule Sagents.AgentServer do
 
   ## Inactivity Timer Management
 
-  # Reset the inactivity timer
+  # Activity reported from outside a turn boundary: a touch, or an event the
+  # agent published. Resets the inactivity timer and keeps presence's
+  # last_activity_at current, writing presence at most once per interval.
+  defp note_activity(server_state) do
+    server_state
+    |> reset_inactivity_timer()
+    |> maybe_update_presence_activity()
+  end
+
+  defp maybe_update_presence_activity(%ServerState{last_presence_activity_at: last} = state) do
+    now = System.monotonic_time(:millisecond)
+
+    if is_nil(last) or now - last >= @presence_activity_interval_ms do
+      update_presence_activity(state)
+      %{state | last_presence_activity_at: now}
+    else
+      state
+    end
+  end
+
+  # Reset the inactivity timer and record the activity that reset it.
   defp reset_inactivity_timer(state) do
+    case rearm_inactivity_timer(state) do
+      %{inactivity_timer_ref: nil} = state -> state
+      state -> %{state | last_activity_at: DateTime.utc_now()}
+    end
+  end
+
+  # Start the inactivity countdown over without recording activity. Presence
+  # reports `last_activity_at`, so a re-arm that is not activity leaves it alone.
+  defp rearm_inactivity_timer(state) do
     # Cancel existing timer if present
     state = cancel_inactivity_timer(state)
 
     # Don't schedule if timeout is nil or :infinity
     case state.inactivity_timeout do
-      nil ->
-        state
-
-      :infinity ->
-        state
-
       timeout when is_integer(timeout) and timeout > 0 ->
         timer_ref = Process.send_after(self(), :inactivity_timeout, timeout)
+        %{state | inactivity_timer_ref: timer_ref}
 
-        %{state | inactivity_timer_ref: timer_ref, last_activity_at: DateTime.utc_now()}
-
-      _other ->
+      _nil_or_infinity ->
         state
     end
   end
