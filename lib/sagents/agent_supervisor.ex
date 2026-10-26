@@ -156,6 +156,9 @@ defmodule Sagents.AgentSupervisor do
     delivered directly to subscriber pids via `Sagents.Publisher`.
   - `:inactivity_timeout` - Timeout in milliseconds for automatic shutdown (optional, default: 300_000 - 5 minutes)
     Set to `nil` or `:infinity` to disable automatic shutdown
+    An agent that is running a turn is never stopped by it; the countdown
+    starts over when the turn ends. Published events and `touch/1` count as
+    activity and restart it.
   - `:name` - Supervisor name registration (optional)
   - `:shutdown_delay` - Delay in milliseconds to allow the supervisor to gracefully stop all children (optional, default: 5000)
   - `:conversation_id` - Optional conversation identifier for message persistence (optional, default: nil)

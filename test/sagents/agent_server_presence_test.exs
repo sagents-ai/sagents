@@ -629,6 +629,47 @@ defmodule Sagents.AgentServerPresenceTest do
       AgentSupervisor.stop(agent_id)
     end
 
+    test "activity writes presence at most once per interval, status changes always" do
+      agent = create_test_agent()
+      agent_id = agent.agent_id
+
+      mock_quick_execution()
+
+      {:ok, _pid} =
+        AgentSupervisor.start_link(
+          agent: agent,
+          initial_state: State.new!(%{messages: [Message.new_user!("Hi")]}),
+          name: AgentSupervisor.get_name(agent_id),
+          presence_module: Sagents.TestPresence
+        )
+
+      _state = AgentServer.get_state(agent_id)
+
+      # The first activity writes presence.
+      Process.sleep(5)
+      AgentServer.touch(agent_id)
+      _state = AgentServer.get_state(agent_id)
+      first_write = get_presence_metadata(agent_id).last_activity_at
+
+      # Activity right after it, by touch or by a published event, does not.
+      Process.sleep(5)
+      AgentServer.touch(agent_id)
+      :ok = AgentServer.publish_event_from(agent_id, {:custom_event, :tick})
+      _state = AgentServer.get_state(agent_id)
+      assert get_presence_metadata(agent_id).last_activity_at == first_write
+
+      # A status change still writes immediately.
+      {:ok, _server_pid, _ref} = AgentServer.subscribe(agent_id)
+      :ok = AgentServer.execute(agent_id)
+      assert_receive {:agent, {:status_changed, :idle, nil}}, 1_000
+      _state = AgentServer.get_state(agent_id)
+
+      assert DateTime.compare(get_presence_metadata(agent_id).last_activity_at, first_write) ==
+               :gt
+
+      AgentSupervisor.stop(agent_id)
+    end
+
     test "status change updates last_activity_at in presence metadata" do
       agent = create_test_agent()
       agent_id = agent.agent_id
