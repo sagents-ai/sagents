@@ -18,7 +18,8 @@ if Code.ensure_loaded?(Horde.Registry) do
     def init(init_arg) do
       [
         keys: :unique,
-        members: members()
+        members: members(),
+        listeners: Sagents.Horde.RegistrationKeeper.listener_names()
       ]
       |> Keyword.merge(Keyword.drop(init_arg, [:name]))
       |> Horde.Registry.init()
