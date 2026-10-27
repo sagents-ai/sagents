@@ -392,6 +392,48 @@ defmodule Sagents.AgentTest do
       {:ok, agent} = Agent.new(%{model: mock_model()})
       assert agent.max_runs == nil
     end
+
+    test "creates agent with max_retry_count" do
+      {:ok, agent} = Agent.new(%{model: mock_model(), max_retry_count: 6})
+      assert agent.max_retry_count == 6
+    end
+
+    test "max_retry_count must be a positive integer" do
+      for value <- [0, -1] do
+        assert {:error, changeset} = Agent.new(%{model: mock_model(), max_retry_count: value})
+        assert {"must be greater than %{number}", _opts} = changeset.errors[:max_retry_count]
+      end
+    end
+
+    test "a built chain carries max_retry_count" do
+      {:ok, agent} = Agent.new(%{model: mock_model(), max_retry_count: 6})
+      {:ok, chain} = Agent.build_chain(agent, [], State.new!(), nil)
+      assert chain.max_retry_count == 6
+    end
+
+    test "a built chain keeps LLMChain's default max_retry_count when unset" do
+      {:ok, agent} = Agent.new(%{model: mock_model()})
+      {:ok, chain} = Agent.build_chain(agent, [], State.new!(), nil)
+      assert chain.max_retry_count == 3
+    end
+
+    test "a built chain carries max_refusal_count" do
+      {:ok, agent} = Agent.new(%{model: mock_model(), max_refusal_count: 6})
+      assert agent.max_refusal_count == 6
+      {:ok, chain} = Agent.build_chain(agent, [], State.new!(), nil)
+      assert chain.max_refusal_count == 6
+    end
+
+    test "a built chain has no refusal limit when max_refusal_count is unset" do
+      {:ok, agent} = Agent.new(%{model: mock_model()})
+      {:ok, chain} = Agent.build_chain(agent, [], State.new!(), nil)
+      assert chain.max_refusal_count == nil
+    end
+
+    test "max_refusal_count must be a positive integer" do
+      assert {:error, changeset} = Agent.new(%{model: mock_model(), max_refusal_count: 0})
+      assert changeset.errors[:max_refusal_count]
+    end
   end
 
   describe "execute/2" do

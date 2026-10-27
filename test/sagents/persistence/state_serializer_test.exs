@@ -368,6 +368,79 @@ defmodule Sagents.Persistence.StateSerializerTest do
     end
   end
 
+  describe "tool result error flags" do
+    test "round-trip keeps is_exception and is_refusal" do
+      {:ok, model} = ChatOpenAI.new(%{model: "gpt-4", api_key: "test-key"})
+      {:ok, agent} = Agent.new(%{agent_id: "agent-123", model: model})
+
+      refused =
+        ToolResult.new!(%{tool_call_id: "c1", name: "edit", content: "no", is_refusal: true})
+
+      raised =
+        ToolResult.new!(%{
+          tool_call_id: "c2",
+          name: "edit",
+          content: "boom",
+          is_error: true,
+          is_exception: true
+        })
+
+      tool_msg = Message.new_tool_result!(%{content: nil, tool_results: [refused, raised]})
+
+      serialized =
+        StateSerializer.serialize_server_state(agent, State.new!(%{messages: [tool_msg]}))
+
+      assert [%{"tool_results" => [refused_map, raised_map]}] = serialized["state"]["messages"]
+      assert %{"is_error" => true, "is_refusal" => true, "is_exception" => false} = refused_map
+      assert %{"is_error" => true, "is_refusal" => false, "is_exception" => true} = raised_map
+
+      {:ok, restored} = StateSerializer.deserialize_server_state("agent-123", serialized)
+      assert [%Message{tool_results: [restored_refused, restored_raised]}] = restored.messages
+
+      assert %ToolResult{is_error: true, is_refusal: true, is_exception: false} = restored_refused
+      assert %ToolResult{is_error: true, is_refusal: false, is_exception: true} = restored_raised
+    end
+
+    test "a stored tool result without the flags loads with them false" do
+      serialized = %{
+        "version" => 1,
+        "state" => %{
+          "messages" => [
+            %{
+              "role" => "tool",
+              "content" => nil,
+              "status" => "complete",
+              "tool_results" => [
+                %{
+                  "type" => "function",
+                  "tool_call_id" => "call-1",
+                  "name" => "edit",
+                  "content" => "failed",
+                  "is_error" => true
+                }
+              ]
+            }
+          ],
+          "todos" => [],
+          "metadata" => %{}
+        },
+        "agent_config" => %{
+          "model" => %{
+            "module" => "Elixir.LangChain.ChatModels.ChatOpenAI",
+            "model" => "gpt-4"
+          },
+          "middleware" => []
+        },
+        "serialized_at" => "2025-11-29T10:30:00Z"
+      }
+
+      {:ok, state} = StateSerializer.deserialize_server_state("agent-123", serialized)
+
+      assert [%Message{tool_results: [result]}] = state.messages
+      assert %ToolResult{is_error: true, is_refusal: false, is_exception: false} = result
+    end
+  end
+
   describe "interrupt_data persistence" do
     test "round-trips a non-nil interrupt_data through term_to_binary + Base64" do
       {:ok, model} = ChatOpenAI.new(%{model: "gpt-4", api_key: "test-key"})

@@ -285,6 +285,11 @@ defmodule Sagents.SubAgent do
   - `:suppress_debug_events` - When true, none of this sub-agent's events are
     published on the parent's `:debug` channel (optional). See
     `new_from_config/1`. Defaults to `false`.
+  - `:max_retry_count` - Maximum consecutive failed rounds for the sub-agent's
+    chain (optional). Defaults to `compiled_agent.max_retry_count`, then to
+    LLMChain's default. The parent agent's value is not inherited.
+  - `:max_refusal_count` - Maximum consecutive refusal rounds for the
+    sub-agent's chain (optional). Defaults the same way as `:max_retry_count`.
 
   ## Examples
 
@@ -342,6 +347,8 @@ defmodule Sagents.SubAgent do
     until_tool = Keyword.get(opts, :until_tool)
     require_tool_success = Keyword.get(opts, :require_tool_success, false)
     max_runs = Keyword.get(opts, :max_runs) || agent.max_runs
+    max_retry_count = Keyword.get(opts, :max_retry_count) || agent.max_retry_count
+    max_refusal_count = Keyword.get(opts, :max_refusal_count) || agent.max_refusal_count
     parent_trace = Keyword.get(opts, :parent_trace, %{})
     suppress_debug_events = Keyword.get(opts, :suppress_debug_events, false)
     user_request_seq = Keyword.get(opts, :user_request_seq, 0)
@@ -390,11 +397,18 @@ defmodule Sagents.SubAgent do
           subagent_otel_attributes(agent, parent_trace, sub_agent_id, parent_agent_id)
       })
 
+    chain_config = %{llm: agent.model, custom_context: custom_context}
+
+    # The sub-agent's own limits, never the parent's. An unset one keeps
+    # LLMChain's default.
+    chain_config =
+      chain_config
+      |> maybe_put(:max_retry_count, max_retry_count)
+      |> maybe_put(:max_refusal_count, max_refusal_count)
+
     chain =
-      LLMChain.new!(%{
-        llm: agent.model,
-        custom_context: custom_context
-      })
+      chain_config
+      |> LLMChain.new!()
       |> LLMChain.add_tools(agent.tools)
       |> LLMChain.add_messages(messages)
 
@@ -413,6 +427,9 @@ defmodule Sagents.SubAgent do
       created_at: DateTime.utc_now()
     }
   end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   # Span attributes for a SubAgent: the parent's context, then the sub-agent's own,
   # then lineage last so it always describes the real structure.
@@ -973,6 +990,10 @@ defmodule Sagents.SubAgent do
       # exclusive with :until_tool. Stops only on a successful result.
       field :until_tool_success, :any, virtual: true
       field :max_runs, :integer, virtual: true
+      # See Agent :max_retry_count and :max_refusal_count. Not inherited from
+      # the parent agent.
+      field :max_retry_count, :integer, virtual: true
+      field :max_refusal_count, :integer, virtual: true
       # See SubAgent.suppress_debug_events. When true, this sub-agent type
       # publishes none of its events on the parent's :debug channel.
       field :suppress_debug_events, :boolean, default: false
@@ -993,6 +1014,8 @@ defmodule Sagents.SubAgent do
             until_tool: String.t() | [String.t()] | nil,
             until_tool_success: String.t() | [String.t()] | nil,
             max_runs: integer() | nil,
+            max_retry_count: integer() | nil,
+            max_refusal_count: integer() | nil,
             suppress_debug_events: boolean()
           }
 
@@ -1013,6 +1036,8 @@ defmodule Sagents.SubAgent do
         :until_tool,
         :until_tool_success,
         :max_runs,
+        :max_retry_count,
+        :max_refusal_count,
         :suppress_debug_events
       ])
       |> validate_required([:name, :description, :tools])
@@ -1023,6 +1048,8 @@ defmodule Sagents.SubAgent do
       |> validate_length(:system_prompt_override, min: 1, max: 10_000)
       |> validate_length(:use_instructions, min: 1, max: 10_000)
       |> validate_length(:display_text, min: 1, max: 200)
+      |> validate_number(:max_retry_count, greater_than: 0)
+      |> validate_number(:max_refusal_count, greater_than: 0)
       |> validate_tools()
       |> validate_until_tool()
       |> validate_prompt_source()
@@ -1441,7 +1468,9 @@ defmodule Sagents.SubAgent do
         base_system_prompt: base_system_prompt,
         tools: config.tools,
         middleware: middleware,
-        max_runs: config.max_runs
+        max_runs: config.max_runs,
+        max_retry_count: config.max_retry_count,
+        max_refusal_count: config.max_refusal_count
       },
       replace_default_middleware: true
     )

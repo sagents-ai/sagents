@@ -563,6 +563,8 @@ defmodule Sagents.Persistence.StateSerializer do
       "name" => tool_result.name,
       "content" => serialize_content(tool_result.content),
       "is_error" => tool_result.is_error,
+      "is_exception" => tool_result.is_exception,
+      "is_refusal" => tool_result.is_refusal,
       "is_interrupt" => tool_result.is_interrupt
     }
 
@@ -591,6 +593,8 @@ defmodule Sagents.Persistence.StateSerializer do
            name: data["name"],
            content: deserialize_content(data["content"]),
            is_error: data["is_error"] || false,
+           is_exception: data["is_exception"] || false,
+           is_refusal: data["is_refusal"] || false,
            is_interrupt: data["is_interrupt"] || false,
            interrupt_data: interrupt_data
          }) do

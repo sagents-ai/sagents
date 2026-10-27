@@ -189,6 +189,70 @@ defmodule Sagents.Middleware.HumanInTheLoopUnrunnableCallsTest do
     end
   end
 
+  # ── Refusals and the failure budget ─────────────────────────────
+
+  describe "a gated call its tool refuses" do
+    defp new_limited_agent(ledger, limits) do
+      {:ok, agent} =
+        Agent.new(
+          Map.merge(
+            %{
+              model: ChatAnthropic.new!(%{model: "claude-sonnet-4-6", stream: false}),
+              tools: [update_transaction_tool()],
+              tool_context: %{ledger: ledger, test_pid: self()},
+              middleware: [
+                {HumanInTheLoop, [interrupt_on: gated(["update_transaction"])]}
+              ]
+            },
+            limits
+          ),
+          replace_default_middleware: true
+        )
+
+      agent
+    end
+
+    # The model resends the refused call every time it is asked.
+    defp mock_model_repeating(tool_call) do
+      stub(ChatAnthropic, :call, fn _model, _messages, _tools ->
+        {:ok, [Message.new_assistant!(%{content: "Trying.", tool_calls: [tool_call]})]}
+      end)
+    end
+
+    test "is marked as a refusal", %{ledger: ledger} do
+      mock_model([call("c1", "update_transaction", %{"id" => "tx_404", "category" => "rent"})])
+      agent = new_agent(ledger, gated(["update_transaction"]), [update_transaction_tool()])
+
+      assert {:ok, state} = Agent.execute(agent, start_state())
+
+      assert %{"c1" => %ToolResult{is_error: true, is_refusal: true}} = results_by_id(state)
+    end
+
+    test "spends max_retry_count when the agent has no refusal limit", %{ledger: ledger} do
+      mock_model_repeating(
+        call("c1", "update_transaction", %{"id" => "tx_404", "category" => "rent"})
+      )
+
+      agent = new_limited_agent(ledger, %{max_retry_count: 2})
+
+      assert {:error, %LangChain.LangChainError{message: "Exceeded max failure count"}} =
+               Agent.execute(agent, start_state())
+    end
+
+    test "spends the refusal limit instead when the agent sets one", %{ledger: ledger} do
+      mock_model_repeating(
+        call("c1", "update_transaction", %{"id" => "tx_404", "category" => "rent"})
+      )
+
+      agent = new_limited_agent(ledger, %{max_retry_count: 2, max_refusal_count: 4})
+
+      assert {:error, %LangChain.LangChainError{message: "Exceeded max refusal count"}} =
+               Agent.execute(agent, start_state())
+
+      refute_received {:body_ran, _, _}
+    end
+  end
+
   # ── Some calls need a human ─────────────────────────────────────
 
   describe "when a batch has a valid and a refused gated call" do
