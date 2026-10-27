@@ -50,6 +50,8 @@ defmodule Sagents.Supervisor do
   - `Sagents.PresenceWriter`: makes presence writes for agents so an agent
     never waits on `Phoenix.Tracker`. Started first so it stops last, after the
     agents whose final writes it applies.
+  - `Sagents.Horde.RegistrationKeeper` (`:horde` only): restores a `:via` name
+    the registry drops while its owner is still running.
   - `Sagents.ProcessRegistry` — Process registry (local `Registry` or
     `Horde.Registry`)
   - Agents dynamic supervisor — For managing `AgentSupervisor` instances
@@ -66,11 +68,17 @@ defmodule Sagents.Supervisor do
   ## Restart strategy
 
   Children are supervised `:rest_for_one`, with the registry first after the
-  presence writer. Everything listed after the registry depends on it: an `AgentSupervisor` and an `AgentServer`
-  register their `:via` names in the registry once, at start, and nothing
-  re-registers them afterwards. A registry that loses its contents would
-  otherwise leave them running but invisible to every lookup, which lets a
-  conversation acquire a second AgentServer.
+  presence writer (and, under `:horde`, `Sagents.Horde.RegistrationKeeper`).
+  Everything listed after the registry depends on it: an `AgentSupervisor` and
+  an `AgentServer` register their `:via` names in the registry once, at start.
+  A registry that loses its contents would otherwise leave them running but
+  invisible to every lookup, which lets a conversation acquire a second
+  AgentServer.
+
+  Under `:horde`, a single name the registry drops while its owner is still
+  running is restored by `Sagents.Horde.RegistrationKeeper`. That covers the
+  names a node departure prunes while their agents restart on a survivor. A
+  registry that loses everything still goes through the restart below.
 
   `:rest_for_one` expresses that dependency. A registry failure takes the
   dynamic supervisors down with it, agents stop, and the next request re-creates
@@ -104,25 +112,39 @@ defmodule Sagents.Supervisor do
         # First, so it is not restarted by a registry failure (it holds no
         # registrations) and so it stops after every agent, applying the
         # presence writes they make on the way down.
-        Sagents.PresenceWriter,
-        Sagents.ProcessRegistry.child_spec([]),
-        # Sits between the registry and its dependents on purpose. Both Horde
-        # and Elixir's Registry own their ETS tables in a process one level
-        # below the child listed above, and both restart that process
-        # internally with empty tables, so Sagents.Supervisor never sees a
-        # child fail. The watcher observes the table-owning process and fails
-        # in its place, which is what puts the restart below into the
-        # :rest_for_one chain.
-        Sagents.RegistryWatcher,
-        Sagents.ProcessSupervisor.agents_supervisor_child_spec([]),
-        Sagents.ProcessSupervisor.filesystem_supervisor_child_spec([])
-      ] ++ membership_children()
+        Sagents.PresenceWriter
+      ] ++
+        registration_keeper_children() ++
+        [
+          Sagents.ProcessRegistry.child_spec([]),
+          # Sits between the registry and its dependents on purpose. Both Horde
+          # and Elixir's Registry own their ETS tables in a process one level
+          # below the child listed above, and both restart that process
+          # internally with empty tables, so Sagents.Supervisor never sees a
+          # child fail. The watcher observes the table-owning process and fails
+          # in its place, which is what puts the restart below into the
+          # :rest_for_one chain.
+          Sagents.RegistryWatcher,
+          Sagents.ProcessSupervisor.agents_supervisor_child_spec([]),
+          Sagents.ProcessSupervisor.filesystem_supervisor_child_spec([])
+        ] ++ membership_children()
 
     # :rest_for_one because everything after the registry holds `:via`
     # registrations in it that are established once at start. A registry
     # failure has to take them down so they re-register on the way back up.
     # See the moduledoc.
     Supervisor.init(children, strategy: :rest_for_one)
+  end
+
+  # Under `:horde`, the registry delivers each removed name to
+  # Sagents.Horde.RegistrationKeeper with `send/2` to its registered name, which
+  # raises when nothing holds the name. Listed before the registry, the keeper
+  # is running whenever the registry is and stops after it.
+  defp registration_keeper_children do
+    case Sagents.ProcessSupervisor.distribution_type() do
+      :horde -> [Sagents.Horde.RegistrationKeeper]
+      :local -> []
+    end
   end
 
   # With `members: :participation`, start the `:pg` scope and the membership

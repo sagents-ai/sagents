@@ -6,9 +6,11 @@ defmodule Sagents.RegistryWatcher do
   ## What it protects
 
   Every `AgentSupervisor` and `AgentServer` registers its `:via` name in
-  `Sagents.Registry` exactly once, when it starts, and nothing re-registers it
-  afterwards. A registry that loses its contents therefore leaves those
-  processes running but invisible to every lookup. Lookups answer "nothing is
+  `Sagents.Registry` exactly once, when it starts. A registry that loses its
+  contents therefore leaves those processes running but invisible to every
+  lookup. (`Sagents.Horde.RegistrationKeeper` restores a single name the Horde
+  registry drops while its owner runs; it cannot rebuild an emptied registry,
+  since an emptied registry reports no removals.) Lookups answer "nothing is
   running", the next request responds by starting an agent, and the conversation
   ends up with two AgentServers holding and persisting state for it, with
   nothing reporting the conflict.
