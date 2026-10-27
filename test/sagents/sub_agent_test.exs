@@ -652,6 +652,47 @@ defmodule Sagents.SubAgentTest do
       assert registry["bounded-agent"].max_runs == 7
     end
 
+    test "Config subagent preserves max_retry_count on the built agent" do
+      config =
+        SubAgentConfig.new!(%{
+          name: "patient-agent",
+          description: "Patient agent",
+          system_prompt: "Prompt",
+          tools: [test_tool()],
+          max_retry_count: 5
+        })
+
+      assert {:ok, registry} = SubAgent.build_agent_map([config], test_model(), [])
+      assert registry["patient-agent"].max_retry_count == 5
+    end
+
+    test "Config subagent preserves max_refusal_count on the built agent" do
+      config =
+        SubAgentConfig.new!(%{
+          name: "patient-agent",
+          description: "Patient agent",
+          system_prompt: "Prompt",
+          tools: [test_tool()],
+          max_refusal_count: 4
+        })
+
+      assert {:ok, registry} = SubAgent.build_agent_map([config], test_model(), [])
+      assert registry["patient-agent"].max_refusal_count == 4
+    end
+
+    test "Config subagent refuses a non-positive max_retry_count" do
+      assert {:error, changeset} =
+               SubAgentConfig.new(%{
+                 name: "agent",
+                 description: "Agent",
+                 system_prompt: "Prompt",
+                 tools: [test_tool()],
+                 max_retry_count: 0
+               })
+
+      assert changeset.errors[:max_retry_count]
+    end
+
     test "Config subagent gets middleware from config" do
       model = test_model()
 
@@ -1214,6 +1255,67 @@ defmodule Sagents.SubAgentTest do
   end
 
   describe "new_from_compiled/1" do
+    test "the chain uses the compiled agent's max_retry_count" do
+      compiled_agent = Agent.new!(%{model: test_model(), max_retry_count: 5})
+
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          compiled_agent: compiled_agent
+        )
+
+      assert subagent.chain.max_retry_count == 5
+    end
+
+    test "the max_retry_count option overrides the compiled agent's value" do
+      compiled_agent = Agent.new!(%{model: test_model(), max_retry_count: 5})
+
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          compiled_agent: compiled_agent,
+          max_retry_count: 2
+        )
+
+      assert subagent.chain.max_retry_count == 2
+    end
+
+    test "the chain uses the compiled agent's max_refusal_count, or the option" do
+      compiled_agent = Agent.new!(%{model: test_model(), max_refusal_count: 5})
+
+      from_agent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          compiled_agent: compiled_agent
+        )
+
+      from_option =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          compiled_agent: compiled_agent,
+          max_refusal_count: 2
+        )
+
+      assert from_agent.chain.max_refusal_count == 5
+      assert from_option.chain.max_refusal_count == 2
+    end
+
+    test "the chain keeps LLMChain's default when no max_retry_count is set" do
+      subagent =
+        SubAgent.new_from_compiled(
+          parent_agent_id: "test-parent",
+          instructions: "Do something",
+          compiled_agent: test_agent()
+        )
+
+      assert subagent.chain.max_retry_count == 3
+      assert subagent.chain.max_refusal_count == nil
+    end
+
     test "creates SubAgent from compiled agent" do
       compiled_agent = test_agent()
 

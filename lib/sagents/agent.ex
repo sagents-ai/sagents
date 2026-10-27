@@ -100,6 +100,15 @@ defmodule Sagents.Agent do
     # (50 for AgentExecution). Can also be overridden per-invocation via
     # Agent.execute/3 opts.
     field :max_runs, :integer, virtual: true
+    # Maximum consecutive failed rounds (tool errors or rejected LLM responses)
+    # before the chain stops with "exceeded_failure_count". Uses LLMChain's
+    # default (3) when nil.
+    field :max_retry_count, :integer, virtual: true
+    # Maximum consecutive refusal rounds (tool rounds whose errors are all
+    # refusals: calls turned down before they changed anything). When nil, a
+    # refusal round counts against max_retry_count. See LLMChain's
+    # "Failure Limits" docs.
+    field :max_refusal_count, :integer, virtual: true
     # What each ability set sends (`Sagents.AbilitySets.Index`), computed in
     # new/2 when the stack holds a `Sagents.Middleware.AbilitySetSwitcher`; nil
     # otherwise.
@@ -142,7 +151,9 @@ defmodule Sagents.Agent do
     :fallback_models,
     :before_fallback,
     :mode,
-    :max_runs
+    :max_runs,
+    :max_retry_count,
+    :max_refusal_count
   ]
   @required_fields [:agent_id, :model]
 
@@ -196,6 +207,14 @@ defmodule Sagents.Agent do
   - `:max_runs` - Maximum number of LLM calls per execution (default: 50 for AgentExecution mode).
     Agents with many tools or complex middleware may need higher values. Can also be overridden
     per-invocation via `execute/3` opts: `execute(agent, state, max_runs: 100)`.
+  - `:max_retry_count` - Maximum consecutive failed rounds before execution stops with an
+    `"exceeded_failure_count"` error. A round fails when any of its tool results is an error.
+    A positive integer. (default: LangChain's `LLMChain` default of 3)
+  - `:max_refusal_count` - Maximum consecutive refusal rounds: tool rounds whose errors are all
+    refusals, calls turned down before they changed anything (see
+    `LangChain.Message.ToolResult`). When set, refusal rounds are counted apart from
+    `:max_retry_count`. A positive integer. (default: `nil`, a refusal round counts as a failed
+    round)
 
   ## Options
 
@@ -308,6 +327,8 @@ defmodule Sagents.Agent do
     |> cast(attrs, @create_fields)
     |> put_agent_id_if_missing()
     |> validate_required(@required_fields)
+    |> validate_number(:max_retry_count, greater_than: 0)
+    |> validate_number(:max_refusal_count, greater_than: 0)
     |> build_and_initialize_middleware(opts)
     |> resolve_tool_search()
     |> build_ability_index()
@@ -1249,6 +1270,11 @@ defmodule Sagents.Agent do
         chain_config
       end
 
+    chain_config =
+      chain_config
+      |> maybe_put(:max_retry_count, agent.max_retry_count)
+      |> maybe_put(:max_refusal_count, agent.max_refusal_count)
+
     chain =
       chain_config
       |> LLMChain.new!()
@@ -1260,6 +1286,11 @@ defmodule Sagents.Agent do
   rescue
     error -> {:error, "Failed to build chain: #{inspect(error)}"}
   end
+
+  # Failure limits go on the chain only when set, so an unset one keeps
+  # LLMChain's default.
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp otel_attributes(agent, active) do
     attributes = agent.otel_attributes || %{}
