@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.19.1
+
+Long turns are no longer cut off by the inactivity timeout. An agent that is running a turn is never stopped by it, and approved tool calls to `async: true` tools now run concurrently after a Human-in-the-Loop approval (from `langchain` v0.15.6), so a batch of slow approved calls takes about as long as the slowest one instead of the sum. Tools can report progress, which also counts as activity. An agent that loses a registry name conflict now shuts down cleanly instead of crashing, and under Horde an agent restarted after a node leaves the cluster no longer loses its registered name.
+
+No breaking changes, and no code changes are needed to upgrade. Two behavior changes are worth checking:
+
+- If you relied on `inactivity_timeout` to stop a turn that runs too long, it no longer does. Cancel the agent instead.
+- `touch/1` updates presence `last_activity_at` at most once every 30 seconds. It still resets the inactivity timer on every call.
+
+### Added
+- `AgentServer.report_tool_progress/2` lets a running tool report progress with its own `context`. Subscribers receive `{:agent, {:tool_progress, tool_call_id, payload}}`, and the report counts as agent activity, so a long tool that reports progress keeps its agent alive. https://github.com/sagents-ai/sagents/pull/227
+- `Sagents.Horde.RegistrationKeeper` re-registers a Sagents `:via` name (`:agent_server`, `:agent_supervisor`, `:sub_agents_supervisor`, `:sub_agent`, `:filesystem_server`) that the Horde registry drops while its owner is still running. It acts only for a live owner on its own node when no other process holds the name, and leaves every other key alone. `Sagents.Supervisor` starts it under `:horde`; you do not start it yourself. https://github.com/sagents-ai/sagents/pull/228
+- `[:sagents, :registry, :restored]` telemetry, with `%{count: 1}` and `%{key: key, pid: pid}`, is emitted each time a name is restored, along with a warning log. https://github.com/sagents-ai/sagents/pull/228
+
+### Changed
+- The inactivity timeout never stops an agent whose status is `:running`. It re-arms instead, without updating `last_activity_at`, and the idle countdown starts when the turn ends. A long turn used to be stopped mid-run, losing its results. https://github.com/sagents-ai/sagents/pull/227
+- Events published with `AgentServer.publish_event_from/2` count as activity and reset the inactivity timer, the same as `touch/1`. Debug events and `notify_middleware/3` messages do not. https://github.com/sagents-ai/sagents/pull/227
+- Presence `last_activity_at` updates from activity (`touch/1` and published events) are written at most once every 30 seconds, since each presence write is broadcast across the cluster. Status changes still update presence immediately. https://github.com/sagents-ai/sagents/pull/227
+- An agent's AgentSupervisor is stopped by pid, not looked up by agent id, for inactivity, no-viewers, and name-conflict shutdowns. A lookup by name could find another process once the name had moved. https://github.com/sagents-ai/sagents/pull/227
+- Under `:horde`, `Sagents.Supervisor` starts `Sagents.Horde.RegistrationKeeper` before the registry, and the registry lists it as a listener. A crash of the keeper restarts the registry and everything after it through the existing `:rest_for_one` chain. https://github.com/sagents-ai/sagents/pull/228
+- Requires `langchain` `>= 0.15.6`. On a Human-in-the-Loop resume, approved and edited calls to `async: true` tools run concurrently, the same as calls the model makes directly, and `:on_tool_execution_started` fires for every call before any runs. https://github.com/brainlid/langchain/pull/694
+
+### Fixed
+- Under `:horde`, an agent restarted on a surviving node after another node left could keep running with its `{:agent_supervisor, id}` name gone. Lookups then reported nothing running, and the next request started a second agent for the same conversation. The cause is a race in `Horde.Registry`, which prunes a departed node's names by key and can delete a registration made for the same key since. `Sagents.Horde.RegistrationKeeper` now restores the name. The upstream fix is https://github.com/elixir-horde/horde/pull/302. https://github.com/sagents-ai/sagents/pull/228
+- An AgentServer that loses a Horde name conflict stops itself and its own AgentSupervisor with `{:shutdown, :name_conflict}`. It does not persist state over the winner's, kills a running task instead of waiting on it, and broadcasts `{:agent_shutdown, ...}` so subscribers can find the winner. It used to crash with a `KeyError`. https://github.com/sagents-ai/sagents/pull/227
+- A linked process exit that arrives after a turn has ended no longer crashes the AgentServer with a `KeyError` on `:task`. https://github.com/sagents-ai/sagents/pull/227
+- `docs/tool_context_and_state.md` is included in the published HexDocs extras. https://github.com/sagents-ai/sagents/pull/226
+
 ## v0.19.0
 
 Provider tool search. An agent declares every tool up front, keeps most of them out of the model's context, and lets the model load the ones it needs by searching. The tool list and system prompt stay the same for the life of a conversation, so the prompt cache and earlier reasoning survive a load. Add `Sagents.Middleware.ToolSearch` to the stack and declare a namespace on a middleware with the new `tool_search/1` callback. It works on Anthropic and the OpenAI Responses API (`ChatAnthropic`, `ChatOpenAIResponses`, and `ChatReqLLM` on either), and every other chat model falls back to sending every tool. It is opt-in: an agent without the middleware behaves as before. Tool search is independent of ability sets, and the two compose.
