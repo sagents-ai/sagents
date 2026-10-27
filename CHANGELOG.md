@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.19.2
+
+Agents and sub-agents can now set the failure limits of the chain they run. A new `max_refusal_count` gives refusals their own budget. A refusal is a tool call turned down before it changed anything, such as arguments that fail validation. Strict argument checks, common on Human-in-the-Loop gated calls, can then let the model correct its call without hitting "Exceeded max failure count". Saved state now keeps each tool result's `is_exception` and `is_refusal` flags.
+
+No breaking changes, and no code changes are needed to upgrade. Both limits are opt-in, and an unset one keeps `LLMChain`'s default. Requires `langchain` `>= 0.15.7`, which changes two behaviors:
+
+- When a failed tool call is resent with the same arguments and fails again, its error text now starts with a notice telling the model to change the call.
+- `:until_success` mode fires `:on_retries_exceeded`.
+
+### Added
+- `Agent.new/2` attributes `max_retry_count` and `max_refusal_count`, each a positive integer, forwarded to the agent's `LLMChain` when set. With `max_refusal_count` set, a tool round whose errors are all refusals counts against it instead of `max_retry_count`. https://github.com/sagents-ai/sagents/pull/230
+- `SubAgent.Config` and `SubAgent.new_from_compiled/1` accept the same two limits. A sub-agent uses its own values, or `LLMChain`'s defaults, and never inherits the parent agent's limits. https://github.com/sagents-ai/sagents/pull/230
+
+### Changed
+- Requires `langchain` `>= 0.15.7` for `ToolResult.is_refusal` and `LLMChain`'s `max_refusal_count`. https://github.com/brainlid/langchain/pull/696
+
+### Fixed
+- `StateSerializer` saves and restores each tool result's `is_exception` and `is_refusal`. `is_exception` used to be lost on restore. State saved by earlier versions restores both as `false`. https://github.com/sagents-ai/sagents/pull/230
+
 ## v0.19.1
 
 Long turns are no longer cut off by the inactivity timeout. An agent that is running a turn is never stopped by it, and approved tool calls to `async: true` tools now run concurrently after a Human-in-the-Loop approval (from `langchain` v0.15.6), so a batch of slow approved calls takes about as long as the slowest one instead of the sum. Tools can report progress, which also counts as activity. An agent that loses a registry name conflict now shuts down cleanly instead of crashing, and under Horde an agent restarted after a node leaves the cluster no longer loses its registered name.
