@@ -53,12 +53,10 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   - `:sets` - Map of set name to `Sagents.AbilitySet` (required). A name
     matches `^[a-z][a-z0-9_]{0,63}$`. A set may also be given as a plain map or
     keyword list of the struct's fields, and is validated the same way. A set's
-    `:switch_message` defaults to `"Switched to the <name> mode."` followed by
-    the tools the switch makes available (see "Switch messages").
+    `:switch_message` defaults to a message that names the mode and no tools
+    (see "Switch messages").
   - `:default` - The set active when the state names none. `nil` (the default)
     means rails only.
-  - `:max_switches_per_run` - Switches the model may make within one
-    `Sagents.Agent.execute/3` call (default: `1`).
   - `:state_key` - The `State.metadata` key holding the active set (default:
     `"active_ability_set"`).
   - `:tool_name` - Name of the switching tool (default: `"switch_mode"`).
@@ -76,21 +74,31 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   ## Switch messages
 
   A successful `switch_mode` call returns the target set's `:switch_message`
-  to the model. The default names the mode and lists the tools that became
-  available, the target set's tools that the previous set did not have:
+  to the model. The default names the mode and points the model at its tool
+  definitions:
 
-      Switched to the Billing mode. Tools now available: get_invoice, list_invoices.
+      Switched to the Billing mode. Your tools now match this mode; use the tool definitions you have.
+
+  The default lists no tools. The tool definitions sent with each request are
+  the model's complete inventory, and a model reads a tool list written in a
+  tool result as complete too. Such a list can only name the tools the switch
+  adds, so a tool shared with the previous set, or a rails tool, is missing
+  from it, and the model concludes it has lost that tool.
 
   A callback receives a map and returns the text:
 
   - `:from` - the set switched from (`nil` for rails only)
   - `:to` - the set switched to
   - `:name` - the target set's display name
-  - `:tools` - the names of the tools that became available, sorted
+  - `:tools` - the names of the tools that became available, sorted: the
+    target set's tools that the previous set did not have
+
+  A callback that names the added tools should say they are added, not that
+  they are all the tools available:
 
   ```elixir
   switch_message: fn %{name: name, tools: tools} ->
-    "Switching to focus on #{name}. You can now use #{Enum.join(tools, ", ")}."
+    "Switching to focus on #{name}. This adds #{Enum.join(tools, ", ")} to your tools."
   end
   ```
 
@@ -124,6 +132,30 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   Its return value is ignored. An exception is logged and does not affect the
   run. Keep it quick: the next LLM call waits for it.
 
+  ## Switching from another tool
+
+  Any tool can switch modes, such as one that activates a slash command or a
+  skill whose work belongs to another mode. It returns the state
+  `request_mode_switch/2` gives it as the third element of its result:
+
+  ```elixir
+  function: fn _args, context ->
+    case AbilitySetSwitcher.request_mode_switch(context, "deployments") do
+      {:ok, switch} -> {:ok, "Deploy command activated.", switch}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+  ```
+
+  The switch is requested, not made: it takes effect when the tool batch
+  settles, and gets everything a `switch_mode` call gets. The run continues on
+  a chain built for the new set, the set's entering `before_model/2` hooks run,
+  reasoning from before the switch is dropped, and the switch is announced with
+  `{:agent, {:ability_set_changed, from, to}}`, `:on_switch` and telemetry. It
+  counts as the batch's one switch, so a `switch_mode` call earlier in the same
+  batch wins over it. To return other state changes as well, combine them with
+  `State.merge_states/2`.
+
   ## The active set
 
   The active set is `state.metadata["active_ability_set"]`, so it persists and
@@ -150,12 +182,17 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   ## Sub-agents
 
   A dynamic sub-agent started with `Sagents.Middleware.SubAgent` inherits the
-  parent's middleware for the set active when it starts: the rails plus that
-  set's members. Members of other sets are not inherited, and neither is the
-  switcher. The sub-agent therefore works in the parent's current mode for its
-  whole task, with that mode's prompt fragments and tools as ordinary
-  middleware, and has no `switch_mode` tool. With no set active, it inherits
-  the rails only.
+  parent's middleware for one set: the rails plus that set's members. Members
+  of other sets are not inherited, and neither is the switcher. The sub-agent
+  therefore works in one mode for its whole task, with that mode's prompt
+  fragments and tools as ordinary middleware, and has no `switch_mode` tool.
+
+  By default that is the parent's current set; with no set active, the
+  sub-agent inherits the rails only. The `task` tool's `mode` argument names
+  another set, so the model can delegate work that belongs to another mode
+  without switching itself. Prefer it to `switch_mode` for a self-contained
+  task whose tool traffic the parent does not need to see. See the SubAgent
+  middleware's "Ability sets".
 
   `:block_middleware` on the SubAgent middleware applies as usual, so listing a
   set member there keeps it out of sub-agents even while its set is active.
@@ -177,15 +214,13 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   @default_state_key "active_ability_set"
   @default_tool_name "switch_mode"
 
-  @option_keys [:sets, :default, :max_switches_per_run, :state_key, :tool_name, :on_switch, :id]
+  @option_keys [:sets, :default, :state_key, :tool_name, :on_switch, :id]
 
   @impl true
   def init(opts) do
     with :ok <- validate_option_keys(opts),
          {:ok, sets} <- validate_sets(Keyword.get(opts, :sets)),
          {:ok, default} <- validate_default(Keyword.get(opts, :default), sets),
-         {:ok, max_switches} <-
-           validate_max_switches(Keyword.get(opts, :max_switches_per_run, 1)),
          {:ok, state_key} <-
            validate_string(:state_key, Keyword.get(opts, :state_key, @default_state_key)),
          {:ok, tool_name} <-
@@ -194,7 +229,6 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
       config = %{
         sets: sets,
         default: default,
-        max_switches_per_run: max_switches,
         state_key: state_key,
         tool_name: tool_name,
         on_switch: on_switch
@@ -246,8 +280,9 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
     #{current}
 
     Call #{config.tool_name} only when the request needs tools the current mode lacks. \
-    Do not switch to look around. After switching, the new mode's tools are available \
-    on your next step.\
+    Do not switch to look around. Call #{config.tool_name} by itself, with no other tool \
+    calls in the same step: your tools change when it returns, so choose the next tools \
+    after you see its result.\
     """
   end
 
@@ -259,6 +294,28 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   def inactive_tool_hint(config, tool_name, set) do
     "#{tool_name} is in the #{display_name(config, set)} mode. " <>
       "Call #{config.tool_name} with \"#{set}\" first, then retry."
+  end
+
+  @doc """
+  The tool result text for a call to `tool_name`, a tool in the set `set`
+  that a switch earlier in the same batch is bringing in.
+  """
+  @spec switching_tool_hint(map(), String.t(), String.t()) :: String.t()
+  def switching_tool_hint(config, tool_name, set) do
+    name = display_name(config, set)
+    "#{tool_name} is in the #{name} mode. The switch to #{name} applies; retry on your next step."
+  end
+
+  @doc """
+  The tool result text for a `switch_mode` call that follows the switch to
+  `set` in the same batch.
+  """
+  @spec extra_switch_message(map(), String.t()) :: String.t()
+  def extra_switch_message(config, set) do
+    name = display_name(config, set)
+
+    "Only one mode switch per step. The switch to #{name} applies; " <>
+      "its tools arrive on your next step."
   end
 
   @doc """
@@ -274,6 +331,28 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   def set_name(name) when is_atom(name) and not is_nil(name), do: Atom.to_string(name)
   def set_name(name) when is_binary(name), do: name
 
+  @doc """
+  The state a tool returns to switch the agent to `set`, from the tool's
+  `context`.
+
+  Returns `{:ok, state}` for a declared set, to return as the third element of
+  the tool's `{:ok, result, state}`. Returns `{:error, reason}` for a set the
+  switcher does not declare, and for a context from an agent without a
+  switcher. See "Switching from another tool".
+  """
+  @spec request_mode_switch(map(), String.t() | atom()) :: {:ok, State.t()} | {:error, String.t()}
+  def request_mode_switch(%{ability_sets: %{config: config}}, set)
+      when is_binary(set) or (is_atom(set) and not is_nil(set)) do
+    name = set_name(set)
+
+    if Map.has_key?(config.sets, name),
+      do: {:ok, mode_state(config, name)},
+      else: {:error, unknown_mode_message(config, name)}
+  end
+
+  def request_mode_switch(_context, _set),
+    do: {:error, "No ability set switcher: this agent has no modes to switch between."}
+
   # ── switch_mode ────────────────────────────────────────────────
 
   defp switch_tool(config) do
@@ -281,8 +360,8 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
       name: config.tool_name,
       description:
         "Switch to another mode to get the tools for a different kind of task. " <>
-          "Call it alone, not together with other tools: the new mode's tools are only " <>
-          "available on your next step.",
+          "Call it by itself, with no other tool calls. Your tools change when it returns; " <>
+          "choose the next tools then. Only one switch per step takes effect.",
       display_text: "Switching mode",
       parameters_schema: %{
         type: "object",
@@ -300,19 +379,14 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   end
 
   defp switch(config, %{"mode" => mode}, context) when is_binary(mode) do
-    {current, switches} = run_position(config, context)
+    current = chain_active_set(config, context)
 
     cond do
       not Map.has_key?(config.sets, mode) ->
-        {:error,
-         "Unknown mode #{inspect(mode)}. Available modes: #{Enum.join(set_names(config), ", ")}."}
+        {:error, unknown_mode_message(config, mode)}
 
       mode == current ->
         {:error, "Already in the #{display_name(config, mode)} mode."}
-
-      switches >= config.max_switches_per_run ->
-        {:error,
-         "Mode already switched in this turn. Continue with the current tools or answer the user."}
 
       true ->
         info = %{
@@ -322,7 +396,7 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
           tools: tools_added(context, current, mode)
         }
 
-        {:ok, switch_message(config, info), State.delta(%{metadata: %{config.state_key => mode}})}
+        {:ok, switch_message(config, info), mode_state(config, mode)}
     end
   end
 
@@ -330,15 +404,21 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
     {:error, "Missing mode. Available modes: #{Enum.join(set_names(config), ", ")}."}
   end
 
-  # The chain records the set it was built for and the switches made so far in
-  # this `execute`. Outside an agent chain the state is all there is.
-  defp run_position(_config, %{ability_sets: %{active: active, switches: switches}}),
-    do: {active, switches}
+  # The state naming `mode` as the active set. Only the state key changes;
+  # todos and messages are left alone when it is merged.
+  defp mode_state(config, mode), do: State.delta(%{metadata: %{config.state_key => mode}})
 
-  defp run_position(config, %{state: %State{metadata: metadata}}),
-    do: {Sagents.AbilitySets.resolve(config, metadata), 0}
+  defp unknown_mode_message(config, mode),
+    do: "Unknown mode #{inspect(mode)}. Available modes: #{Enum.join(set_names(config), ", ")}."
 
-  defp run_position(config, _context), do: {config.default, 0}
+  # The chain records the set it was built for. Outside an agent chain the
+  # state is all there is.
+  defp chain_active_set(_config, %{ability_sets: %{active: active}}), do: active
+
+  defp chain_active_set(config, %{state: %State{metadata: metadata}}),
+    do: Sagents.AbilitySets.resolve(config, metadata)
+
+  defp chain_active_set(config, _context), do: config.default
 
   defp display_name(config, set), do: config.sets[set].name
 
@@ -379,10 +459,9 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
     end
   end
 
-  defp default_switch_message(%{name: name, tools: []}), do: "Switched to the #{name} mode."
-
-  defp default_switch_message(%{name: name, tools: tools}),
-    do: "Switched to the #{name} mode. Tools now available: #{Enum.join(tools, ", ")}."
+  defp default_switch_message(%{name: name}),
+    do:
+      "Switched to the #{name} mode. Your tools now match this mode; use the tool definitions you have."
 
   @doc false
   # Call a `:switch_message` or `:on_switch` callback with `info`. An exception,
@@ -478,11 +557,6 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   end
 
   defp validate_default(other, _sets), do: {:error, "invalid :default #{inspect(other)}"}
-
-  defp validate_max_switches(n) when is_integer(n) and n >= 0, do: {:ok, n}
-
-  defp validate_max_switches(other),
-    do: {:error, ":max_switches_per_run must be a non-negative integer, got: #{inspect(other)}"}
 
   defp validate_string(key, value) do
     if non_empty_string?(value),

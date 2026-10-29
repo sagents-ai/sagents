@@ -42,7 +42,9 @@ defmodule Sagents.SubAgentServerBroadcastTest do
       instructions: instructions,
       agent_config: agent,
       parent_state: parent_state,
-      suppress_debug_events: Keyword.get(opts, :suppress_debug_events, false)
+      suppress_debug_events: Keyword.get(opts, :suppress_debug_events, false),
+      ability_set: Keyword.get(opts, :ability_set),
+      ability_set_source: Keyword.get(opts, :ability_set_source)
     )
   end
 
@@ -102,6 +104,33 @@ defmodule Sagents.SubAgentServerBroadcastTest do
       assert user_message != nil
       # Content is a list of ContentPart structs
       assert instructions == ContentPart.parts_to_string(user_message.content)
+    end
+  end
+
+  describe "subagent_started event with an ability set" do
+    test "carries the set and how it was chosen", context do
+      parent_agent = start_parent_agent(context)
+
+      subagent =
+        create_subagent(parent_agent.agent_id,
+          ability_set: "devices",
+          ability_set_source: :requested
+        )
+
+      {:ok, _pid} = SubAgentServer.start_link(subagent: subagent)
+
+      assert_receive {:agent, {:debug, {:subagent, _, {:subagent_started, data}}}}, 100
+      assert data.ability_set == "devices"
+      assert data.ability_set_source == :requested
+    end
+
+    test "carries nil for a sub-agent without one", context do
+      parent_agent = start_parent_agent(context)
+      {:ok, _pid} = SubAgentServer.start_link(subagent: create_subagent(parent_agent.agent_id))
+
+      assert_receive {:agent, {:debug, {:subagent, _, {:subagent_started, data}}}}, 100
+      assert data.ability_set == nil
+      assert data.ability_set_source == nil
     end
   end
 

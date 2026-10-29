@@ -171,6 +171,14 @@ defmodule Sagents.SubAgent do
     # only the debug fan-out is silenced. Defaults to false.
     field :suppress_debug_events, :boolean, default: false, virtual: true
 
+    # The parent's ability set this sub-agent works in, for a general-purpose
+    # sub-agent of a parent with a switcher: the set its `task` call named
+    # (`:requested`) or the parent's current set (`:inherited`). `nil` set with
+    # a source means rails only. Both are nil for a sub-agent that does not take
+    # its middleware from a parent's ability set.
+    field :ability_set, :string, virtual: true
+    field :ability_set_source, :any, virtual: true
+
     # Metadata
     field :id, :string
     field :parent_agent_id, :string
@@ -187,6 +195,8 @@ defmodule Sagents.SubAgent do
           require_tool_success: boolean(),
           max_runs: integer() | nil,
           suppress_debug_events: boolean(),
+          ability_set: String.t() | nil,
+          ability_set_source: :requested | :inherited | nil,
           id: String.t() | nil,
           parent_agent_id: String.t() | nil,
           created_at: DateTime.t() | nil
@@ -231,6 +241,14 @@ defmodule Sagents.SubAgent do
     sub-agent whose inner messages must not leave the sub-agent. The parent
     still receives the run's outcome through the normal return value; only the
     debug fan-out is silenced. Defaults to `false`.
+  - `:ability_set` - The parent's ability set the sub-agent's middleware comes
+    from, or `nil` for rails only (optional). Recorded for observability: it
+    reaches the `{:subagent_started, metadata}` debug event and the sub-agent's
+    spans as `"sagents.ability_set"`. Defaults to `nil`.
+  - `:ability_set_source` - `:requested` when the `task` call named the set,
+    `:inherited` when it is the parent's current set, `nil` when the sub-agent
+    does not take its middleware from an ability set (optional). Defaults to
+    `nil`.
 
   ## Examples
 
@@ -352,6 +370,8 @@ defmodule Sagents.SubAgent do
     parent_trace = Keyword.get(opts, :parent_trace, %{})
     suppress_debug_events = Keyword.get(opts, :suppress_debug_events, false)
     user_request_seq = Keyword.get(opts, :user_request_seq, 0)
+    ability_set = Keyword.get(opts, :ability_set)
+    ability_set_source = Keyword.get(opts, :ability_set_source)
 
     sub_agent_id = "#{parent_agent_id}-sub-#{:erlang.unique_integer([:positive])}"
 
@@ -394,7 +414,9 @@ defmodule Sagents.SubAgent do
         agent_name: agent.name,
         conversation_id: Map.get(parent_trace, :conversation_id),
         otel_attributes:
-          subagent_otel_attributes(agent, parent_trace, sub_agent_id, parent_agent_id)
+          agent
+          |> subagent_otel_attributes(parent_trace, sub_agent_id, parent_agent_id)
+          |> put_ability_set_attribute(ability_set, ability_set_source)
       })
 
     chain_config = %{llm: agent.model, custom_context: custom_context}
@@ -423,6 +445,8 @@ defmodule Sagents.SubAgent do
       require_tool_success: require_tool_success,
       max_runs: max_runs,
       suppress_debug_events: suppress_debug_events,
+      ability_set: ability_set,
+      ability_set_source: ability_set_source,
       status: :idle,
       created_at: DateTime.utc_now()
     }
@@ -453,6 +477,18 @@ defmodule Sagents.SubAgent do
       "sagents.parent_agent_id" => parent_agent_id
     })
   end
+
+  # The parent's spans carry its own active set as `"sagents.ability_set"`. A
+  # sub-agent working in an ability set reports that set instead, and one with
+  # rails only reports none. A sub-agent not built from the parent's sets keeps
+  # what it inherited.
+  defp put_ability_set_attribute(attributes, _set, nil), do: attributes
+
+  defp put_ability_set_attribute(attributes, nil, _source),
+    do: Map.delete(attributes, "sagents.ability_set")
+
+  defp put_ability_set_attribute(attributes, set, _source),
+    do: Map.put(attributes, "sagents.ability_set", set)
 
   ## Execution Functions
 
