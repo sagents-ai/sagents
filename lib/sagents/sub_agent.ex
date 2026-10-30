@@ -107,6 +107,7 @@ defmodule Sagents.SubAgent do
   alias __MODULE__
   alias Sagents.AgentUtils
   alias Sagents.Middleware.HumanInTheLoop
+  alias Sagents.Middleware.ProcessContext
   alias Sagents.State
   alias LangChain.Chains.LLMChain
   alias LangChain.Message
@@ -530,6 +531,7 @@ defmodule Sagents.SubAgent do
   def execute(subagent, opts \\ [])
 
   def execute(%SubAgent{status: :idle, chain: chain} = subagent, opts) do
+    apply_process_context(chain)
     callbacks = AgentUtils.resolve_callbacks(subagent_middleware(chain), opts)
     Logger.debug("SubAgent #{subagent.id} executing")
 
@@ -664,6 +666,7 @@ defmodule Sagents.SubAgent do
         decisions,
         opts
       ) do
+    apply_process_context(chain)
     callbacks = AgentUtils.resolve_callbacks(subagent_middleware(chain), opts)
     Logger.debug("SubAgent #{subagent.id} resuming with #{length(decisions)} decisions")
 
@@ -978,6 +981,22 @@ defmodule Sagents.SubAgent do
   # Extract the inherited parent middleware from the sub-agent's chain. This is
   # the source `AgentUtils.resolve_callbacks/2` collects this sub-agent's
   # middleware callbacks from (the same source `SubAgentServer` used to read).
+  # The chain runs in the calling process, which crosses none of the
+  # boundaries `ProcessContext` hooks: no `on_server_start/2` or
+  # `before_model/2` runs for a sub-agent. Code that runs there before any
+  # tool's own `:on_tool_pre_execution`, such as an `:on_tool_call_review`
+  # handler, would otherwise see an empty process context. The snapshot comes
+  # from the sub-agent's state, which holds the parent's latest one. A
+  # sub-agent without `ProcessContext` in its stack (blocked, or a
+  # pre-configured sub-agent that did not list it) is left alone.
+  defp apply_process_context(chain) do
+    if Enum.any?(subagent_middleware(chain), &match?(%{module: ProcessContext}, &1)) do
+      ProcessContext.apply_from_state(Map.get(chain.custom_context || %{}, :state))
+    end
+
+    :ok
+  end
+
   defp subagent_middleware(chain) do
     case chain do
       %{custom_context: %{parent_middleware: mw}} when is_list(mw) -> mw

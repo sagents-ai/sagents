@@ -18,6 +18,18 @@ defmodule Sagents.Middleware.ProcessContext do
   This middleware captures that state in the caller's process at `init/1` time
   and re-applies it on the receiving side of each boundary.
 
+  ## Sub-agents
+
+  A sub-agent's chain runs in its `Sagents.SubAgentServer` process, where none
+  of the hooks above run. When the sub-agent's stack includes this middleware
+  (a general-purpose sub-agent inherits it unless `:block_middleware` lists
+  it), `Sagents.SubAgent` applies the snapshot from the sub-agent's state in
+  that process before each execute and resume. The sub-agent's state holds the
+  parent's snapshot, including any `update/1` refresh, so its
+  `:on_tool_call_review` handlers and synchronous tools see the parent's
+  context. `apply_from_state/1` does the same for any other process that runs
+  a chain outside these boundaries.
+
   ## Configuration
 
   Two options, both optional, can be combined freely:
@@ -202,6 +214,17 @@ defmodule Sagents.Middleware.ProcessContext do
       AgentServer.notify_middleware(agent_id, ProcessContext, {:update_context, snapshot})
     end
   end
+
+  @doc """
+  Re-apply the snapshot carried in `state.runtime` to the calling process.
+
+  For a process that runs an agent's chain without crossing one of the
+  boundaries this middleware hooks. `Sagents.SubAgent` calls it in the process
+  running a sub-agent's chain, whose state carries the parent's snapshot. A
+  `nil` state, or one with no snapshot, is a no-op.
+  """
+  @spec apply_from_state(Sagents.State.t() | nil) :: :ok
+  def apply_from_state(state), do: apply_snapshot(state)
 
   defp find_own_config(agent) do
     case Enum.find(agent.middleware || [], &(&1.module == ProcessContext)) do
