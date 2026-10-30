@@ -39,6 +39,11 @@ defmodule Sagents.Middleware.SubAgent do
       the chance of the model picking the wrong task. The `task` tool's
       `task_name` enum still constrains valid values regardless.
 
+    * `:general_purpose_modes` - Whether the `task` tool offers a `mode`
+      argument for the general-purpose sub-agent when the parent has a
+      `Sagents.Middleware.AbilitySetSwitcher`. Defaults to `true`. See
+      "Ability sets" below.
+
   ## Configuration Example
 
       middleware = [
@@ -80,11 +85,12 @@ defmodule Sagents.Middleware.SubAgent do
   3. **Blocked middleware is excluded** - Any modules listed in `:block_middleware`
      are filtered out before passing to the subagent.
 
-  4. **Only the active ability set is inherited** - When the parent uses
+  4. **One ability set is inherited** - When the parent uses
      `Sagents.Middleware.AbilitySetSwitcher`, the subagent inherits the rails
-     plus the members of the set active when it starts, as ordinary middleware.
-     The switcher and the members of other sets are left out, so the subagent
-     works in the parent's current mode and cannot switch.
+     plus the members of one set, as ordinary middleware: the set active when
+     it starts, or the set named by `mode`. The switcher and the members of
+     other sets are left out, so the subagent works in that mode for its whole
+     task and cannot switch. See "Ability sets" below.
 
   Exclusions apply to *inheritance* only. A pre-configured subagent that names
   one of these in its own `:middleware` list still receives it.
@@ -120,6 +126,32 @@ defmodule Sagents.Middleware.SubAgent do
         ],
         block_middleware: [ConversationTitle]  # Only affects general-purpose
       ]}
+
+  ## Ability sets
+
+  When the parent has a `Sagents.Middleware.AbilitySetSwitcher`, the `task`
+  tool takes an optional `mode` for the general-purpose sub-agent, an enum of
+  every set the switcher declares. The sub-agent starts with that set's tools,
+  prompt fragments and model hooks instead of the parent's current set's, and
+  its final message comes back as the `task` result. The parent stays in its
+  own set.
+
+  It suits a self-contained piece of work that belongs to another mode: a
+  parent in a packages mode that has built a package hands the deployment to
+  a sub-agent in the deployments mode, instead of switching there and back
+  with a rebuild and a prompt cache miss each way. The deployment's tool
+  traffic stays in the sub-agent.
+
+      task(task_name: "general-purpose", mode: "deployments",
+           instructions: "Deploy package acme-1.2 to the staging group, then report the result.")
+
+  Tools the parent gates with `interrupt_on` stay gated: the sub-agent
+  inherits the parent's `HumanInTheLoop` with the rails, and a gated call in it
+  interrupts the parent for approval.
+
+  `mode` is an error for a pre-configured task, and for a set the switcher does
+  not declare. Set `general_purpose_modes: false` to leave it out of the
+  schema.
 
   ## Suppressing Debug Events
 
@@ -259,6 +291,11 @@ defmodule Sagents.Middleware.SubAgent do
     block_middleware = Keyword.get(opts, :block_middleware, [])
     include_task_list = Keyword.get(opts, :include_task_list, true)
 
+    modes =
+      if Keyword.get(opts, :general_purpose_modes, true),
+        do: Keyword.get(opts, :ability_set_modes, []),
+        else: []
+
     # Validate block_middleware entries (warn about potential issues)
     validate_block_middleware(block_middleware, middleware)
 
@@ -322,9 +359,7 @@ defmodule Sagents.Middleware.SubAgent do
           Map.put(
             descriptions,
             "general-purpose",
-            "General-purpose subagent for complex, multi-step tasks. " <>
-              "Inherits all tools and middleware from parent agent. " <>
-              "Use when you need to delegate independent work that can run in isolation."
+            general_purpose_description(modes)
           )
 
         config = %{
@@ -337,7 +372,8 @@ defmodule Sagents.Middleware.SubAgent do
           suppress_debug_targets: suppress_debug_targets,
           display_texts_map: display_texts_map,
           use_instructions_map: use_instructions_map,
-          include_task_list: include_task_list
+          include_task_list: include_task_list,
+          modes: modes
         }
 
         {:ok, config}
@@ -536,6 +572,19 @@ defmodule Sagents.Middleware.SubAgent do
 
   ## Private Functions - Tool Building
 
+  defp general_purpose_description([]) do
+    "General-purpose subagent for complex, multi-step tasks. " <>
+      "Inherits all tools and middleware from parent agent. " <>
+      "Use when you need to delegate independent work that can run in isolation."
+  end
+
+  defp general_purpose_description(_modes) do
+    "General-purpose subagent for complex, multi-step tasks. " <>
+      "Starts with your current mode's tools, or with another mode's tools when you pass `mode`, " <>
+      "and cannot switch modes. Use it to delegate independent work that can run in isolation, " <>
+      "including work that belongs to another mode, without switching yourself."
+  end
+
   defp build_task_tool(config) do
     # Get list of available subagent names from the lookup map
     task_names = config.agent_map |> Map.keys()
@@ -547,25 +596,27 @@ defmodule Sagents.Middleware.SubAgent do
       parameters_schema: %{
         type: "object",
         required: ["instructions", "task_name"],
-        properties: %{
-          "instructions" => %{
-            type: "string",
-            description:
-              "Detailed instructions for what the SubAgent should accomplish. Be specific about the task, expected output, and any context needed."
-          },
-          "task_name" => %{
-            type: "string",
-            enum: task_names,
-            description: "Which specialized task to perform"
-          },
-          "system_prompt" => %{
-            type: "string",
-            description:
-              "Optional custom system prompt to define how the SubAgent should behave. " <>
-                "Only applicable for 'general-purpose' type. Defines role, capabilities, and constraints. " <>
-                "If omitted, a default general-purpose prompt will be used."
+        properties:
+          %{
+            "instructions" => %{
+              type: "string",
+              description:
+                "Detailed instructions for what the SubAgent should accomplish. Be specific about the task, expected output, and any context needed."
+            },
+            "task_name" => %{
+              type: "string",
+              enum: task_names,
+              description: "Which specialized task to perform"
+            },
+            "system_prompt" => %{
+              type: "string",
+              description:
+                "Optional custom system prompt to define how the SubAgent should behave. " <>
+                  "Only applicable for 'general-purpose' type. Defines role, capabilities, and constraints. " <>
+                  "If omitted, a default general-purpose prompt will be used."
+            }
           }
-        }
+          |> put_mode_property(config)
       },
       function: fn args, context ->
         execute_task(args, context, config)
@@ -574,6 +625,22 @@ defmodule Sagents.Middleware.SubAgent do
       async: true
     })
   end
+
+  # A general-purpose sub-agent can start in any mode the parent's switcher
+  # declares. Without modes the schema is unchanged.
+  defp put_mode_property(properties, %{modes: modes, agent_map: agent_map})
+       when modes != [] and is_map_key(agent_map, "general-purpose") do
+    Map.put(properties, "mode", %{
+      type: "string",
+      enum: modes,
+      description:
+        "Only for 'general-purpose'. Start the SubAgent in this mode, with that mode's tools, " <>
+          "instead of your current mode. Use it to hand off work that belongs to another mode " <>
+          "without switching yourself."
+    })
+  end
+
+  defp put_mode_property(properties, _config), do: properties
 
   defp build_get_task_instructions_tool(config) do
     use_instructions_map = Map.get(config, :use_instructions_map, %{})
@@ -659,6 +726,9 @@ defmodule Sagents.Middleware.SubAgent do
     - `"task_name"` (required) - Same as task_name parameter
     - `"system_prompt"` (optional) - Custom system prompt for general-purpose
       SubAgents
+    - `"mode"` (optional) - For general-purpose SubAgents of a parent with an
+      ability set switcher: the set the SubAgent starts in instead of the
+      parent's current one
 
   - `context` - Tool execution context map containing:
     - `:agent_id` - Parent agent ID
@@ -762,110 +832,142 @@ defmodule Sagents.Middleware.SubAgent do
         start_dynamic_subagent(instructions, args, context, config, per_call_initial)
 
       {:ok, agent_config} ->
-        # Look up the collapsed until-tool target for this subagent type:
-        # {tool_name, require_success}, or {nil, false} when not configured.
-        until_tool_targets = Map.get(config, :until_tool_targets, %{})
-        {until_tool, require_tool_success} = Map.get(until_tool_targets, task_name, {nil, false})
-
-        # Does this subagent type publish its events on the parent's :debug
-        # channel? Threaded here rather than read inside SubAgentServer because
-        # the server receives only the built struct — the same reason
-        # :until_tool is threaded through this call.
-        suppress_debug_events =
-          config
-          |> Map.get(:suppress_debug_targets, MapSet.new())
-          |> MapSet.member?(task_name)
-
-        # Extract parent's tool_context, metadata, runtime, and scope so
-        # SubAgent tools see the same context as parent tools. Agent.build_chain
-        # stores the original tool_context map as an explicit :tool_context key
-        # in custom_context, and scope under the canonical :scope key. Metadata
-        # and runtime are nested in state and copied into the SubAgent's fresh
-        # State.
-        {parent_tool_context, parent_metadata, parent_runtime, parent_scope, parent_trace} =
-          extract_parent_context(context)
-
-        # Create SubAgent struct from pre-configured agent
-        # Check if it's a Compiled struct (with initial_messages) or just an Agent
-        subagent =
-          case agent_config do
-            %SubAgent.Compiled{} = compiled ->
-              final_initial = (compiled.initial_messages || []) ++ per_call_initial
-
-              SubAgent.new_from_compiled(
-                parent_agent_id: config.agent_id,
-                instructions: instructions,
-                compiled_agent: compiled.agent,
-                initial_messages: final_initial,
-                until_tool: until_tool,
-                require_tool_success: require_tool_success,
-                suppress_debug_events: suppress_debug_events,
-                parent_tool_context: parent_tool_context,
-                parent_metadata: parent_metadata,
-                parent_runtime: parent_runtime,
-                scope: parent_scope,
-                parent_trace: parent_trace,
-                user_request_seq: Map.get(context, :user_request_seq, 0)
-              )
-
-            agent ->
-              # Regular Agent struct from Config
-              SubAgent.new_from_config(
-                parent_agent_id: config.agent_id,
-                instructions: instructions,
-                agent_config: agent,
-                initial_messages: per_call_initial,
-                until_tool: until_tool,
-                require_tool_success: require_tool_success,
-                suppress_debug_events: suppress_debug_events,
-                parent_tool_context: parent_tool_context,
-                parent_metadata: parent_metadata,
-                parent_runtime: parent_runtime,
-                scope: parent_scope,
-                parent_trace: parent_trace,
-                user_request_seq: Map.get(context, :user_request_seq, 0)
-              )
-          end
-
-        # Get supervisor for this parent agent
-        # Uses existing Sagents.Registry for process lookup
-        supervisor_name = SubAgentsDynamicSupervisor.get_name(config.agent_id)
-
-        # Spawn SubAgentServer under supervision
-        # SubAgentServer will register itself in Sagents.Registry
-        tool_call_id = Map.get(context, :tool_call_id)
-
-        child_spec = %{
-          id: subagent.id,
-          start:
-            {SubAgentServer, :start_link, [[subagent: subagent, tool_call_id: tool_call_id]]},
-          # Don't restart on crash
-          restart: :temporary
-        }
-
-        try do
-          case DynamicSupervisor.start_child(supervisor_name, child_spec) do
-            {:ok, _pid} ->
-              # Execute SubAgent synchronously (blocks until complete or interrupt)
-              execute_subagent(subagent.id, task_name)
-
-            # A duplicate subagent.id should be impossible by construction
-            # (fresh UUID per spawn). Surface it as a distinct error so the
-            # bug is loud instead of masquerading as a generic startup
-            # failure or silently reusing an unrelated SubAgentServer.
-            {:error, {:already_started, _pid}} ->
-              {:error, "Duplicate SubAgent id #{inspect(subagent.id)} — refusing to start"}
-
-            {:error, reason} ->
-              {:error, "Failed to start task: #{inspect(reason)}"}
-          end
-        catch
-          :exit, reason ->
-            {:error, "Failed to start task: #{inspect(reason)}"}
-        end
+        start_pre_configured_subagent(
+          instructions,
+          task_name,
+          agent_config,
+          args,
+          context,
+          config,
+          per_call_initial
+        )
 
       :error ->
         {:error, "Unknown task name: #{task_name}"}
+    end
+  end
+
+  # A pre-configured subagent brings its own middleware, so a `mode` naming an
+  # ability set does not apply to it.
+  defp start_pre_configured_subagent(
+         _instructions,
+         _task_name,
+         _agent_config,
+         %{"mode" => _mode},
+         _context,
+         _config,
+         _per_call_initial
+       ),
+       do: {:error, "mode applies only to the general-purpose task"}
+
+  defp start_pre_configured_subagent(
+         instructions,
+         task_name,
+         agent_config,
+         _args,
+         context,
+         config,
+         per_call_initial
+       ) do
+    # Look up the collapsed until-tool target for this subagent type:
+    # {tool_name, require_success}, or {nil, false} when not configured.
+    until_tool_targets = Map.get(config, :until_tool_targets, %{})
+    {until_tool, require_tool_success} = Map.get(until_tool_targets, task_name, {nil, false})
+
+    # Does this subagent type publish its events on the parent's :debug
+    # channel? Threaded here rather than read inside SubAgentServer because
+    # the server receives only the built struct — the same reason
+    # :until_tool is threaded through this call.
+    suppress_debug_events =
+      config
+      |> Map.get(:suppress_debug_targets, MapSet.new())
+      |> MapSet.member?(task_name)
+
+    # Extract parent's tool_context, metadata, runtime, and scope so
+    # SubAgent tools see the same context as parent tools. Agent.build_chain
+    # stores the original tool_context map as an explicit :tool_context key
+    # in custom_context, and scope under the canonical :scope key. Metadata
+    # and runtime are nested in state and copied into the SubAgent's fresh
+    # State.
+    {parent_tool_context, parent_metadata, parent_runtime, parent_scope, parent_trace} =
+      extract_parent_context(context)
+
+    # Create SubAgent struct from pre-configured agent
+    # Check if it's a Compiled struct (with initial_messages) or just an Agent
+    subagent =
+      case agent_config do
+        %SubAgent.Compiled{} = compiled ->
+          final_initial = (compiled.initial_messages || []) ++ per_call_initial
+
+          SubAgent.new_from_compiled(
+            parent_agent_id: config.agent_id,
+            instructions: instructions,
+            compiled_agent: compiled.agent,
+            initial_messages: final_initial,
+            until_tool: until_tool,
+            require_tool_success: require_tool_success,
+            suppress_debug_events: suppress_debug_events,
+            parent_tool_context: parent_tool_context,
+            parent_metadata: parent_metadata,
+            parent_runtime: parent_runtime,
+            scope: parent_scope,
+            parent_trace: parent_trace,
+            user_request_seq: Map.get(context, :user_request_seq, 0)
+          )
+
+        agent ->
+          # Regular Agent struct from Config
+          SubAgent.new_from_config(
+            parent_agent_id: config.agent_id,
+            instructions: instructions,
+            agent_config: agent,
+            initial_messages: per_call_initial,
+            until_tool: until_tool,
+            require_tool_success: require_tool_success,
+            suppress_debug_events: suppress_debug_events,
+            parent_tool_context: parent_tool_context,
+            parent_metadata: parent_metadata,
+            parent_runtime: parent_runtime,
+            scope: parent_scope,
+            parent_trace: parent_trace,
+            user_request_seq: Map.get(context, :user_request_seq, 0)
+          )
+      end
+
+    # Get supervisor for this parent agent
+    # Uses existing Sagents.Registry for process lookup
+    supervisor_name = SubAgentsDynamicSupervisor.get_name(config.agent_id)
+
+    # Spawn SubAgentServer under supervision
+    # SubAgentServer will register itself in Sagents.Registry
+    tool_call_id = Map.get(context, :tool_call_id)
+
+    child_spec = %{
+      id: subagent.id,
+      start: {SubAgentServer, :start_link, [[subagent: subagent, tool_call_id: tool_call_id]]},
+      # Don't restart on crash
+      restart: :temporary
+    }
+
+    try do
+      case DynamicSupervisor.start_child(supervisor_name, child_spec) do
+        {:ok, _pid} ->
+          # Execute SubAgent synchronously (blocks until complete or interrupt)
+          execute_subagent(subagent.id, task_name)
+
+        # A duplicate subagent.id should be impossible by construction
+        # (fresh UUID per spawn). Surface it as a distinct error so the
+        # bug is loud instead of masquerading as a generic startup
+        # failure or silently reusing an unrelated SubAgentServer.
+        {:error, {:already_started, _pid}} ->
+          {:error, "Duplicate SubAgent id #{inspect(subagent.id)} — refusing to start"}
+
+        {:error, reason} ->
+          {:error, "Failed to start task: #{inspect(reason)}"}
+      end
+    catch
+      :exit, reason ->
+        {:error, "Failed to start task: #{inspect(reason)}"}
     end
   end
 
@@ -879,94 +981,122 @@ defmodule Sagents.Middleware.SubAgent do
   defp start_dynamic_subagent(instructions, args, context, config, per_call_initial) do
     Logger.debug("Starting dynamic general-purpose SubAgent")
 
-    # Extract parent capabilities from context (set by Agent.build_chain)
-    parent_middleware = Map.get(context, :parent_middleware, [])
-
     # Get optional custom system prompt, or use default
     system_prompt = Map.get(args, "system_prompt", default_general_purpose_prompt())
 
-    # Validate system prompt
-    case validate_system_prompt(system_prompt) do
-      :ok ->
-        # Filter middleware using block list from config
-        filtered_middleware =
-          SubAgent.subagent_middleware_stack(
-            parent_middleware,
-            [],
-            block_middleware: Map.get(config, :block_middleware, [])
-          )
+    with {:ok, parent_middleware, ability_set, ability_set_source} <-
+           inherited_middleware(args, context),
+         :ok <- validate_system_prompt(system_prompt) do
+      # Filter middleware using block list from config
+      filtered_middleware =
+        SubAgent.subagent_middleware_stack(
+          parent_middleware,
+          [],
+          block_middleware: Map.get(config, :block_middleware, [])
+        )
 
-        # Convert MiddlewareEntry structs back to raw middleware specs
-        # parent_middleware contains initialized MiddlewareEntry structs, but Agent.new!
-        # expects raw middleware specs (module or {module, opts} tuples)
-        raw_middleware_specs = Sagents.MiddlewareEntry.to_raw_specs(filtered_middleware)
+      # Convert MiddlewareEntry structs back to raw middleware specs
+      # parent_middleware contains initialized MiddlewareEntry structs, but Agent.new!
+      # expects raw middleware specs (module or {module, opts} tuples)
+      raw_middleware_specs = Sagents.MiddlewareEntry.to_raw_specs(filtered_middleware)
 
-        # Build Agent struct with inherited middleware capabilities
-        # Do NOT pass parent_tools - let filtered_middleware provide tools naturally
-        # This ensures SubAgent "task" tool is not inherited after filtering out SubAgent middleware
-        agent_config =
-          Sagents.Agent.new!(
-            %{
-              model: config.model,
-              base_system_prompt: system_prompt,
-              middleware: raw_middleware_specs
-            },
-            replace_default_middleware: true,
-            interrupt_on: nil
-          )
+      # Build Agent struct with inherited middleware capabilities
+      # Do NOT pass parent_tools - let filtered_middleware provide tools naturally
+      # This ensures SubAgent "task" tool is not inherited after filtering out SubAgent middleware
+      agent_config =
+        Sagents.Agent.new!(
+          %{
+            model: config.model,
+            base_system_prompt: system_prompt,
+            middleware: raw_middleware_specs
+          },
+          replace_default_middleware: true,
+          interrupt_on: nil
+        )
 
-        # Extract parent's tool_context, metadata, runtime, and scope for SubAgent
-        # inheritance.
-        {parent_tool_context, parent_metadata, parent_runtime, parent_scope, parent_trace} =
-          extract_parent_context(context)
+      # Extract parent's tool_context, metadata, runtime, and scope for SubAgent
+      # inheritance.
+      {parent_tool_context, parent_metadata, parent_runtime, parent_scope, parent_trace} =
+        extract_parent_context(context)
 
-        # Create SubAgent struct with parent context
-        subagent =
-          SubAgent.new_from_config(
-            parent_agent_id: config.agent_id,
-            instructions: instructions,
-            agent_config: agent_config,
-            initial_messages: per_call_initial,
-            parent_tool_context: parent_tool_context,
-            parent_metadata: parent_metadata,
-            parent_runtime: parent_runtime,
-            scope: parent_scope,
-            parent_trace: parent_trace,
-            user_request_seq: Map.get(context, :user_request_seq, 0)
-          )
+      # Create SubAgent struct with parent context
+      subagent =
+        SubAgent.new_from_config(
+          parent_agent_id: config.agent_id,
+          instructions: instructions,
+          agent_config: agent_config,
+          initial_messages: per_call_initial,
+          parent_tool_context: parent_tool_context,
+          parent_metadata: parent_metadata,
+          parent_runtime: parent_runtime,
+          scope: parent_scope,
+          parent_trace: parent_trace,
+          user_request_seq: Map.get(context, :user_request_seq, 0),
+          ability_set: ability_set,
+          ability_set_source: ability_set_source
+        )
 
-        # Get supervisor and start SubAgent (same as pre-configured)
-        supervisor_name = SubAgentsDynamicSupervisor.get_name(config.agent_id)
-        tool_call_id = Map.get(context, :tool_call_id)
+      # Get supervisor and start SubAgent (same as pre-configured)
+      supervisor_name = SubAgentsDynamicSupervisor.get_name(config.agent_id)
+      tool_call_id = Map.get(context, :tool_call_id)
 
-        child_spec = %{
-          id: subagent.id,
-          start:
-            {SubAgentServer, :start_link, [[subagent: subagent, tool_call_id: tool_call_id]]},
-          restart: :temporary
-        }
+      child_spec = %{
+        id: subagent.id,
+        start: {SubAgentServer, :start_link, [[subagent: subagent, tool_call_id: tool_call_id]]},
+        restart: :temporary
+      }
 
-        try do
-          case DynamicSupervisor.start_child(supervisor_name, child_spec) do
-            {:ok, _pid} ->
-              execute_subagent(subagent.id, "general-purpose")
+      try do
+        case DynamicSupervisor.start_child(supervisor_name, child_spec) do
+          {:ok, _pid} ->
+            execute_subagent(subagent.id, "general-purpose")
 
-            # See start_pre_configured_subagent/3 above — duplicate ids
-            # are impossible by construction, so surface explicitly.
-            {:error, {:already_started, _pid}} ->
-              {:error, "Duplicate SubAgent id #{inspect(subagent.id)} — refusing to start"}
+          # See start_pre_configured_subagent/7 above — duplicate ids
+          # are impossible by construction, so surface explicitly.
+          {:error, {:already_started, _pid}} ->
+            {:error, "Duplicate SubAgent id #{inspect(subagent.id)} — refusing to start"}
 
-            {:error, reason} ->
-              {:error, "Failed to start task: #{inspect(reason)}"}
-          end
-        catch
-          :exit, reason ->
+          {:error, reason} ->
             {:error, "Failed to start task: #{inspect(reason)}"}
         end
-
-      {:error, reason} ->
-        {:error, "Invalid system_prompt: #{reason}"}
+      catch
+        :exit, reason ->
+          {:error, "Failed to start task: #{inspect(reason)}"}
+      end
+    else
+      {:error, {:mode, reason}} -> {:error, reason}
+      {:error, reason} -> {:error, "Invalid system_prompt: #{reason}"}
     end
+  end
+
+  # The parent middleware a general-purpose sub-agent starts from, with the
+  # ability set it comes from and how that set was chosen. Without a `mode` it
+  # is the parent's current set (`:parent_middleware`, set by
+  # Agent.build_chain). A `mode` names another set; its stack is precomputed in
+  # the ability set index the chain context carries. Either way the switcher is
+  # left out, so the sub-agent cannot switch.
+  defp inherited_middleware(%{"mode" => mode}, %{
+         ability_sets: %{config: config, effective: effective}
+       }) do
+    if is_binary(mode) and Map.has_key?(config.sets, mode),
+      do:
+        {:ok, Sagents.AbilitySets.inheritable_middleware(effective[mode].middleware), mode,
+         :requested},
+      else: {:error, {:mode, unknown_mode_message(mode, config)}}
+  end
+
+  defp inherited_middleware(%{"mode" => _mode}, _context),
+    do: {:error, {:mode, "mode is unavailable: this agent has no modes."}}
+
+  defp inherited_middleware(_args, %{ability_sets: %{active: active}} = context),
+    do: {:ok, Map.get(context, :parent_middleware, []), active, :inherited}
+
+  defp inherited_middleware(_args, context),
+    do: {:ok, Map.get(context, :parent_middleware, []), nil, nil}
+
+  defp unknown_mode_message(mode, config) do
+    "Unknown mode #{inspect(mode)}. Available modes: " <>
+      Enum.join(Sagents.Middleware.AbilitySetSwitcher.set_names(config), ", ") <> "."
   end
 
   # Extract parent's tool_context, state.metadata, state.runtime, and scope

@@ -682,7 +682,9 @@ defmodule Sagents.SubAgentServer do
       initial_messages: subagent.chain.messages || [],
       tools: extract_tools(subagent),
       middleware: extract_middleware(subagent),
-      model: get_model_name(subagent)
+      model: get_model_name(subagent),
+      ability_set: subagent.ability_set,
+      ability_set_source: subagent.ability_set_source
     }
   end
 

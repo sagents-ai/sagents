@@ -12,8 +12,9 @@ defmodule Sagents.Modes.AgentExecution do
      messages
   3. Call the LLM
   4. Check for HITL interrupts (if HumanInTheLoop middleware present)
-  5. Execute tools, then answer calls to tools from an inactive ability set
-     with a hint to switch
+  5. Execute tools, then settle the batch's ability set switch: only the first
+     switch in a batch applies, and calls to tools from an inactive set get a
+     hint (see `Sagents.Mode.Steps.settle_ability_set_batch/2`)
   6. Propagate state updates from tool results
   7. Check if target tool was called (if `until_tool` is set)
   8. End the chain if the tools switched the active ability set (see
@@ -52,7 +53,7 @@ defmodule Sagents.Modes.AgentExecution do
   `Sagents.Agent.resume/4`, which builds a fresh chain with a fresh budget.
 
   A chain that arrives ending in a tool message has its results pass through
-  the inactive-tool hint and steps 6 to 8, plus the tool-interrupt check, before
+  the batch settlement of step 5 and steps 6 to 8, plus the tool-interrupt check, before
   the loop starts. Their
   state updates reach the chain's state, a nested interrupt surfaces, and an
   approved target tool completes the run without another LLM call, even when
@@ -146,7 +147,7 @@ defmodule Sagents.Modes.AgentExecution do
     |> check_pause(opts)
     |> check_pre_tool_hitl(opts)
     |> execute_tools()
-    |> hint_inactive_tool_calls(opts)
+    |> settle_ability_set_batch(opts)
     |> propagate_state(opts)
     |> check_tool_interrupts(opts)
     |> maybe_check_until_tool(opts)
@@ -184,7 +185,7 @@ defmodule Sagents.Modes.AgentExecution do
          opts
        ) do
     pipeline_result
-    |> hint_inactive_tool_calls(opts)
+    |> settle_ability_set_batch(opts)
     |> propagate_state(opts)
     |> check_tool_interrupts(opts)
     |> maybe_check_until_tool(opts)

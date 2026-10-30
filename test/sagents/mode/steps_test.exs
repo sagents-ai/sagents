@@ -480,4 +480,148 @@ defmodule Sagents.Mode.StepsTest do
       assert {:error, ^chain, :y} = Steps.check_until_tool_success({:error, chain, :y}, [])
     end
   end
+
+  describe "settle_ability_set_batch/2" do
+    alias LangChain.Message.ContentPart
+    alias Sagents.Middleware.AbilitySetSwitcher
+
+    defp switcher_config do
+      {:ok, config} =
+        AbilitySetSwitcher.init(
+          sets: %{
+            "devices" => %{when_to_use: "Devices."},
+            "billing" => %{when_to_use: "Billing."}
+          }
+        )
+
+      config
+    end
+
+    defp switch_result(call_id, mode) do
+      ToolResult.new!(%{
+        tool_call_id: call_id,
+        name: "switch_mode",
+        content: "Switched to the #{String.capitalize(mode)} mode.",
+        processed_content: State.delta(%{metadata: %{"active_ability_set" => mode}})
+      })
+    end
+
+    defp not_found_result(call_id, name) do
+      ToolResult.new!(%{
+        tool_call_id: call_id,
+        name: name,
+        content: "Tool call made to #{name} but tool not found",
+        is_error: true
+      })
+    end
+
+    # A chain built for `active` whose last exchange is a batch of switch_mode
+    # calls (`{call_id, mode}`) and calls to missing tools (`{call_id, name}`).
+    defp batch_chain(active, calls, results) do
+      tool_calls =
+        Enum.map(calls, fn
+          {id, {:switch, mode}} ->
+            ToolCall.new!(%{
+              status: :complete,
+              call_id: id,
+              name: "switch_mode",
+              arguments: %{"mode" => mode}
+            })
+
+          {id, name} ->
+            ToolCall.new!(%{status: :complete, call_id: id, name: name, arguments: %{}})
+        end)
+
+      assistant = Message.new_assistant!(%{tool_calls: tool_calls})
+      tool_message = Message.new_tool_result!(%{tool_results: results})
+
+      chain_with_context([assistant, tool_message], %{
+        ability_sets: %{
+          active: active,
+          config: switcher_config(),
+          tool_sets: %{"list_devices" => ["devices"], "list_invoices" => ["billing"]}
+        }
+      })
+      |> Map.put(:last_message, tool_message)
+    end
+
+    defp result_texts(%LLMChain{last_message: %Message{tool_results: results}}),
+      do: Map.new(results, &{&1.tool_call_id, ContentPart.content_to_string(&1.content)})
+
+    defp mixed_batch(active) do
+      batch_chain(
+        active,
+        [
+          {"c0", "list_devices"},
+          {"s1", {:switch, "devices"}},
+          {"s2", {:switch, "billing"}},
+          {"c1", "list_invoices"}
+        ],
+        [
+          not_found_result("c0", "list_devices"),
+          switch_result("s1", "devices"),
+          switch_result("s2", "billing"),
+          not_found_result("c1", "list_invoices")
+        ]
+      )
+    end
+
+    test "applies the first switch and settles the rest of the batch" do
+      assert {:continue, settled} =
+               Steps.settle_ability_set_batch({:continue, mixed_batch(nil)}, [])
+
+      assert result_texts(settled) == %{
+               "c0" =>
+                 "list_devices is in the Devices mode. The switch to Devices applies; retry on your next step.",
+               "s1" => "Switched to the Devices mode.",
+               "s2" =>
+                 "Only one mode switch per step. The switch to Devices applies; its tools arrive on your next step.",
+               "c1" =>
+                 ~s(list_invoices is in the Billing mode. Call switch_mode with "billing" first, then retry.)
+             }
+
+      refused = Enum.find(settled.last_message.tool_results, &(&1.tool_call_id == "s2"))
+      assert refused.is_error
+      assert refused.processed_content == nil
+
+      # The chain's messages carry the same settled results as last_message.
+      assert List.last(settled.messages) == settled.last_message
+    end
+
+    test "settles the same way when run again, on this chain or the one built after the switch" do
+      {:continue, settled} = Steps.settle_ability_set_batch({:continue, mixed_batch(nil)}, [])
+
+      assert {:continue, ^settled} = Steps.settle_ability_set_batch({:continue, settled}, [])
+
+      rebuilt = put_in(settled.custom_context.ability_sets.active, "devices")
+      assert {:continue, again} = Steps.settle_ability_set_batch({:continue, rebuilt}, [])
+      assert again.last_message == settled.last_message
+    end
+
+    test "a switch to the set the chain was built for is not a switch" do
+      chain =
+        batch_chain(
+          "devices",
+          [{"s1", {:switch, "devices"}}, {"s2", {:switch, "billing"}}],
+          [switch_result("s1", "devices"), switch_result("s2", "billing")]
+        )
+
+      assert {:continue, settled} = Steps.settle_ability_set_batch({:continue, chain}, [])
+      assert settled.last_message == chain.last_message
+    end
+
+    test "passes through a chain without ability sets and any terminal result" do
+      chain = chain_with_last_tool_message([tool_result("list_invoices", is_error: true)])
+
+      assert {:continue, ^chain} = Steps.settle_ability_set_batch({:continue, chain}, [])
+      assert {:ok, ^chain} = Steps.settle_ability_set_batch({:ok, chain}, [])
+    end
+
+    test "hint_inactive_tool_calls/2 is the same step" do
+      chain = mixed_batch(nil)
+
+      assert Steps.hint_inactive_tool_calls({:continue, chain}, []) ==
+               Steps.settle_ability_set_batch({:continue, chain}, [])
+    end
+  end
 end

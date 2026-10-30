@@ -175,12 +175,30 @@ defmodule Sagents.Mode.Steps do
   def check_ability_switch(pipeline_result, _opts), do: pipeline_result
 
   @doc """
-  Answer a call to a tool from an inactive ability set with a hint to switch.
+  Settle a tool batch's ability set switch, and answer calls to tools from an
+  inactive set with a hint.
+
+  The model is told to call `switch_mode` by itself. When a batch carries more
+  than one switch anyway, every tool in it ran against the set the chain was
+  built for, so each switch passed its own checks. Only the first result that
+  changes the set applies:
+
+  - A later `switch_mode` result, successful or "Already in", becomes an error
+    naming the switch that applies. An unknown or missing mode keeps its error.
+  - A later result from another tool keeps its content and its other state
+    changes; only the set it named is removed from its delta.
 
   A call naming a tool the chain does not have gets LangChain's not-found
   error. When the tool belongs to a declared set, the error is rewritten to
-  name the set and the switch call that brings it in. A call naming a tool in
+  name the set: to retry on the next step when the batch's switch brings that
+  set in, and otherwise to call `switch_mode` first. A call naming a tool in
   no set keeps the generic error.
+
+  Results are rewritten in the chain's tool message, so both
+  `propagate_state/2` and the agent's final state extraction read the settled
+  batch. Running the step again on the same batch, as happens on the chain
+  built after the switch, changes nothing: the applied switch then names the
+  active set and is no longer a switch.
 
   Runs after `execute_tools/1`, so it also covers a batch the HITL check
   settled: a gated call to an inactive tool is answered with the not-found
@@ -188,35 +206,147 @@ defmodule Sagents.Mode.Steps do
 
   A chain without `custom_context.ability_sets` passes through.
   """
-  def hint_inactive_tool_calls(
+  def settle_ability_set_batch(
         {:continue,
          %LLMChain{
-           custom_context: %{ability_sets: %{config: config, tool_sets: tool_sets}},
+           custom_context: %{ability_sets: %{active: active, config: config} = ability_sets},
            last_message: %Message{role: :tool, tool_results: results}
          } = chain},
         _opts
       )
       when is_list(results) do
-    hinted =
-      Enum.reduce(results, chain, fn %ToolResult{} = result, acc ->
-        case inactive_tool_sets(result, acc, tool_sets) do
-          [set | _others] ->
-            hint = AbilitySetSwitcher.inactive_tool_hint(config, result.name, set)
-
-            LLMChain.replace_tool_result(acc, result.tool_call_id, %{
-              result
-              | content: [ContentPart.text!(hint)]
-            })
-
-          nil ->
-            acc
+    applied =
+      results
+      |> Enum.with_index()
+      |> Enum.find_value(fn {result, index} ->
+        case switch_target(result, config) do
+          nil -> nil
+          ^active -> nil
+          target -> {index, target}
         end
       end)
 
-    {:continue, hinted}
+    settled =
+      results
+      |> Enum.with_index()
+      |> Enum.reduce(chain, fn {result, index}, acc ->
+        case settle_result(result, index, applied, acc, ability_sets) do
+          nil ->
+            acc
+
+          %ToolResult{} = new_result ->
+            LLMChain.replace_tool_result(acc, result.tool_call_id, new_result)
+        end
+      end)
+
+    {:continue, settled}
   end
 
-  def hint_inactive_tool_calls(pipeline_result, _opts), do: pipeline_result
+  def settle_ability_set_batch(pipeline_result, _opts), do: pipeline_result
+
+  @doc false
+  def hint_inactive_tool_calls(pipeline_result, opts),
+    do: settle_ability_set_batch(pipeline_result, opts)
+
+  # The set a successful, non-interrupt result switches to, or nil when its
+  # delta does not name one.
+  defp switch_target(
+         %ToolResult{is_error: false, is_interrupt: false, processed_content: %State{} = delta},
+         config
+       ) do
+    if Map.has_key?(delta.metadata || %{}, config.state_key),
+      do: AbilitySets.resolve(config, delta.metadata)
+  end
+
+  defp switch_target(_result, _config), do: nil
+
+  # The replacement for one result of the batch, or nil to keep it.
+  defp settle_result(
+         %ToolResult{} = result,
+         index,
+         {applied_index, target},
+         chain,
+         %{config: config} = context
+       )
+       when index > applied_index do
+    cond do
+      extra_switch_call?(result, chain, config) ->
+        %{
+          result
+          | is_error: true,
+            processed_content: nil,
+            content: [ContentPart.text!(AbilitySetSwitcher.extra_switch_message(config, target))]
+        }
+
+      switch_target(result, config) != nil ->
+        drop_state_key(result, config.state_key)
+
+      true ->
+        hint_result(result, target, chain, context)
+    end
+  end
+
+  defp settle_result(result, _index, {_applied_index, target}, chain, context),
+    do: hint_result(result, target, chain, context)
+
+  defp settle_result(result, _index, nil, chain, context),
+    do: hint_result(result, nil, chain, context)
+
+  # A later tool's switch is not applied; the rest of its state changes are.
+  defp drop_state_key(%ToolResult{processed_content: %State{} = delta} = result, state_key) do
+    %{result | processed_content: %{delta | metadata: Map.delete(delta.metadata, state_key)}}
+  end
+
+  # A `switch_mode` call naming a declared set: it either switched or was told
+  # it is already in that set. Both are wrong once an earlier call switched.
+  # A call naming no declared set keeps its unknown or missing mode error.
+  defp extra_switch_call?(%ToolResult{name: name, tool_call_id: id}, chain, config) do
+    name == config.tool_name and
+      match?(
+        %{arguments: %{"mode" => mode}} when is_map_key(config.sets, mode),
+        batch_tool_call(chain, id)
+      )
+  end
+
+  # The tool call a result answers, from the assistant message that made the
+  # batch.
+  defp batch_tool_call(chain, tool_call_id) do
+    chain.messages
+    |> Enum.reverse()
+    |> Enum.find(&(&1.role == :assistant))
+    |> case do
+      %Message{tool_calls: calls} when is_list(calls) ->
+        Enum.find(calls, &(&1.call_id == tool_call_id))
+
+      _other ->
+        nil
+    end
+  end
+
+  # A missing tool from the set the batch switches to, or from the active set
+  # on the chain built after that switch, is retried on the next step. Any
+  # other set's tool needs a switch first.
+  defp hint_result(
+         %ToolResult{} = result,
+         target,
+         chain,
+         %{active: active, config: config, tool_sets: tool_sets}
+       ) do
+    retry_set = target || active
+
+    case inactive_tool_sets(result, chain, tool_sets) do
+      nil ->
+        nil
+
+      sets ->
+        hint =
+          if retry_set != nil and retry_set in sets,
+            do: AbilitySetSwitcher.switching_tool_hint(config, result.name, retry_set),
+            else: AbilitySetSwitcher.inactive_tool_hint(config, result.name, hd(sets))
+
+        %{result | content: [ContentPart.text!(hint)]}
+    end
+  end
 
   # The sets providing a tool the chain does not carry, for an error result.
   defp inactive_tool_sets(%ToolResult{is_error: true, name: name}, chain, tool_sets) do

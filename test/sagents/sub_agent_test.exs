@@ -1254,6 +1254,45 @@ defmodule Sagents.SubAgentTest do
     end
   end
 
+  describe "new_from_config/1 with an ability set" do
+    defp subagent_attributes(opts) do
+      subagent =
+        SubAgent.new_from_config(
+          [
+            parent_agent_id: "parent-1",
+            instructions: "Do something",
+            agent_config: test_agent(),
+            parent_trace: %{otel_attributes: %{"sagents.ability_set" => "billing"}}
+          ] ++ opts
+        )
+
+      {subagent, subagent.chain.custom_context.otel_attributes}
+    end
+
+    test "records the set and reports it on the sub-agent's spans" do
+      {subagent, attributes} =
+        subagent_attributes(ability_set: "devices", ability_set_source: :requested)
+
+      assert subagent.ability_set == "devices"
+      assert subagent.ability_set_source == :requested
+      assert attributes["sagents.ability_set"] == "devices"
+    end
+
+    test "a rails-only sub-agent reports no set, not the parent's" do
+      {subagent, attributes} = subagent_attributes(ability_set_source: :inherited)
+
+      assert subagent.ability_set == nil
+      refute Map.has_key?(attributes, "sagents.ability_set")
+    end
+
+    test "a sub-agent not built from an ability set keeps the inherited attribute" do
+      {subagent, attributes} = subagent_attributes([])
+
+      assert subagent.ability_set_source == nil
+      assert attributes["sagents.ability_set"] == "billing"
+    end
+  end
+
   describe "new_from_compiled/1" do
     test "the chain uses the compiled agent's max_retry_count" do
       compiled_agent = Agent.new!(%{model: test_model(), max_retry_count: 5})

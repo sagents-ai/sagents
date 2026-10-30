@@ -81,4 +81,67 @@ defmodule Sagents.AbilitySetsAgentServerTest do
 
     AgentServer.stop(agent_id)
   end
+
+  test "publishes ability_set_changed when another tool requests the switch" do
+    agent_id = generate_test_agent_id()
+
+    open_devices = fn context ->
+      {:ok, switch} = AbilitySetSwitcher.request_mode_switch(context, "devices")
+      {:ok, "Devices command activated.", switch}
+    end
+
+    agent =
+      Agent.new!(
+        %{
+          agent_id: agent_id,
+          model:
+            ChatOpenAICompatible.new!(%{
+              endpoint: "http://localhost/v1/chat/completions",
+              model: "glm"
+            }),
+          middleware: [
+            {TestAbilityMiddleware,
+             id: "rail_mw", tools: ["open_devices"], results: %{"open_devices" => open_devices}},
+            {AbilitySetSwitcher,
+             sets: %{
+               "devices" => %{
+                 when_to_use: "Devices.",
+                 middleware: [{TestAbilityMiddleware, id: "devices_mw", tools: ["list_devices"]}]
+               }
+             }}
+          ]
+        },
+        replace_default_middleware: true
+      )
+
+    expect(ChatOpenAICompatible, :call, fn _model, _messages, _tools ->
+      {:ok,
+       [
+         Message.new_assistant!(%{
+           tool_calls: [ToolCall.new!(%{call_id: "c1", name: "open_devices", arguments: %{}})]
+         })
+       ]}
+    end)
+
+    expect(ChatOpenAICompatible, :call, fn _model, _messages, tools ->
+      assert "list_devices" in Enum.map(tools, & &1.name)
+      {:ok, [Message.new_assistant!("Done")]}
+    end)
+
+    {:ok, _supervisor} =
+      AgentSupervisor.start_link_sync(
+        name: AgentSupervisor.get_name(agent_id),
+        agent: agent,
+        pubsub: {Phoenix.PubSub, :test_pubsub}
+      )
+
+    {:ok, _server, _ref} = AgentServer.subscribe(agent_id)
+
+    :ok = AgentServer.add_message(agent_id, Message.new_user!("/devices"))
+
+    assert_receive {:agent, {:ability_set_changed, nil, "devices"}}, 5_000
+    assert_receive {:agent, {:status_changed, :idle, _data}}, 5_000
+
+    AgentServer.stop(agent_id)
+  end
 end

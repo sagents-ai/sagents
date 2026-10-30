@@ -14,6 +14,10 @@ defmodule Sagents.TestAbilityMiddleware do
     `{:tool_ran, name, context}` messages
   - `:interrupting_tools` - tool names that return an interrupt instead of a
     result
+  - `:deltas` - map of tool name to a `Sagents.State` delta the tool returns
+    with its result
+  - `:results` - map of tool name to a 1-arity function of the tool context
+    returning the tool's whole result
   """
 
   @behaviour Sagents.Middleware
@@ -29,7 +33,9 @@ defmodule Sagents.TestAbilityMiddleware do
        tools: Keyword.get(opts, :tools, []),
        prompt: Keyword.get(opts, :prompt, ""),
        test_pid: Keyword.get(opts, :test_pid),
-       interrupting_tools: Keyword.get(opts, :interrupting_tools, [])
+       interrupting_tools: Keyword.get(opts, :interrupting_tools, []),
+       deltas: Keyword.get(opts, :deltas, %{}),
+       results: Keyword.get(opts, :results, %{})
      }}
   end
 
@@ -59,9 +65,19 @@ defmodule Sagents.TestAbilityMiddleware do
       function: fn _args, context ->
         notify(config, {:tool_ran, name, context})
 
-        if name in config.interrupting_tools,
-          do: {:interrupt, "Waiting on #{name}", %{type: :test_interrupt, tool: name}},
-          else: {:ok, "#{name} result"}
+        cond do
+          name in config.interrupting_tools ->
+            {:interrupt, "Waiting on #{name}", %{type: :test_interrupt, tool: name}}
+
+          Map.has_key?(config.results, name) ->
+            Map.fetch!(config.results, name).(context)
+
+          Map.has_key?(config.deltas, name) ->
+            {:ok, "#{name} result", Map.fetch!(config.deltas, name)}
+
+          true ->
+            {:ok, "#{name} result"}
+        end
       end
     })
   end
