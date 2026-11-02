@@ -342,7 +342,7 @@ defmodule Sagents.Persistence.StateSerializerTest do
       [result] = tool_message.tool_results
       refute result.is_interrupt
       assert result.is_error
-      assert result.content =~ "interrupted"
+      assert ContentPart.content_to_string(result.content) =~ "interrupted"
     end
 
     test "handles missing version field" do

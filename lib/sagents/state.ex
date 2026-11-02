@@ -705,56 +705,48 @@ defmodule Sagents.State do
   defp any_middleware_claims?(_data, _middleware), do: false
 
   defp demote(tr, :process_bound) do
-    %{
-      tr
-      | content:
-          "Tool execution was interrupted and could not be resumed " <>
-            "(agent was restarted). The sub-agent's work was lost.",
-        is_interrupt: false,
-        is_error: true,
-        interrupt_data: nil
-    }
+    demoted(
+      tr,
+      "Tool execution was interrupted and could not be resumed " <>
+        "(agent was restarted). The sub-agent's work was lost.",
+      true
+    )
   end
 
   defp demote(%{interrupt_data: %{in_flight: %{outcomes: outcomes}}} = tr, :in_flight) do
     # Worded like the results a completed run records, so the model reads a
     # rejected call the same way either way.
-    {content, is_error} =
-      case Map.get(outcomes, tr.tool_call_id) do
-        :rejected ->
-          {"Tool call '#{tr.name}' was rejected by a human reviewer.", false}
+    case Map.get(outcomes, tr.tool_call_id) do
+      :rejected ->
+        demoted(tr, "Tool call '#{tr.name}' was rejected by a human reviewer.", false)
 
-        _started ->
-          {"Tool call '#{tr.name}' was approved and started, but the agent stopped " <>
-             "before its result was recorded. Its outcome is unknown: it may or may " <>
-             "not have taken effect. Check before running it again.", true}
-      end
-
-    %{tr | content: content, is_interrupt: false, is_error: is_error, interrupt_data: nil}
+      _started ->
+        demoted(
+          tr,
+          "Tool call '#{tr.name}' was approved and started, but the agent stopped " <>
+            "before its result was recorded. Its outcome is unknown: it may or may " <>
+            "not have taken effect. Check before running it again.",
+          true
+        )
+    end
   end
 
   defp demote(tr, :incompatible) do
-    %{
-      tr
-      | content:
-          "Tool execution was interrupted and could not be resumed " <>
-            "(saved data was incompatible with current code).",
-        is_interrupt: false,
-        is_error: true,
-        interrupt_data: nil
-    }
+    demoted(
+      tr,
+      "Tool execution was interrupted and could not be resumed " <>
+        "(saved data was incompatible with current code).",
+      true
+    )
   end
 
   defp demote(tr, :user_cancelled) do
-    %{
-      tr
-      | content:
-          "Tool execution was interrupted and the user did not respond. " <>
-            "They sent a new message instead — proceed with their new request.",
-        is_interrupt: false,
-        is_error: true,
-        interrupt_data: nil
-    }
+    demoted(
+      tr,
+      "Tool execution was interrupted and the user did not respond. " <>
+        "They sent a new message instead — proceed with their new request.",
+      true
+    )
   end
 
   # Halt-specific demotion: preserve the original halt message in the
@@ -763,19 +755,28 @@ defmodule Sagents.State do
   # no halt-reason in history and might immediately re-attempt the gated
   # operation.
   defp demote(tr, {:halted, message}) when is_binary(message) and byte_size(message) > 0 do
-    %{
-      tr
-      | content:
-          "Tool halted: " <>
-            message <>
-            " The user has sent a new instruction - proceed with their new request.",
-        is_interrupt: false,
-        is_error: true,
-        interrupt_data: nil
-    }
+    demoted(
+      tr,
+      "Tool halted: " <>
+        message <> " The user has sent a new instruction - proceed with their new request.",
+      true
+    )
   end
 
   defp demote(tr, {:halted, _empty_or_nil}), do: demote(tr, :user_cancelled)
+
+  # A tool result's content is a list of ContentParts. Chat-completions
+  # encoders only accept that list, so a bare string here breaks every later
+  # LLM call that replays this message.
+  defp demoted(tr, text, is_error) do
+    %{
+      tr
+      | content: [LangChain.Message.ContentPart.text!(text)],
+        is_interrupt: false,
+        is_error: is_error,
+        interrupt_data: nil
+    }
+  end
 
   @doc """
   Demote every `is_interrupt: true` tool result in the message log to an
