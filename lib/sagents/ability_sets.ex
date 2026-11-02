@@ -104,21 +104,21 @@ defmodule Sagents.AbilitySets do
   The `custom_context.ability_sets` value for a chain built for `active`, or
   `nil` for an agent without a switcher.
 
-  It records the set the chain was built for and the switches made so far in
-  the current `Sagents.Agent.execute/3`. The `switch_mode` tool reads both,
+  It records the set the chain was built for. The `switch_mode` tool reads it,
   and `Sagents.Mode.Steps.check_ability_switch/2` compares the state against
-  `:active` after each tool batch.
+  `:active` after each tool batch. `:effective` is the index's precomputed map
+  of set to middleware, tools and prompt, which the `task` tool reads to start a
+  general-purpose sub-agent in a named set.
   """
-  @spec chain_context(Sagents.Agent.t(), String.t() | nil, non_neg_integer()) :: map() | nil
+  @spec chain_context(Sagents.Agent.t(), String.t() | nil) :: map() | nil
   def chain_context(
-        %{ability_index: %Index{config: config, tool_sets: tool_sets}},
-        active,
-        switches
+        %{ability_index: %Index{config: config, tool_sets: tool_sets, effective: effective}},
+        active
       ) do
-    %{active: active, switches: switches, config: config, tool_sets: tool_sets}
+    %{active: active, config: config, tool_sets: tool_sets, effective: effective}
   end
 
-  def chain_context(_agent, _active, _switches), do: nil
+  def chain_context(_agent, _active), do: nil
 
   @doc """
   Remove the reasoning from a state that names a different set than
@@ -189,6 +189,10 @@ defmodule Sagents.AbilitySets do
   # rail and the list of set names for a set member. Each member spec has
   # `inject` applied, the same agent context injection the factory's own specs
   # receive. A member listed in several sets appears once, with every name.
+  #
+  # A `Sagents.Middleware.SubAgent` rail receives the declared set names as
+  # `:ability_set_modes`, so its `task` tool can offer them for a
+  # general-purpose sub-agent. A spec that already sets the option keeps it.
   @spec expand(list(), (term() -> term())) ::
           {:ok, [{term(), [String.t()] | nil}]} | {:error, String.t()}
   def expand(specs, inject) when is_list(specs) do
@@ -205,9 +209,11 @@ defmodule Sagents.AbilitySets do
 
           tagged_members = Enum.map(members, fn {spec, sets} -> {inject.(spec), sets} end)
 
+          rail = &{offer_modes(&1, switcher), nil}
+
           {:ok,
-           Enum.map(before, &{&1, nil}) ++
-             [{switcher, nil} | tagged_members] ++ Enum.map(after_switcher, &{&1, nil})}
+           Enum.map(before, rail) ++
+             [{switcher, nil} | tagged_members] ++ Enum.map(after_switcher, rail)}
         end
 
       {_switchers, _rails} ->
@@ -215,6 +221,26 @@ defmodule Sagents.AbilitySets do
     end
   rescue
     error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  defp offer_modes(spec, switcher) do
+    case Middleware.normalize(spec) do
+      {Sagents.Middleware.SubAgent, opts} ->
+        {Sagents.Middleware.SubAgent,
+         Keyword.put_new(opts, :ability_set_modes, declared_set_names(switcher))}
+
+      _other ->
+        spec
+    end
+  end
+
+  defp declared_set_names(switcher) do
+    {_module, opts} = Middleware.normalize(switcher)
+
+    case Keyword.get(opts, :sets) do
+      sets when is_map(sets) -> sets |> Map.keys() |> Enum.map(&set_name_or_raw/1) |> Enum.sort()
+      _other -> []
+    end
   end
 
   defp collect_members(switcher, rail_ids) do

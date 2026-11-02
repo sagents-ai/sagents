@@ -821,7 +821,6 @@ defmodule Sagents.Agent do
       # What this call has done so far, carried across the chains of an
       # ability set switch.
       run = %{
-        switches: 0,
         before_model_ran: MapSet.new(middleware, & &1.id),
         mode_state: nil
       }
@@ -847,8 +846,7 @@ defmodule Sagents.Agent do
 
       run = %{
         run
-        | switches: run.switches + 1,
-          before_model_ran: Enum.into(entering, run.before_model_ran, & &1.id),
+        | before_model_ran: Enum.into(entering, run.before_model_ran, & &1.id),
           mode_state: switch.mode_state
       }
 
@@ -982,7 +980,7 @@ defmodule Sagents.Agent do
 
   @doc false
   def build_chain(agent, messages, state, callbacks) do
-    build_chain_impl(agent, messages, state, callbacks, %{switches: 0, mode_state: nil})
+    build_chain_impl(agent, messages, state, callbacks, %{mode_state: nil})
   end
 
   # Private functions
@@ -1201,10 +1199,9 @@ defmodule Sagents.Agent do
   end
 
   # The chain is built for the ability set the state names: its system prompt,
-  # tools and inherited middleware are that set's. `run` carries what the
-  # current execute has done so far: the switches made (read by the switch tool)
-  # and, after a switch, the previous chain's `mode_state`, so the `:max_runs`
-  # budget spans both chains.
+  # tools and inherited middleware are that set's. `run` carries, after a
+  # switch, the previous chain's `mode_state`, so the `:max_runs` budget spans
+  # both chains.
   defp build_chain_impl(agent, messages, state, callbacks, run) do
     active = AbilitySets.active(agent, state)
     effective = AbilitySets.effective(agent, active)
@@ -1305,7 +1302,7 @@ defmodule Sagents.Agent do
   # present only after a switch; LangChain's ensure_mode_state/1 keeps it.
   defp put_ability_sets_context(context, agent, active, run) do
     context =
-      case AbilitySets.chain_context(agent, active, run.switches) do
+      case AbilitySets.chain_context(agent, active) do
         nil -> context
         ability_sets -> Map.put(context, :ability_sets, ability_sets)
       end

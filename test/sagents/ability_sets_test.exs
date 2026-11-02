@@ -68,6 +68,10 @@ defmodule Sagents.AbilitySetsTest do
 
   defp errors_text({:error, changeset}), do: inspect(changeset.errors)
 
+  defp switched(name),
+    do:
+      "Switched to the #{name} mode. Your tools now match this mode; use the tool definitions you have."
+
   describe "expansion in Agent.new/2" do
     test "splices each set's middleware at the switcher's position, tagged with its sets" do
       agent = new_agent!()
@@ -145,6 +149,30 @@ defmodule Sagents.AbilitySetsTest do
                tools: agent.tools,
                system_prompt: agent.assembled_system_prompt
              }
+    end
+  end
+
+  describe "expand/2 and the SubAgent middleware" do
+    test "hands a SubAgent rail the declared set names" do
+      specs = [
+        {Sagents.Middleware.SubAgent, [model: model()]},
+        {AbilitySetSwitcher, sets: sets()}
+      ]
+
+      assert {:ok, [{{Sagents.Middleware.SubAgent, opts}, nil} | _rest]} =
+               AbilitySets.expand(specs, & &1)
+
+      assert opts[:ability_set_modes] == ["billing", "devices"]
+    end
+
+    test "leaves a SubAgent alone without a switcher, or with its own modes" do
+      spec = {Sagents.Middleware.SubAgent, [model: model()]}
+      assert {:ok, [{^spec, nil}]} = AbilitySets.expand([spec], & &1)
+
+      own = {Sagents.Middleware.SubAgent, [model: model(), ability_set_modes: ["billing"]]}
+
+      assert {:ok, [{^own, nil} | _rest]} =
+               AbilitySets.expand([own, {AbilitySetSwitcher, sets: sets()}], & &1)
     end
   end
 
@@ -302,7 +330,8 @@ defmodule Sagents.AbilitySetsTest do
   describe "system prompt structure" do
     # The same stack without a switcher: the set's middleware sit at the
     # switcher's position, preceded by a stand-in that contributes the
-    # catalog fragment the switcher would.
+    # catalog fragment the switcher would. A default SubAgent is handed the
+    # set names, as the switcher's expansion hands them to it.
     defp flat_agent!(switcher_agent, set, replace_defaults) do
       catalog = AbilitySetSwitcher.catalog_prompt(switcher_agent.ability_index.config, set)
       members = if set, do: sets()[set].middleware, else: []
@@ -317,7 +346,10 @@ defmodule Sagents.AbilitySetsTest do
               [mw("rail_mw", ["whoami"], "Rail fragment."), mw("catalog", [], catalog)] ++
                 members ++ [mw("trailing_mw", [], "Trailing fragment.")]
           },
-          replace_default_middleware: replace_defaults
+          replace_default_middleware: replace_defaults,
+          subagent_opts: [
+            ability_set_modes: AbilitySetSwitcher.set_names(switcher_agent.ability_index.config)
+          ]
         )
 
       agent
@@ -415,8 +447,18 @@ defmodule Sagents.AbilitySetsTest do
     defp switch_tool(config), do: hd(AbilitySetSwitcher.tools(config))
 
     test "init/1 is idempotent on its own output" do
-      config = switcher_config(default: "devices", max_switches_per_run: 2)
+      config = switcher_config(default: "devices")
       assert {:ok, ^config} = AbilitySetSwitcher.init(Map.to_list(config))
+    end
+
+    test "the catalog and the tool description tell the model to switch alone" do
+      config = switcher_config()
+
+      assert AbilitySetSwitcher.catalog_prompt(config, nil) =~
+               "Call switch_mode by itself, with no other tool calls in the same step"
+
+      assert switch_tool(config).description =~ "Call it by itself, with no other tool calls."
+      assert switch_tool(config).description =~ "Only one switch per step takes effect."
     end
 
     test "init/1 defaults a set's display name" do
@@ -442,9 +484,11 @@ defmodule Sagents.AbilitySetsTest do
 
     test "a switch returns a metadata delta that keeps the todo list" do
       tool = switch_tool(switcher_config())
-      context = %{ability_sets: %{active: nil, switches: 0}}
+      context = %{ability_sets: %{active: nil}}
 
-      assert {:ok, "Switched to the Devices mode.",
+      expected = switched("Devices")
+
+      assert {:ok, ^expected,
               %State{todos: nil, metadata: %{"active_ability_set" => "devices"}} = delta} =
                tool.function.(%{"mode" => "devices"}, context)
 
@@ -458,16 +502,16 @@ defmodule Sagents.AbilitySetsTest do
         put_in(sets(), ["billing", :switch_message], "Switching to focus on billing questions.")
 
       tool = switch_tool(switcher_config(sets: sets))
-      context = %{ability_sets: %{active: nil, switches: 0}}
+      context = %{ability_sets: %{active: nil}}
 
       assert {:ok, "Switching to focus on billing questions.", _delta} =
                tool.function.(%{"mode" => "billing"}, context)
 
-      assert {:ok, "Switched to the Devices mode.", _delta} =
-               tool.function.(%{"mode" => "devices"}, context)
+      expected = switched("Devices")
+      assert {:ok, ^expected, _delta} = tool.function.(%{"mode" => "devices"}, context)
     end
 
-    test "the default switch_message lists the tools the target set adds" do
+    test "the default switch_message names no tools" do
       tool = switch_tool(switcher_config())
 
       # "lookup" is in both sets, so switching between them does not add it.
@@ -478,16 +522,41 @@ defmodule Sagents.AbilitySetsTest do
         "list_invoices" => ["billing"]
       }
 
-      from_rails = %{ability_sets: %{active: nil, switches: 0, tool_sets: tool_sets}}
-      from_billing = %{ability_sets: %{active: "billing", switches: 0, tool_sets: tool_sets}}
+      from_rails = %{ability_sets: %{active: nil, tool_sets: tool_sets}}
+      from_billing = %{ability_sets: %{active: "billing", tool_sets: tool_sets}}
+      expected = switched("Devices")
 
-      assert {:ok,
-              "Switched to the Devices mode. Tools now available: deploy_package, list_devices, lookup.",
-              _delta} = tool.function.(%{"mode" => "devices"}, from_rails)
+      for context <- [from_rails, from_billing] do
+        assert {:ok, ^expected, _delta} = tool.function.(%{"mode" => "devices"}, context)
+      end
 
-      assert {:ok,
-              "Switched to the Devices mode. Tools now available: deploy_package, list_devices.",
-              _delta} = tool.function.(%{"mode" => "devices"}, from_billing)
+      for name <- Map.keys(tool_sets), do: refute(expected =~ name)
+    end
+
+    test "a switch_message callback receives only the tools the switch adds" do
+      test_pid = self()
+
+      message = fn info ->
+        send(test_pid, {:switch_info, info})
+        "Focusing on #{info.name}."
+      end
+
+      sets = put_in(sets(), ["devices", :switch_message], message)
+      tool = switch_tool(switcher_config(sets: sets))
+
+      tool_sets = %{
+        "list_devices" => ["devices"],
+        "deploy_package" => ["devices"],
+        "lookup" => ["billing", "devices"],
+        "list_invoices" => ["billing"]
+      }
+
+      context = %{ability_sets: %{active: "billing", tool_sets: tool_sets}}
+
+      assert {:ok, "Focusing on Devices.", _delta} =
+               tool.function.(%{"mode" => "devices"}, context)
+
+      assert_received {:switch_info, %{tools: ["deploy_package", "list_devices"]}}
     end
 
     test "a switch_message callback builds the text from the switch" do
@@ -501,7 +570,7 @@ defmodule Sagents.AbilitySetsTest do
       sets = put_in(sets(), ["billing", :switch_message], message)
       tool = switch_tool(switcher_config(sets: sets))
       tool_sets = %{"list_invoices" => ["billing"], "list_devices" => ["devices"]}
-      context = %{ability_sets: %{active: "devices", switches: 0, tool_sets: tool_sets}}
+      context = %{ability_sets: %{active: "devices", tool_sets: tool_sets}}
 
       assert {:ok, "Focusing on Billing: list_invoices.", _delta} =
                tool.function.(%{"mode" => "billing"}, context)
@@ -518,21 +587,21 @@ defmodule Sagents.AbilitySetsTest do
     test "a switch_message may be a {module, function, args} tuple" do
       sets = put_in(sets(), ["billing", :switch_message], {__MODULE__, :switch_text, ["Ahoy"]})
       tool = switch_tool(switcher_config(sets: sets))
-      context = %{ability_sets: %{active: nil, switches: 0}}
+      context = %{ability_sets: %{active: nil}}
 
       assert {:ok, "Ahoy, Billing.", _delta} = tool.function.(%{"mode" => "billing"}, context)
     end
 
     test "a switch_message callback that fails falls back to the default" do
-      context = %{ability_sets: %{active: nil, switches: 0}}
+      context = %{ability_sets: %{active: nil}}
 
       for callback <- [fn _info -> raise "boom" end, fn _info -> :not_text end] do
         sets = put_in(sets(), ["billing", :switch_message], callback)
         tool = switch_tool(switcher_config(sets: sets))
 
         capture_log(fn ->
-          assert {:ok, "Switched to the Billing mode.", _delta} =
-                   tool.function.(%{"mode" => "billing"}, context)
+          expected = switched("Billing")
+          assert {:ok, ^expected, _delta} = tool.function.(%{"mode" => "billing"}, context)
         end)
       end
     end
@@ -608,28 +677,42 @@ defmodule Sagents.AbilitySetsTest do
 
     test "switching to the current mode is an error" do
       tool = switch_tool(switcher_config())
-      context = %{ability_sets: %{active: "devices", switches: 0}}
+      context = %{ability_sets: %{active: "devices"}}
 
       assert {:error, "Already in the Devices mode."} =
                tool.function.(%{"mode" => "devices"}, context)
     end
 
-    test "switching past the per-run limit is an error" do
-      tool = switch_tool(switcher_config())
-      context = %{ability_sets: %{active: "devices", switches: 1}}
-
-      assert {:error, "Mode already switched in this turn." <> _rest} =
-               tool.function.(%{"mode" => "billing"}, context)
-
-      tool = switch_tool(switcher_config(max_switches_per_run: 2))
-      assert {:ok, _text, _delta} = tool.function.(%{"mode" => "billing"}, context)
+    test "init/1 has no switch limit option" do
+      assert {:error, message} = AbilitySetSwitcher.init(sets: sets(), max_switches_per_run: 2)
+      assert message =~ ":max_switches_per_run"
     end
 
     test "an unknown mode is an error" do
       tool = switch_tool(switcher_config())
 
       assert {:error, "Unknown mode" <> _rest} =
-               tool.function.(%{"mode" => "tickets"}, %{ability_sets: %{active: nil, switches: 0}})
+               tool.function.(%{"mode" => "tickets"}, %{ability_sets: %{active: nil}})
+    end
+
+    test "request_mode_switch/2 returns the state that names a declared set" do
+      config = switcher_config()
+      context = %{ability_sets: %{active: nil, config: config}}
+
+      for set <- ["devices", :devices] do
+        assert {:ok, %State{todos: nil, metadata: %{"active_ability_set" => "devices"}}} =
+                 AbilitySetSwitcher.request_mode_switch(context, set)
+      end
+    end
+
+    test "request_mode_switch/2 refuses an undeclared set and a context without a switcher" do
+      context = %{ability_sets: %{active: nil, config: switcher_config()}}
+
+      assert {:error, "Unknown mode \"tickets\". Available modes: billing, devices."} =
+               AbilitySetSwitcher.request_mode_switch(context, "tickets")
+
+      assert {:error, "No ability set switcher" <> _rest} =
+               AbilitySetSwitcher.request_mode_switch(%{state: State.new!()}, "devices")
     end
 
     test "outside an agent chain the state is read" do

@@ -444,6 +444,36 @@ defmodule Sagents.Middleware.SubAgentTest do
     end
   end
 
+  describe "the task tool's mode argument" do
+    defp task_properties(opts) do
+      {:ok, config} =
+        SubAgentMiddleware.init(
+          [agent_id: "parent", model: test_model(), middleware: [], subagents: []] ++ opts
+        )
+
+      [task_tool] = SubAgentMiddleware.tools(config)
+      {config, task_tool.parameters_schema.properties}
+    end
+
+    test "offers the ability set modes for general-purpose" do
+      {config, properties} = task_properties(ability_set_modes: ["billing", "devices"])
+
+      assert %{type: "string", enum: ["billing", "devices"]} = properties["mode"]
+      assert config.descriptions["general-purpose"] =~ "pass `mode`"
+    end
+
+    test "is absent without modes and when general_purpose_modes is false" do
+      {_config, properties} = task_properties([])
+      refute Map.has_key?(properties, "mode")
+
+      {config, properties} =
+        task_properties(ability_set_modes: ["billing"], general_purpose_modes: false)
+
+      refute Map.has_key?(properties, "mode")
+      refute config.descriptions["general-purpose"] =~ "mode"
+    end
+  end
+
   describe "tools/1" do
     test "returns task tool" do
       config = %{
