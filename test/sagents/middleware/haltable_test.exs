@@ -4,6 +4,7 @@ defmodule Sagents.Middleware.HaltableTest do
   alias Sagents.Middleware
   alias Sagents.Middleware.Haltable
   alias Sagents.State
+  alias LangChain.Message.ContentPart
 
   describe "init/1" do
     test "accepts empty options" do
@@ -171,9 +172,12 @@ defmodule Sagents.Middleware.HaltableTest do
       refute demoted.is_interrupt
       assert demoted.is_error
       assert demoted.interrupt_data == nil
-      assert demoted.content =~ "Tool halted:"
-      assert demoted.content =~ "Outline needs subdivision before drafting."
-      assert demoted.content =~ "proceed with their new request"
+      assert ContentPart.content_to_string(demoted.content) =~ "Tool halted:"
+
+      assert ContentPart.content_to_string(demoted.content) =~
+               "Outline needs subdivision before drafting."
+
+      assert ContentPart.content_to_string(demoted.content) =~ "proceed with their new request"
       assert cancelled.interrupt_data == nil
     end
 
@@ -209,8 +213,8 @@ defmodule Sagents.Middleware.HaltableTest do
         |> List.last()
         |> Map.fetch!(:tool_results)
 
-      assert demoted.content =~ "the user did not respond"
-      refute demoted.content =~ "Tool halted:"
+      assert ContentPart.content_to_string(demoted.content) =~ "the user did not respond"
+      refute ContentPart.content_to_string(demoted.content) =~ "Tool halted:"
     end
   end
 

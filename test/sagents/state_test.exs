@@ -3,6 +3,7 @@ defmodule Sagents.StateTest do
 
   alias Sagents.State
   alias LangChain.Message
+  alias LangChain.Message.ContentPart
 
   doctest State
 
@@ -532,8 +533,11 @@ defmodule Sagents.StateTest do
 
       assert result.is_interrupt == false
       assert result.is_error == true
-      assert result.content =~ "interrupted and could not be resumed"
-      assert result.content =~ "sub-agent's work was lost"
+
+      assert ContentPart.content_to_string(result.content) =~
+               "interrupted and could not be resumed"
+
+      assert ContentPart.content_to_string(result.content) =~ "sub-agent's work was lost"
       assert result.tool_call_id == "call_1"
     end
 
@@ -590,7 +594,7 @@ defmodule Sagents.StateTest do
       # Interrupt result was cleaned
       assert cleaned_interrupt.is_interrupt == false
       assert cleaned_interrupt.is_error == true
-      assert cleaned_interrupt.content =~ "interrupted"
+      assert ContentPart.content_to_string(cleaned_interrupt.content) =~ "interrupted"
 
       # Normal result was left alone
       assert cleaned_normal.is_interrupt == false
@@ -662,8 +666,8 @@ defmodule Sagents.StateTest do
       [result] = tool_msg.tool_results
       refute result.is_interrupt
       assert result.is_error
-      assert result.content =~ "interrupted"
-      assert result.content =~ "sub-agent"
+      assert ContentPart.content_to_string(result.content) =~ "interrupted"
+      assert ContentPart.content_to_string(result.content) =~ "sub-agent"
     end
 
     test "demotes when interrupt_data is nil regardless of middleware (decode-failed path)" do
@@ -687,7 +691,7 @@ defmodule Sagents.StateTest do
       refute result.is_interrupt
       assert result.is_error
       # The "incompatible data" demotion message
-      assert result.content =~ "incompatible"
+      assert ContentPart.content_to_string(result.content) =~ "incompatible"
     end
 
     test "preserves :multiple_interrupts when every sub-interrupt is restorable" do
@@ -844,8 +848,8 @@ defmodule Sagents.StateTest do
       refute result.is_interrupt
       assert result.is_error
       assert is_nil(result.interrupt_data)
-      assert result.content =~ "user did not respond"
-      assert result.content =~ "proceed with their new request"
+      assert ContentPart.content_to_string(result.content) =~ "user did not respond"
+      assert ContentPart.content_to_string(result.content) =~ "proceed with their new request"
     end
 
     test "demotes every interrupt in a tool message with multiple results" do
@@ -918,6 +922,73 @@ defmodule Sagents.StateTest do
       cancelled = State.cancel_pending_interrupts(state)
       assert cancelled.messages == state.messages
       assert is_nil(cancelled.interrupt_data)
+    end
+  end
+
+  describe "demoted tool result content" do
+    alias LangChain.ChatModels.ChatCompletionsFormat
+    alias LangChain.Message.ToolCall
+    alias LangChain.Message.ToolResult
+
+    defp interrupted_state(interrupt_data) do
+      call = ToolCall.new!(%{call_id: "call_1", name: "ask_user", arguments: %{}})
+
+      result =
+        ToolResult.new!(%{
+          tool_call_id: "call_1",
+          name: "ask_user",
+          content: "Waiting...",
+          is_interrupt: true,
+          interrupt_data: interrupt_data
+        })
+
+      State.new!(%{
+        messages: [
+          Message.new_user!("hi"),
+          Message.new_assistant!(%{tool_calls: [call]}),
+          Message.new_tool_result!(%{tool_results: [result]}),
+          Message.new_user!("something else")
+        ]
+      })
+    end
+
+    defp demoted_result(%State{messages: messages}) do
+      %Message{tool_results: [result]} = Enum.find(messages, &(&1.role == :tool))
+      result
+    end
+
+    @demotions [
+      {"process-bound interrupt", :clean_stale_interrupts,
+       %{type: :subagent_hitl, sub_agent_id: "sa-1"}, "sub-agent's work was lost"},
+      {"interrupt with undecodable data", :clean_stale_interrupts, nil, "incompatible"},
+      {"rejected in-flight call", :clean_stale_interrupts,
+       %{in_flight: %{outcomes: %{"call_1" => :rejected}}}, "rejected by a human reviewer"},
+      {"started in-flight call", :clean_stale_interrupts,
+       %{in_flight: %{outcomes: %{"call_1" => :started}}}, "outcome is unknown"},
+      {"unanswered question", :cancel_pending_interrupts,
+       %{type: :ask_user_question, question: "?"}, "user did not respond"},
+      {"halt with a message", :cancel_pending_interrupts,
+       %{type: :halt, message: "Budget exhausted."}, "Tool halted: Budget exhausted."},
+      {"halt without a message", :cancel_pending_interrupts, %{type: :halt, message: ""},
+       "user did not respond"}
+    ]
+
+    for {label, demote_fun, interrupt_data, expected_text} <- @demotions do
+      @demote_fun demote_fun
+      @interrupt_data interrupt_data
+      @expected_text expected_text
+
+      test "#{label} is demoted to ContentPart content that encodes for chat completions" do
+        state = apply(State, @demote_fun, [interrupted_state(@interrupt_data)])
+
+        assert %ToolResult{is_interrupt: false, content: [%ContentPart{type: :text} = part]} =
+                 demoted_result(state)
+
+        assert part.content =~ @expected_text
+
+        encoded = ChatCompletionsFormat.messages_for_api(state.messages)
+        assert Enum.any?(encoded, &match?(%{"tool_call_id" => "call_1"}, &1))
+      end
     end
   end
 

@@ -5,6 +5,7 @@ defmodule Sagents.AgentServerTest do
   alias Sagents.{Agent, AgentServer, State}
   alias LangChain.ChatModels.ChatAnthropic
   alias LangChain.Message
+  alias LangChain.Message.ContentPart
 
   setup :set_mimic_global
   setup :verify_on_exit!
@@ -2305,7 +2306,7 @@ defmodule Sagents.AgentServerTest do
       refute demoted.is_interrupt
       assert demoted.is_error
       assert is_nil(demoted.interrupt_data)
-      assert demoted.content =~ "user did not respond"
+      assert ContentPart.content_to_string(demoted.content) =~ "user did not respond"
 
       # Server-level interrupt_data is cleared.
       info = AgentServer.get_info(agent_id)
