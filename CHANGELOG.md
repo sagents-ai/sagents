@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.20.0
+
+Ability set switching holds up across multi-mode turns. An agent can switch modes more than once in a turn, a tool batch with several switches is settled to one, and the switch result no longer reads like a full tool inventory. Any tool can now request a switch, and the `task` tool can hand work to a sub-agent running in another mode while the parent stays where it is. Interrupts that are set aside no longer break OpenAI-compatible models.
+
+**One breaking change:** `AbilitySetSwitcher` no longer accepts `max_switches_per_run`. A config that still passes it fails in `Agent.new/2`.
+
+### Upgrading from v0.19.x - v0.20.0
+
+- Remove `max_switches_per_run` from every `AbilitySetSwitcher` config. There is no switch budget, and `:max_runs` bounds a run. `Agent.new/2` returns an unknown-option error naming the key until it is removed.
+- The default `switch_mode` result names the new mode instead of listing the tools the switch added. A custom `:switch_message` callback still receives those tools in `info.tools`.
+- Custom execution modes that call `Sagents.Mode.Steps.hint_inactive_tool_calls/2` keep working. It now delegates to `settle_ability_set_batch/2`.
+
+### Added
+- `AbilitySetSwitcher.request_mode_switch/2` returns the state a tool returns to switch modes. A requested switch rebuilds the chain, runs the entering set's `before_model/2`, and publishes the same events and telemetry as a `switch_mode` call. https://github.com/sagents-ai/sagents/pull/232
+- The `task` tool takes an optional `mode` for the `general-purpose` sub-agent. The sub-agent works in that ability set and cannot switch, and the parent stays in its own set. `general_purpose_modes: false` on the SubAgent middleware turns it off. https://github.com/sagents-ai/sagents/pull/232
+- `Sagents.Mode.Steps.settle_ability_set_batch/2` settles a tool batch to one switch. The first switch applies, a later `switch_mode` call gets an error naming it, and a call to a tool of the set being entered is told to retry on the next step. https://github.com/sagents-ai/sagents/pull/232
+- `SubAgent` has `ability_set` and `ability_set_source` (`:requested` or `:inherited`) fields. Both are in `{:subagent_started, metadata}`, and a sub-agent's spans report its own `"sagents.ability_set"`. https://github.com/sagents-ai/sagents/pull/232
+
+### Changed
+- `max_switches_per_run` and the per-run switch count are removed from `AbilitySetSwitcher`. https://github.com/sagents-ai/sagents/pull/232
+- The default `switch_mode` result names the mode and points the model at its tool definitions. The `## Modes` system prompt and the `switch_mode` description tell the model to call `switch_mode` alone. https://github.com/sagents-ai/sagents/pull/232
+
+### Fixed
+- An interrupted tool result that `State.cancel_pending_interrupts/1` or `State.clean_stale_interrupts/2` sets aside keeps its content as a list of `ContentPart`s. It was stored as a plain string, which crashed the next LLM call on `ChatOpenAI` and other OpenAI-compatible models, and every later turn of that conversation. Saved conversations with the string recover when they load. https://github.com/sagents-ai/sagents/pull/233
+
 ## v0.19.2
 
 Agents and sub-agents can now set the failure limits of the chain they run. A new `max_refusal_count` gives refusals their own budget. A refusal is a tool call turned down before it changed anything, such as arguments that fail validation. Strict argument checks, common on Human-in-the-Loop gated calls, can then let the model correct its call without hitting "Exceeded max failure count". Saved state now keeps each tool result's `is_exception` and `is_refusal` flags.
