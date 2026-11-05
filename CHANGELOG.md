@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.20.1
+
+Tools see the right `context.conversation_id` for the whole run. When a tool returned a state delta, the conversation id was cleared from the merged state, so every chain built later in the same run, such as the one after a `switch_mode`, gave its tools `nil`.
+
+No breaking changes, and no code changes are needed to upgrade.
+
+### Fixed
+- `State.merge_states/2` keeps `conversation_id` the way it keeps `agent_id`. It was reset to `nil` by the first tool state delta of a run (from `write_todos`, `switch_mode`, or `AbilitySetSwitcher.request_mode_switch/2`, for example), so tools on a chain built later in that run read `context.conversation_id` as `nil` and later spans lost `gen_ai.conversation.id`. The chain context also uses a `conversation_id` the host put in `tool_context` when the state has none. https://github.com/sagents-ai/sagents/pull/236
+
 ## v0.20.0
 
 Ability set switching holds up across multi-mode turns. An agent can switch modes more than once in a turn, a tool batch with several switches is settled to one, and the switch result no longer reads like a full tool inventory. Any tool can now request a switch, and the `task` tool can hand work to a sub-agent running in another mode while the parent stays where it is. Interrupts that are set aside no longer break OpenAI-compatible models.
