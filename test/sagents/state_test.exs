@@ -146,6 +146,54 @@ defmodule Sagents.StateTest do
     end
   end
 
+  describe "merge_states/2 conversation_id" do
+    test "a delta without one keeps the state's" do
+      state = State.new!(%{conversation_id: "conv-1"})
+
+      assert State.merge_states(state, State.delta(%{metadata: %{a: 1}})).conversation_id ==
+               "conv-1"
+
+      assert State.merge_states(state, %{metadata: %{a: 1}}).conversation_id == "conv-1"
+    end
+
+    test "is taken from the right when the left has none" do
+      assert State.merge_states(State.new!(), State.new!(%{conversation_id: 42})).conversation_id ==
+               42
+    end
+  end
+
+  describe "merge_states/2 field coverage" do
+    # Every field of a fully populated state survives a merge with an empty
+    # delta. A new State field fails here until merge_states/2 handles it.
+    test "an empty delta changes nothing" do
+      state = %State{
+        agent_id: "agent-1",
+        messages: [Message.new_user!("hello")],
+        todos: [%{id: "1", content: "task"}],
+        metadata: %{a: 1},
+        user_request_seq: 3,
+        runtime: %{token: make_ref()},
+        interrupt_data: %{action_requests: []},
+        pause_reason: :rate_limited,
+        conversation_id: "conv-1"
+      }
+
+      fields = State.__schema__(:fields) ++ State.__schema__(:virtual_fields)
+      default = %State{}
+
+      for field <- fields do
+        assert Map.fetch!(state, field) != Map.fetch!(default, field),
+               "populate #{inspect(field)} in this test"
+      end
+
+      merged = State.merge_states(state, State.delta(%{}))
+
+      for field <- fields do
+        assert {field, Map.fetch!(merged, field)} == {field, Map.fetch!(state, field)}
+      end
+    end
+  end
+
   describe "merge_states/2 with map updates" do
     test "a map that does not name the todos leaves them alone" do
       state = State.new!(%{todos: [%{id: "1", content: "task"}]})

@@ -1249,8 +1249,11 @@ defmodule Sagents.Agent do
             # populate `gen_ai.agent.name` and `gen_ai.conversation.id`. They also
             # give tools a supported way to know which agent and conversation they
             # are running in without the caller threading it through tool_context.
+            # A conversation_id the host put in tool_context stands when the
+            # state carries none.
             agent_name: agent.name,
-            conversation_id: state.conversation_id,
+            conversation_id:
+              state.conversation_id || Map.get(agent.tool_context || %{}, :conversation_id),
             # Reserved LangChain key: a flat attribute map applied to every span
             # this agent produces.
             otel_attributes: otel_attributes(agent, active)

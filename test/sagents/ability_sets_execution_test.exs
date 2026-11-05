@@ -550,6 +550,22 @@ defmodule Sagents.AbilitySetsExecutionTest do
 
       assert_received {:tool_ran, "whoami", %{ability_sets: %{active: "devices"}}}
     end
+
+    test "a tool on the chain built after the switch reads the conversation_id", %{
+      agent: agent
+    } do
+      expect_responses([
+        tool_calls_message([switch_call("s1", "devices")]),
+        tool_calls_message([{"c1", "whoami", %{}}]),
+        Message.new_assistant!("Done")
+      ])
+
+      assert {:ok, final_state} =
+               Agent.execute(agent, %{state() | conversation_id: "conv-42"})
+
+      assert_received {:tool_ran, "whoami", %{conversation_id: "conv-42"}}
+      assert final_state.conversation_id == "conv-42"
+    end
   end
 
   describe "one switch per tool batch" do

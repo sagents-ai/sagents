@@ -281,6 +281,8 @@ defmodule Sagents.State do
     Build deltas with `delta/1`, which leaves them `nil` unless given
   - **metadata**: Deep merges maps
   - **user_request_seq**: The larger of the two
+  - **agent_id**, **conversation_id**: The left's, or the right's when the
+    left has none
 
   ## Examples
 
@@ -302,7 +304,10 @@ defmodule Sagents.State do
       user_request_seq: max(left.user_request_seq || 0, right.user_request_seq || 0),
       runtime: merge_runtime(left.runtime, right.runtime),
       interrupt_data: right.interrupt_data || left.interrupt_data,
-      pause_reason: right.pause_reason || left.pause_reason
+      pause_reason: right.pause_reason || left.pause_reason,
+      # Identity, like agent_id: a tool's delta never carries it, so the
+      # state's own value is kept.
+      conversation_id: left.conversation_id || right.conversation_id
     }
   end
 

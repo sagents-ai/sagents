@@ -93,6 +93,19 @@ defmodule Sagents.AgentTraceContextTest do
       assert chain_context(bare_agent(), State.new!()).conversation_id == nil
     end
 
+    test "falls back to the tool_context's when the state has none" do
+      agent = bare_agent(%{tool_context: %{conversation_id: "from-host"}})
+
+      assert chain_context(agent, State.new!()).conversation_id == "from-host"
+    end
+
+    test "the state's wins over the tool_context's" do
+      agent = bare_agent(%{tool_context: %{conversation_id: "from-host"}})
+
+      assert chain_context(agent, State.new!(%{conversation_id: "conv-1"})).conversation_id ==
+               "conv-1"
+    end
+
     # Virtual on purpose: AgentServer re-supplies it per execute, so a persisted copy
     # could only ever disagree with the server that restored it.
     test "is not persisted" do
