@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.21.0
+
+Generated conversation lists show the most recently active conversation first. The persistence generator adds a `last_message_at` column to conversations, moves it forward every time a display message is added, and sorts `list_conversations/2` by it. The generated code sorted by `updated_at`, which messages never touch because they live in their own table, so the list came out in roughly creation order.
+
+**No breaking changes.** The library's own behavior is unchanged. Only the code `mix sagents.setup` generates is different, so an existing app keeps working exactly as before after the dependency bump. Adopting the new ordering is opt-in and needs a database migration that fills in existing rows.
+
+### Upgrading from v0.20.x - v0.21.0
+
+Read
+[MIGRATION_PROMPT_v0.20.x_TO_v0.21.0.md](https://github.com/sagents-ai/sagents/blob/main/MIGRATION_PROMPT_v0.20.x_TO_v0.21.0.md).
+It is written to be handed to a coding agent, and every step comes with the searches that find the code it affects.
+
+- **The migration fills in existing rows.** Each conversation gets the `inserted_at` of its latest display message, or its own `inserted_at` when it has none. The guide gives two ways to do it: one migration that does everything, or, for projects that keep data changes out of schema migrations, a schema migration, a separate batched fill-in, and a later `NOT NULL` migration. Choose the one that fits your project's conventions.
+- **Switch the sort only after the fill-in is done.** PostgreSQL sorts NULLs first in a descending order, so sorting by `last_message_at` while rows are still unfilled puts every old conversation at the top. The guide gives a temporary sort to use until then.
+- **Your generated `Conversation` schema and conversations context** need the field, the transaction version of `append_display_message/3`, and the new `order_by`. Re-running `mix sagents.setup` and diffing works too; delete the full-schema migration it writes.
+- **Check your own code for `updated_at` used to mean "last active"**, such as cleanup jobs for stale conversations or a "last message" label in a list.
+
+### Added
+- The generated `Conversation` schema has a `last_message_at` field, `NOT NULL` in the generated migration. `create_changeset/2` sets it, and it is never cast from attrs. The owner index is `[owner_field, :last_message_at]`, or `[:last_message_at]` with `--owner-type none`. https://github.com/sagents-ai/sagents/pull/240
+
+### Changed
+- The generated `append_display_message/3` saves the message and sets the conversation's `last_message_at` to the message's `inserted_at` in one transaction. The update goes through `scope_query/2` and only moves the time forward, and the return values are unchanged. https://github.com/sagents-ai/sagents/pull/240
+- The generated `list_conversations/2` orders by `last_message_at`, newest first, and then by `inserted_at` when two conversations share a time. Renaming a conversation or editing its metadata no longer changes its place in the list. https://github.com/sagents-ai/sagents/pull/240
+- The generated migration no longer creates an index on `conversations.updated_at`. https://github.com/sagents-ai/sagents/pull/240
+- `docs/conversations_architecture.md` and `docs/persistence.md` describe `last_message_at`. The stale-conversation cleanup example filters on it, and an example that passed an `order_by:` option `list_conversations/2` ignores is fixed. https://github.com/sagents-ai/sagents/pull/240
+
 ## v0.20.1
 
 Tools see the right `context.conversation_id` for the whole run. When a tool returned a state delta, the conversation id was cleared from the merged state, so every chain built later in the same run, such as the one after a `switch_mode`, gave its tools `nil`.
