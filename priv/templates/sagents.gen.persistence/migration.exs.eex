@@ -9,13 +9,15 @@ defmodule <%= @repo %>.Migrations.Create<%= Macro.camelize(@table_prefix) %>Pers
 <% end %>      add :title, :string
       add :version, :integer, default: 1, null: false
       add :metadata, :map, default: %{}
+      add :last_message_at, :utc_datetime_usec, null: false
 
       timestamps(type: :utc_datetime_usec)
     end
 
-<%= if @owner_type != "none" do %>    create index(:<%= @table_prefix %>conversations, [:<%= @owner_field %>])
-<% end %>    create index(:<%= @table_prefix %>conversations, [:updated_at])
-
+    # Serves the "recent first" listing, and owner-only lookups as well.
+<%= if @owner_type != "none" do %>    create index(:<%= @table_prefix %>conversations, [:<%= @owner_field %>, :last_message_at])
+<% else %>    create index(:<%= @table_prefix %>conversations, [:last_message_at])
+<% end %>
     # Agent states table (one per conversation)
     create table(:<%= @table_prefix %>agent_states, primary_key: false) do
       add :id, :binary_id, primary_key: true

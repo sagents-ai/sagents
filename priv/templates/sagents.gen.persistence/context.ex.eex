@@ -72,7 +72,13 @@ defmodule <%= @context_module %> do
   end
 
   @doc """
-  Lists all conversations accessible within the given scope.
+  Lists all conversations accessible within the given scope, most recent
+  first.
+
+  "Most recent" is the conversation's latest display message (`last_message_at`),
+  so adding a message moves a conversation to the top. Renaming it or editing
+  its metadata does not. Because rows move as messages arrive, paging with
+  `:offset` while conversations are active can repeat or skip a row.
 
   ## Options
 
@@ -85,7 +91,7 @@ defmodule <%= @context_module %> do
 
     Conversation
     |> scope_query(scope)
-    |> order_by([c], desc: c.updated_at)
+    |> order_by([c], desc: c.last_message_at, desc: c.id)
     |> limit(^limit)
     |> offset(^offset)
     |> Repo.all()
@@ -228,13 +234,51 @@ defmodule <%= @context_module %> do
   Appends a display message to a conversation, filtered by scope.
 
   Verifies the conversation belongs to `scope` before inserting.
+
+  Also moves the conversation's `last_message_at` to the new message's
+  `inserted_at`, which is what `list_conversations/2` orders by. The message
+  and the timestamp are written in one transaction: if the message fails to
+  save, the conversation does not move.
+
+  Returns `{:ok, message}`, `{:error, changeset}`, or `{:error, :not_found}`.
   """
   def append_display_message(%Scope{} = scope, conversation_id, attrs) do
     with :ok <- authorize_conversation(scope, conversation_id) do
-      conversation_id
-      |> DisplayMessage.create_changeset(attrs)
-      |> Repo.insert()
+      Repo.transaction(fn ->
+        with {:ok, message} <-
+               conversation_id
+               |> DisplayMessage.create_changeset(attrs)
+               |> Repo.insert(),
+             {1, _returned} <-
+               touch_last_message_at(scope, conversation_id, message.inserted_at) do
+          message
+        else
+          {:error, changeset} -> Repo.rollback(changeset)
+          {0, _returned} -> Repo.rollback(:not_found)
+        end
+      end)
     end
+  end
+
+  # Moves `last_message_at` forward to `at`, never back. Messages for one
+  # conversation can be written from more than one process, and their
+  # transactions can commit out of order.
+  #
+  # Filtered by scope as well as id even though the caller has authorized the
+  # conversation: a bulk update keyed only on an id is the one place a mistake
+  # could write across owners. `update_all` leaves `updated_at` alone, so "last
+  # message" and "row last changed" stay separate.
+  defp touch_last_message_at(%Scope{} = scope, conversation_id, at) do
+    Conversation
+    |> scope_query(scope)
+    |> where([c], c.id == ^conversation_id)
+    |> update([c],
+      set: [
+        last_message_at:
+          fragment("GREATEST(?, ?)", c.last_message_at, type(^at, :utc_datetime_usec))
+      ]
+    )
+    |> Repo.update_all([])
   end
 
   @doc """

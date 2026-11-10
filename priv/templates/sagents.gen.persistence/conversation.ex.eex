@@ -3,6 +3,10 @@ defmodule <%= @context_module %>.Conversation do
   Schema for conversations.
 
   A conversation represents a series of interactions between a user and an AI agent.
+
+  `last_message_at` is the time of the conversation's latest display message,
+  or its creation time when it has none. It is what "most recent first"
+  listings sort by. The system sets it; it is never cast from attrs.
   """
 
   use Ecto.Schema
@@ -24,6 +28,11 @@ defmodule <%= @context_module %>.Conversation do
     field :version, :integer, default: 1
     field :metadata, :map, default: %{}
 
+    # When the latest message was added; the "recent" sort. Kept apart from
+    # `updated_at`, which messages never touch (they live in their own table)
+    # and which renaming or other row edits move.
+    field :last_message_at, :utc_datetime_usec
+
     timestamps(type: :utc_datetime_usec)
   end
 
@@ -32,6 +41,7 @@ defmodule <%= @context_module %>.Conversation do
     %Conversation{}
     |> cast(attrs, [:title, :version, :metadata])
     |> put_change(:<%= @owner_field %>, owner_id)
+    |> put_change(:last_message_at, DateTime.utc_now())
     |> common_validations()
   end
 

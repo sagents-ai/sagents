@@ -45,10 +45,10 @@ defmodule Sagents.TemplatesTest do
 
   # The persistence templates read their bindings as assigns, unlike the
   # top-level ones which take bare variables.
-  defp render_persistence(name) do
+  defp render_persistence(name, overrides \\ []) do
     EEx.eval_file(
       Path.join([__DIR__, "..", "..", "priv", "templates", "sagents.gen.persistence", name]),
-      assigns: @bindings
+      assigns: Keyword.merge(@bindings, overrides)
     )
   end
 
@@ -347,6 +347,48 @@ defmodule Sagents.TemplatesTest do
       assert source =~ "[:id, :conversation_id, :seq, :classification, :inserted_at]"
       assert source =~ "def trailing_answer_row_ids(%Scope{} = scope, conversation_id, seq)"
       assert source =~ "def user_requests_by_seq(%Scope{} = scope, conversation_id)"
+    end
+
+    test "the migration gives conversations an indexed last_message_at" do
+      source = render_persistence("migration.exs.eex")
+
+      assert source =~ "add :last_message_at, :utc_datetime_usec, null: false"
+      assert source =~ "create index(:sagents_conversations, [:user_id, :last_message_at])"
+      refute source =~ "create index(:sagents_conversations, [:updated_at])"
+      refute source =~ "create index(:sagents_conversations, [:user_id])"
+    end
+
+    test "without an owner, the migration indexes last_message_at alone" do
+      source = render_persistence("migration.exs.eex", owner_type: "none")
+
+      assert {:ok, _ast} = Code.string_to_quoted(source)
+      assert source =~ "create index(:sagents_conversations, [:last_message_at])"
+      refute source =~ ":user_id"
+    end
+
+    test "the conversation schema sets last_message_at on create and never casts it" do
+      source = render_persistence("conversation.ex.eex")
+
+      assert source =~ "field :last_message_at, :utc_datetime_usec"
+      assert source =~ "put_change(:last_message_at, DateTime.utc_now())"
+
+      for cast_list <- Regex.scan(~r/cast\(attrs, \[([^\]]*)\]\)/, source) do
+        refute List.last(cast_list) =~ "last_message_at"
+      end
+    end
+
+    test "the context lists by latest message and moves it when a message is added" do
+      source = render_persistence("context.ex.eex")
+
+      assert source =~ "order_by([c], desc: c.last_message_at, desc: c.id)"
+      refute source =~ "desc: c.updated_at"
+
+      # The message and the conversation's timestamp commit together, and the
+      # timestamp only moves forward.
+      assert source =~ "touch_last_message_at(scope, conversation_id, message.inserted_at)"
+      assert source =~ "defp touch_last_message_at(%Scope{} = scope, conversation_id, at)"
+      assert source =~ ~s|fragment("GREATEST(?, ?)", c.last_message_at|
+      assert source =~ "{0, _returned} -> Repo.rollback(:not_found)"
     end
 
     test "the schema accepts content carrying keys beyond the per-type ones" do
