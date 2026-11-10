@@ -177,6 +177,7 @@ erDiagram
         string title
         integer version
         jsonb metadata
+        timestamp last_message_at "latest display message"
         timestamp inserted_at
         timestamp updated_at
     }
@@ -226,6 +227,7 @@ schema "conversations" do
 
   field :title, :string
   field :metadata, :map
+  field :last_message_at, :utc_datetime_usec  # latest display message; the "recent" sort
   timestamps()
 end
 ```
@@ -389,7 +391,7 @@ The context uses your scope to enforce authorization:
 def list_conversations(%Scope{type: :user, id: user_id}) do
   Conversation
   |> where([c], c.user_id == ^user_id)
-  |> order_by([c], desc: c.updated_at)
+  |> order_by([c], desc: c.last_message_at)
   |> Repo.all()
 end
 
@@ -406,13 +408,17 @@ This ensures users can only access their own conversations.
 
 ### Showing Conversation List
 
+Conversations come back most recent first, by their latest display message
+(`last_message_at`). Adding a message to a conversation moves it to the top;
+renaming it or editing its metadata does not.
+
 ```elixir
 # Load conversations with metadata (no agent state or messages)
-conversations = Conversations.list_conversations(scope, order_by: [desc: :updated_at])
+conversations = Conversations.list_conversations(scope, limit: 20)
 
 # conversations: [
-#   %Conversation{id: "...", title: "Chat 1", updated_at: ~U[...], user_id: 123},
-#   %Conversation{id: "...", title: "Chat 2", updated_at: ~U[...], user_id: 123}
+#   %Conversation{id: "...", title: "Chat 2", last_message_at: ~U[...], user_id: 123},
+#   %Conversation{id: "...", title: "Chat 1", last_message_at: ~U[...], user_id: 123}
 # ]
 ```
 

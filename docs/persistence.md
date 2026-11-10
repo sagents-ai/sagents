@@ -111,11 +111,14 @@ defmodule MyApp.Conversations.Conversation do
     field :title, :string
     field :version, :integer, default: 1
     field :metadata, :map, default: %{}
+    field :last_message_at, :utc_datetime_usec
 
     timestamps(type: :utc_datetime_usec)
   end
 end
 ```
+
+`last_message_at` is the time of the conversation's latest display message, or its creation time when it has none. `create_changeset/2` sets it and `append_display_message/3` moves it forward; it is never cast from attrs. "Most recent first" listings sort by it rather than `updated_at`, which messages never touch (they live in their own table) and which renaming or other row edits move.
 
 Tenant isolation is enforced through the owner foreign key (`user_id` by default) and the context's `scope_query/2` helper, not through a generic `:scope` column.
 
@@ -214,7 +217,7 @@ defmodule MyApp.Conversations do
   def update_conversation(conversation, attrs)
   def delete_conversation(conversation)
   def delete_conversation(scope, id)
-  def list_conversations(scope, opts \\ [])
+  def list_conversations(scope, opts \\ [])   # newest last_message_at first
   def search_messages(scope, term)
 
   # Agent state
@@ -223,7 +226,7 @@ defmodule MyApp.Conversations do
   def load_todos(scope, conversation_id)
 
   # Display messages
-  def append_display_message(scope, conversation_id, attrs)
+  def append_display_message(scope, conversation_id, attrs)   # also sets last_message_at
   def append_text_message(scope, conversation_id, message_type, text)
   def load_display_messages(scope, conversation_id, opts \\ [])
 
@@ -567,7 +570,7 @@ def cleanup_old_conversations do
   cutoff = DateTime.add(DateTime.utc_now(), -30, :day)
 
   MyApp.Conversations.Conversation
-  |> where([c], c.updated_at < ^cutoff)
+  |> where([c], c.last_message_at < ^cutoff)
   |> Repo.delete_all()
 end
 ```
