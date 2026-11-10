@@ -91,7 +91,7 @@ defmodule <%= @context_module %> do
 
     Conversation
     |> scope_query(scope)
-    |> order_by([c], desc: c.last_message_at, desc: c.id)
+    |> order_by([c], desc: c.last_message_at, desc: c.inserted_at)
     |> limit(^limit)
     |> offset(^offset)
     |> Repo.all()

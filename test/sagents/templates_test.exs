@@ -380,7 +380,7 @@ defmodule Sagents.TemplatesTest do
     test "the context lists by latest message and moves it when a message is added" do
       source = render_persistence("context.ex.eex")
 
-      assert source =~ "order_by([c], desc: c.last_message_at, desc: c.id)"
+      assert source =~ "order_by([c], desc: c.last_message_at, desc: c.inserted_at)"
       refute source =~ "desc: c.updated_at"
 
       # The message and the conversation's timestamp commit together, and the
