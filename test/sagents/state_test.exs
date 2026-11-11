@@ -558,6 +558,31 @@ defmodule Sagents.StateTest do
     end
   end
 
+  describe "find_tool_result/2" do
+    alias LangChain.Message.ToolResult
+
+    test "finds a result by tool_call_id within a multi-result message" do
+      first = ToolResult.new!(%{tool_call_id: "call_1", name: "one", content: "a"})
+      second = ToolResult.new!(%{tool_call_id: "call_2", name: "two", content: "b"})
+
+      state =
+        State.new!(%{
+          messages: [
+            Message.new_user!("hi"),
+            Message.new_tool_result!(%{content: nil, tool_results: [first, second]})
+          ]
+        })
+
+      assert %ToolResult{name: "two"} = State.find_tool_result(state, "call_2")
+    end
+
+    test "returns nil when no result has the id" do
+      state = State.new!(%{messages: [Message.new_user!("hi")]})
+
+      assert State.find_tool_result(state, "call_missing") == nil
+    end
+  end
+
   describe "clean_stale_interrupts/1" do
     alias LangChain.Message.ToolResult
 

@@ -2110,6 +2110,18 @@ defmodule Sagents.SubAgentTest do
       assert Enum.any?(result, &match?(%MiddlewareEntry{module: TodoList}, &1))
     end
 
+    test "is filtered when the tool has a configured name" do
+      {:ok, agent} =
+        Agent.new(%{
+          model: test_model(),
+          middleware: [TodoList, {AskUserQuestion, tool_name: "request_user_choice"}]
+        })
+
+      result = SubAgent.subagent_middleware_stack(agent.middleware)
+
+      refute Enum.any?(result, &match?(%MiddlewareEntry{module: AskUserQuestion}, &1))
+    end
+
     test "is still filtered when block_middleware names other modules" do
       middleware = [TodoList, AskUserQuestion, FileSystem]
 

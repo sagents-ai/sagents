@@ -654,6 +654,89 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
       refute tool_result.is_interrupt
     end
 
+    test "the answered result keeps the placeholder's name and display text", %{
+      config: config,
+      question_data: question_data
+    } do
+      # The interrupt map has no tool name; the placeholder is the only record
+      # of which tool asked.
+      placeholder =
+        LangChain.Message.ToolResult.new!(%{
+          tool_call_id: "call_123",
+          content: "Waiting for user response...",
+          name: "request_user_choice",
+          display_text: "Choosing",
+          is_interrupt: true,
+          interrupt_data: question_data
+        })
+
+      state =
+        State.new!(%{
+          messages: [
+            LangChain.Message.new_tool_result!(%{content: nil, tool_results: [placeholder]})
+          ],
+          interrupt_data: question_data
+        })
+
+      response = %{type: :answer, selected: ["postgresql"]}
+
+      assert {:ok, updated_state} =
+               AskUserQuestion.handle_resume(nil, state, response, config, [])
+
+      assert [%{tool_results: [tool_result]}] = updated_state.messages
+      assert tool_result.name == "request_user_choice"
+      assert tool_result.display_text == "Choosing"
+      assert tool_result.is_interrupt == false
+      assert tool_result.interrupt_data == nil
+      assert content_text(tool_result.content) =~ "postgresql"
+
+      assert tool_result.processed_content == %{
+               type: :answer,
+               selected: [%{label: "PostgreSQL", value: "postgresql"}],
+               other_text: nil
+             }
+    end
+
+    test "each answered result of a multiple interrupt keeps its own placeholder's name", %{
+      config: config,
+      question_data: question_data
+    } do
+      q1 = %{question_data | tool_call_id: "call_a"}
+      q2 = %{question_data | tool_call_id: "call_b"}
+
+      placeholders =
+        Enum.map([{"call_a", "ask_user", q1}, {"call_b", "request_user_choice", q2}], fn
+          {id, name, data} ->
+            LangChain.Message.ToolResult.new!(%{
+              tool_call_id: id,
+              content: "Waiting for user response...",
+              name: name,
+              is_interrupt: true,
+              interrupt_data: data
+            })
+        end)
+
+      state =
+        State.new!(%{
+          messages: [
+            LangChain.Message.new_tool_result!(%{content: nil, tool_results: placeholders})
+          ],
+          interrupt_data: %{type: :multiple_interrupts, interrupts: [q1, q2]}
+        })
+
+      responses = [
+        %{tool_call_id: "call_a", type: :answer, selected: ["postgresql"]},
+        %{tool_call_id: "call_b", type: :answer, selected: ["mongodb"]}
+      ]
+
+      assert {:ok, updated_state} =
+               AskUserQuestion.handle_resume(nil, state, responses, config, [])
+
+      assert [%{tool_results: [first, second]}] = updated_state.messages
+      assert %{name: "ask_user", is_interrupt: false} = first
+      assert %{name: "request_user_choice", is_interrupt: false} = second
+    end
+
     test "returns {:cont, state} for non-ask_user interrupts", %{config: config} do
       state = State.new!(%{interrupt_data: %{action_requests: []}})
 
@@ -666,6 +749,332 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
 
       assert {:error, _reason} =
                AskUserQuestion.handle_resume(nil, state, response, config, [])
+    end
+  end
+
+  describe "init/1 tool surface options" do
+    test "defaults reproduce the ask_user tool" do
+      {:ok, config} = AskUserQuestion.init([])
+      [tool] = AskUserQuestion.tools(config)
+
+      assert tool.name == "ask_user"
+      assert tool.display_text == "Asking a question"
+      assert tool.description =~ "Ask the user a structured question"
+      assert AskUserQuestion.system_prompt(config) =~ "## ask_user Tool"
+    end
+
+    test "tool_name, description and display_text configure the tool" do
+      {:ok, config} =
+        AskUserQuestion.init(
+          tool_name: "request_user_choice",
+          description: "Offer the user a choice.",
+          display_text: "Choosing"
+        )
+
+      [tool] = AskUserQuestion.tools(config)
+      assert tool.name == "request_user_choice"
+      assert tool.description == "Offer the user a choice."
+      assert tool.display_text == "Choosing"
+    end
+
+    test "the built-in prompt names the configured tool" do
+      {:ok, config} = AskUserQuestion.init(tool_name: "request_user_choice")
+      prompt = AskUserQuestion.system_prompt(config)
+
+      assert prompt =~ "## request_user_choice Tool"
+      assert prompt =~ "You have an `request_user_choice` tool"
+      assert prompt =~ "### When to use request_user_choice:"
+      assert prompt =~ "### When NOT to use request_user_choice:"
+      refute prompt =~ "ask_user"
+    end
+
+    test "a system_prompt string is used verbatim" do
+      contract = "<user_choice>\nUse request_user_choice to offer choices.\n</user_choice>"
+      {:ok, config} = AskUserQuestion.init(system_prompt: contract)
+
+      assert AskUserQuestion.system_prompt(config) == contract
+    end
+
+    test "system_prompt false or empty contributes nothing" do
+      for value <- [false, ""] do
+        {:ok, config} = AskUserQuestion.init(system_prompt: value)
+        assert AskUserQuestion.system_prompt(config) == ""
+      end
+    end
+
+    test "rejects an invalid tool_name" do
+      for name <- ["has space", String.duplicate("a", 65), "", :ask, nil] do
+        assert {:error, message} = AskUserQuestion.init(tool_name: name)
+        assert message =~ "tool_name"
+      end
+    end
+
+    test "rejects a non-string description or display_text" do
+      assert {:error, message} = AskUserQuestion.init(description: nil)
+      assert message =~ "description"
+
+      assert {:error, message} = AskUserQuestion.init(display_text: "")
+      assert message =~ "display_text"
+    end
+
+    test "rejects a system_prompt that is not a string or false" do
+      assert {:error, message} = AskUserQuestion.init(system_prompt: true)
+      assert message =~ "system_prompt"
+    end
+
+    test "rejects unknown option keys" do
+      assert {:error, message} = AskUserQuestion.init(max_option: 4)
+      assert message =~ "max_option"
+    end
+
+    test "accepts :id and the keys the agent injects" do
+      assert {:ok, _config} =
+               AskUserQuestion.init(
+                 id: "choice",
+                 agent_id: "agent-1",
+                 model: nil,
+                 filesystem_scope: nil
+               )
+    end
+
+    test "two instances with their own ids and names give distinct tools and prompts" do
+      {:ok, agent} =
+        Agent.new(
+          %{
+            model: Sagents.TestingHelpers.mock_model(),
+            middleware: [
+              {AskUserQuestion, id: "ask", response_types: [:freeform]},
+              {AskUserQuestion,
+               id: "choice", tool_name: "request_user_choice", response_types: [:single_select]}
+            ]
+          },
+          replace_default_middleware: true
+        )
+
+      entries = Enum.filter(agent.middleware, &(&1.module == AskUserQuestion))
+      tool_names = entries |> Enum.flat_map(&Middleware.get_tools/1) |> Enum.map(& &1.name)
+      prompts = Enum.map(entries, &Middleware.get_system_prompt/1)
+
+      assert Enum.sort(tool_names) == ["ask_user", "request_user_choice"]
+      assert Enum.any?(prompts, &(&1 =~ "## ask_user Tool"))
+      assert Enum.any?(prompts, &(&1 =~ "## request_user_choice Tool"))
+    end
+  end
+
+  describe "option count bounds" do
+    defp options_args(count) do
+      %{
+        "question" => "Which one?",
+        "response_type" => "single_select",
+        "options" => Enum.map(1..count, &%{"label" => "Option #{&1}"})
+      }
+    end
+
+    defp run_tool(config, args) do
+      [tool] = AskUserQuestion.tools(config)
+      tool.function.(args, %{})
+    end
+
+    test "defaults put 2 and 10 in the schema and suggest 2-5 in the prompt" do
+      {:ok, config} = AskUserQuestion.init([])
+      [tool] = AskUserQuestion.tools(config)
+      options = tool.parameters_schema.properties.options
+
+      assert options.minItems == 2
+      assert options.maxItems == 10
+      assert options.description =~ "Must have 2-10 items"
+      assert AskUserQuestion.system_prompt(config) =~ "Provide 2-5"
+    end
+
+    test "configured bounds reach the schema, the validator and the prompt" do
+      {:ok, config} = AskUserQuestion.init(min_options: 2, max_options: 4)
+      [tool] = AskUserQuestion.tools(config)
+      options = tool.parameters_schema.properties.options
+
+      assert options.minItems == 2
+      assert options.maxItems == 4
+      assert options.description =~ "Must have 2-4 items"
+
+      prompt = AskUserQuestion.system_prompt(config)
+      assert prompt =~ "Provide 2-4"
+      refute prompt =~ "2-5"
+
+      assert {:interrupt, _message, %{options: options}} = run_tool(config, options_args(4))
+      assert length(options) == 4
+
+      assert {:error, message} = run_tool(config, options_args(5))
+      assert message =~ "at most 4 options"
+    end
+
+    test "a minimum above the suggested count is suggested as is" do
+      {:ok, config} = AskUserQuestion.init(min_options: 6, max_options: 6)
+      prompt = AskUserQuestion.system_prompt(config)
+
+      assert prompt =~ "Provide 6 clear, distinct options"
+      assert {:error, message} = run_tool(config, options_args(5))
+      assert message =~ "at least 6 options"
+    end
+
+    test "rejects invalid bounds" do
+      for opts <- [
+            [min_options: 1],
+            [min_options: 5, max_options: 4],
+            [max_options: "4"],
+            [min_options: 2.0]
+          ] do
+        assert {:error, message} = AskUserQuestion.init(opts)
+        assert message =~ "min_options and max_options"
+      end
+    end
+  end
+
+  describe "slim schema options" do
+    defp pick_one_config(extra \\ []) do
+      {:ok, config} =
+        AskUserQuestion.init(
+          [
+            tool_name: "request_user_choice",
+            response_types: [:single_select],
+            min_options: 2,
+            max_options: 4,
+            option_values: false,
+            context_field: false,
+            allow_other: true,
+            allow_cancel: true
+          ] ++ extra
+        )
+
+      config
+    end
+
+    defp call_tool(config, args) do
+      [tool] = AskUserQuestion.tools(config)
+      tool.function.(args, %{})
+    end
+
+    test "option_values: false drops value from the schema and ignores a sent value" do
+      {:ok, config} = AskUserQuestion.init(option_values: false)
+      [tool] = AskUserQuestion.tools(config)
+      item = tool.parameters_schema.properties.options.items
+
+      assert Map.keys(item.properties) |> Enum.sort() == [:description, :label]
+
+      args = single_select_args(%{})
+
+      assert {:interrupt, _message, %{options: options}} = call_tool(config, args)
+
+      assert [
+               %{label: "PostgreSQL", value: "PostgreSQL"},
+               %{label: "MongoDB", value: "MongoDB"}
+             ] = options
+    end
+
+    test "option_values: false resumes with the label as the answer" do
+      config = pick_one_config()
+
+      {:interrupt, _message, question_data} =
+        call_tool(config, %{
+          "question" => "Which database?",
+          "options" => [
+            %{"label" => "PostgreSQL", "value" => "pg"},
+            %{"label" => "MongoDB"}
+          ]
+        })
+
+      assert {:ok, "User selected: PostgreSQL"} =
+               AskUserQuestion.process_response(
+                 %{type: :answer, selected: ["PostgreSQL"]},
+                 question_data
+               )
+    end
+
+    test "context_field: false drops context from the schema, the data and the prompt" do
+      {:ok, config} = AskUserQuestion.init(context_field: false)
+      [tool] = AskUserQuestion.tools(config)
+
+      refute Map.has_key?(tool.parameters_schema.properties, :context)
+      refute AskUserQuestion.system_prompt(config) =~ "Include relevant context"
+
+      assert {:interrupt, _message, %{context: nil}} =
+               call_tool(config, single_select_args(%{"context" => "Background"}))
+    end
+
+    test "context is kept by default" do
+      {:ok, config} = AskUserQuestion.init([])
+      [tool] = AskUserQuestion.tools(config)
+
+      assert Map.has_key?(tool.parameters_schema.properties, :context)
+      assert AskUserQuestion.system_prompt(config) =~ "Include relevant context"
+
+      assert {:interrupt, _message, %{context: "Background"}} =
+               call_tool(config, single_select_args(%{"context" => "Background"}))
+    end
+
+    test "rejects non-boolean option_values and context_field" do
+      assert {:error, message} = AskUserQuestion.init(option_values: nil)
+      assert message =~ "option_values"
+
+      assert {:error, message} = AskUserQuestion.init(context_field: "no")
+      assert message =~ "context_field"
+    end
+
+    test "a single response type is inferred and left out of the schema" do
+      {:ok, config} = AskUserQuestion.init(response_types: [:single_select])
+      [tool] = AskUserQuestion.tools(config)
+
+      refute Map.has_key?(tool.parameters_schema.properties, :response_type)
+      assert tool.parameters_schema.required == ["question"]
+
+      args = Map.delete(single_select_args(%{}), "response_type")
+
+      assert {:interrupt, _message, %{response_type: :single_select}} = call_tool(config, args)
+    end
+
+    test "a sent response_type is still accepted when it names the single type" do
+      {:ok, config} = AskUserQuestion.init(response_types: [:single_select])
+
+      assert {:interrupt, _message, %{response_type: :single_select}} =
+               call_tool(config, single_select_args(%{}))
+
+      assert {:error, message} =
+               call_tool(config, single_select_args(%{"response_type" => "multi_select"}))
+
+      assert message =~ "not enabled"
+    end
+
+    test "the prompt for a single type does not name response types" do
+      {:ok, config} = AskUserQuestion.init(response_types: [:single_select])
+      prompt = AskUserQuestion.system_prompt(config)
+
+      refute prompt =~ "Response types"
+      refute prompt =~ "single_select"
+      assert prompt =~ "Use when the user should pick exactly one option from a list."
+    end
+
+    test "with two response types the field stays required" do
+      {:ok, config} = AskUserQuestion.init(response_types: [:single_select, :freeform])
+      [tool] = AskUserQuestion.tools(config)
+
+      assert Map.has_key?(tool.parameters_schema.properties, :response_type)
+      assert tool.parameters_schema.required == ["question", "response_type"]
+
+      args = Map.delete(single_select_args(%{}), "response_type")
+      assert {:error, "Missing required field: response_type"} = call_tool(config, args)
+    end
+
+    test "a full pick-one configuration has only question and options" do
+      config = pick_one_config()
+      [tool] = AskUserQuestion.tools(config)
+      schema = tool.parameters_schema
+
+      assert tool.name == "request_user_choice"
+      assert Map.keys(schema.properties) |> Enum.sort() == [:options, :question]
+      assert schema.required == ["question"]
+
+      assert Map.keys(schema.properties.options.items.properties) |> Enum.sort() ==
+               [:description, :label]
+
+      assert schema.properties.options.maxItems == 4
     end
   end
 

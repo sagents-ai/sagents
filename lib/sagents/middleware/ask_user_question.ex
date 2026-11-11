@@ -2,9 +2,10 @@ defmodule Sagents.Middleware.AskUserQuestion do
   @moduledoc """
   Middleware that gives agents a structured way to ask the user questions.
 
-  Provides an `ask_user` tool that triggers the existing interrupt/resume lifecycle
-  with typed question and response data. This enables UIs to render appropriate
-  controls (radio buttons, checkboxes, text inputs) based on the question type.
+  Provides an `ask_user` tool (renamed with `:tool_name`) that triggers the
+  interrupt/resume lifecycle with typed question and response data. This enables
+  UIs to render appropriate controls (radio buttons, checkboxes, text inputs)
+  based on the question type.
 
   ## Configuration
 
@@ -22,6 +23,62 @@ defmodule Sagents.Middleware.AskUserQuestion do
 
       # User must always answer (never cancel); always offer an "Other" input
       {Sagents.Middleware.AskUserQuestion, allow_cancel: false, allow_other: true}
+
+  ### Options
+
+  - `:response_types` - Enabled response types (default: all three). With
+    exactly one type enabled, `response_type` is left out of the tool schema
+    and inferred. A `response_type` the LLM sends anyway is still accepted when
+    it names the enabled type.
+  - `:allow_other` / `:allow_cancel` - Force the flag for every question (see
+    above).
+  - `:tool_name` - The tool's name (default: `"ask_user"`). 1-64 letters,
+    digits, underscores or hyphens.
+  - `:description` - The tool description sent to the LLM, used verbatim.
+  - `:display_text` - The tool's display text (default: `"Asking a question"`).
+  - `:system_prompt` - `nil` (default) for the built-in prompt section, a
+    string to use verbatim as the section, or `false` for no section.
+  - `:min_options` / `:max_options` - How many options a select question must
+    have (default: 2 and 10). Enforced when the tool runs and sent in the
+    schema as `minItems`/`maxItems`. The built-in prompt suggests from the
+    minimum up to at most 5.
+  - `:option_values` - When `false`, options have no `value` field and every
+    option's value is its label (default: `true`).
+  - `:context_field` - When `false`, the tool has no `context` argument and
+    the interrupt's `:context` is `nil` (default: `true`).
+
+  Unknown options are rejected.
+
+  ## Customizing the tool
+
+  The options above configure everything the LLM sees, so a host can offer a
+  narrower tool under its own name without writing one. For example, a
+  "pick one" tool:
+
+      {Sagents.Middleware.AskUserQuestion,
+       tool_name: "request_user_choice",
+       description: "Offer the user a choice between mutually exclusive options.",
+       system_prompt: "<user_choice>\\nUse `request_user_choice` when ...\\n</user_choice>",
+       response_types: [:single_select],
+       min_options: 2,
+       max_options: 4,
+       option_values: false,
+       context_field: false,
+       allow_other: true,
+       allow_cancel: true}
+
+  The tool takes only `question` and `options` (`label` and `description`).
+
+  Interrupts and resumes don't depend on the tool's name. A question raised under
+  any name resumes through this middleware, and the answered tool result keeps
+  the name and display text of the call it answers.
+
+  Sub-agents never inherit this middleware, whatever its tool is named: a
+  sub-agent has no user to ask.
+
+  To mount a second instance, give it its own `:id` and its own `:tool_name`.
+  Two instances with the same tool name would offer the LLM two tools with one
+  name.
 
   ## Response Types
 
@@ -95,28 +152,96 @@ defmodule Sagents.Middleware.AskUserQuestion do
   alias LangChain.Message.ToolResult
 
   @all_response_types [:single_select, :multi_select, :freeform]
+  @select_types [:single_select, :multi_select]
+
+  @default_tool_name "ask_user"
+  @default_description "Ask the user a structured question when you need their input to make a decision. " <>
+                         "Use this for significant choices where multiple valid approaches exist."
+  @default_display_text "Asking a question"
+  @default_min_options 2
+  @default_max_options 10
+  # The built-in prompt suggests at most this many options, below the hard
+  # `:max_options` limit, to keep questions short.
+  @suggested_max_options 5
+
+  # The function-name pattern providers accept for tools.
+  @tool_name_pattern ~r/^[a-zA-Z0-9_-]{1,64}$/
+
+  @option_keys [
+    :response_types,
+    :allow_other,
+    :allow_cancel,
+    :tool_name,
+    :description,
+    :display_text,
+    :system_prompt,
+    :min_options,
+    :max_options,
+    :option_values,
+    :context_field,
+    :id
+  ]
 
   @impl true
   def init(opts) do
-    response_types = Keyword.get(opts, :response_types, @all_response_types)
-    invalid = response_types -- @all_response_types
-
-    with [] <- invalid,
+    with :ok <- validate_option_keys(opts),
+         {:ok, response_types} <-
+           validate_response_types(Keyword.get(opts, :response_types, @all_response_types)),
          {:ok, forced_allow_other} <- validate_forced_flag(opts, :allow_other),
-         {:ok, forced_allow_cancel} <- validate_forced_flag(opts, :allow_cancel) do
+         {:ok, forced_allow_cancel} <- validate_forced_flag(opts, :allow_cancel),
+         {:ok, tool_name} <- validate_tool_name(Keyword.get(opts, :tool_name, @default_tool_name)),
+         {:ok, description} <-
+           validate_text(:description, Keyword.get(opts, :description, @default_description)),
+         {:ok, display_text} <-
+           validate_text(:display_text, Keyword.get(opts, :display_text, @default_display_text)),
+         {:ok, system_prompt} <- validate_system_prompt(Keyword.get(opts, :system_prompt)),
+         {:ok, {min_options, max_options}} <-
+           validate_bounds(
+             Keyword.get(opts, :min_options, @default_min_options),
+             Keyword.get(opts, :max_options, @default_max_options)
+           ),
+         {:ok, option_values} <- validate_boolean(opts, :option_values, true),
+         {:ok, context_field} <- validate_boolean(opts, :context_field, true) do
       {:ok,
        %{
          response_types: response_types,
          forced_allow_other: forced_allow_other,
-         forced_allow_cancel: forced_allow_cancel
+         forced_allow_cancel: forced_allow_cancel,
+         tool_name: tool_name,
+         description: description,
+         display_text: display_text,
+         system_prompt: system_prompt,
+         min_options: min_options,
+         max_options: max_options,
+         option_values: option_values,
+         context_field: context_field
        }}
-    else
-      invalid when is_list(invalid) ->
-        {:error, "Invalid response types: #{inspect(invalid)}"}
-
-      {:error, _reason} = error ->
-        error
     end
+  end
+
+  defp validate_option_keys(opts) do
+    known = @option_keys ++ Sagents.Agent.injected_context_keys()
+
+    case Enum.reject(Keyword.keys(opts), &(&1 in known)) do
+      [] ->
+        :ok
+
+      unknown ->
+        {:error,
+         "unknown #{inspect(__MODULE__)} options #{inspect(unknown)}; " <>
+           "valid options are #{inspect(@option_keys)}"}
+    end
+  end
+
+  defp validate_response_types(types) when is_list(types) do
+    case types -- @all_response_types do
+      [] -> {:ok, types}
+      invalid -> {:error, "Invalid response types: #{inspect(invalid)}"}
+    end
+  end
+
+  defp validate_response_types(other) do
+    {:error, "response_types must be a list, got: #{inspect(other)}"}
   end
 
   # A forced flag (`allow_other` / `allow_cancel`) fixes the value for every
@@ -130,10 +255,56 @@ defmodule Sagents.Middleware.AskUserQuestion do
     end
   end
 
-  @impl true
-  def system_prompt(config) do
-    build_system_prompt(config)
+  defp validate_tool_name(name) when is_binary(name) do
+    if Regex.match?(@tool_name_pattern, name),
+      do: {:ok, name},
+      else: tool_name_error(name)
   end
+
+  defp validate_tool_name(name), do: tool_name_error(name)
+
+  defp tool_name_error(name) do
+    {:error,
+     "tool_name must be 1-64 letters, digits, underscores or hyphens, got: #{inspect(name)}"}
+  end
+
+  defp validate_text(_key, text) when is_binary(text) and text != "", do: {:ok, text}
+
+  defp validate_text(key, other),
+    do: {:error, "#{key} must be a non-empty string, got: #{inspect(other)}"}
+
+  # nil -> the built-in section. A string is used verbatim. false or "" -> no
+  # section at all.
+  defp validate_system_prompt(nil), do: {:ok, nil}
+  defp validate_system_prompt(false), do: {:ok, false}
+  defp validate_system_prompt(""), do: {:ok, false}
+  defp validate_system_prompt(text) when is_binary(text), do: {:ok, text}
+
+  defp validate_system_prompt(other) do
+    {:error, "system_prompt must be a string or false, got: #{inspect(other)}"}
+  end
+
+  defp validate_bounds(min, max)
+       when is_integer(min) and is_integer(max) and min >= 2 and min <= max,
+       do: {:ok, {min, max}}
+
+  defp validate_bounds(min, max) do
+    {:error,
+     "min_options and max_options must be integers with 2 <= min_options <= max_options, " <>
+       "got: #{inspect(min)} and #{inspect(max)}"}
+  end
+
+  defp validate_boolean(opts, key, default) do
+    case Keyword.get(opts, key, default) do
+      val when is_boolean(val) -> {:ok, val}
+      other -> {:error, "#{key} must be a boolean, got: #{inspect(other)}"}
+    end
+  end
+
+  @impl true
+  def system_prompt(%{system_prompt: false}), do: ""
+  def system_prompt(%{system_prompt: text}) when is_binary(text), do: text
+  def system_prompt(config), do: build_system_prompt(config)
 
   @impl true
   def tools(config) do
@@ -210,10 +381,8 @@ defmodule Sagents.Middleware.AskUserQuestion do
   defp resolve_single_question(agent, state, question_data, response) do
     case process_response(response, question_data) do
       {:ok, tool_result_content} ->
-        new_tool_result = answered_tool_result(question_data, response, tool_result_content)
         save_user_facing_message(agent, question_data, response)
-
-        {:ok, State.replace_tool_result(state, question_data.tool_call_id, new_tool_result)}
+        {:ok, answer_question(state, question_data, response, tool_result_content)}
 
       {:error, reason} ->
         {:error, reason}
@@ -233,12 +402,10 @@ defmodule Sagents.Middleware.AskUserQuestion do
       else
         case process_response(response, question_data) do
           {:ok, tool_result_content} ->
-            new_tool_result = answered_tool_result(question_data, response, tool_result_content)
             save_user_facing_message(agent, question_data, response)
 
             {:cont,
-             {:ok,
-              State.replace_tool_result(acc_state, question_data.tool_call_id, new_tool_result)}}
+             {:ok, answer_question(acc_state, question_data, response, tool_result_content)}}
 
           {:error, reason} ->
             {:halt, {:error, reason}}
@@ -247,14 +414,26 @@ defmodule Sagents.Middleware.AskUserQuestion do
     end)
   end
 
-  defp answered_tool_result(question_data, response, content) do
-    ToolResult.new!(%{
-      tool_call_id: question_data.tool_call_id,
-      content: content,
-      processed_content: answer_data(response, question_data),
-      name: "ask_user",
-      is_interrupt: false
-    })
+  # Fills the answer into the question's interrupt placeholder. The placeholder
+  # was built from the tool that was called, so the answered result keeps that
+  # call's name and display text whatever this middleware's tool is named. A
+  # state without the placeholder is returned unchanged.
+  defp answer_question(state, question_data, response, content) do
+    case State.find_tool_result(state, question_data.tool_call_id) do
+      %ToolResult{} = placeholder ->
+        answered = %ToolResult{
+          placeholder
+          | content: content,
+            processed_content: answer_data(response, question_data),
+            is_interrupt: false,
+            interrupt_data: nil
+        }
+
+        State.replace_tool_result(state, question_data.tool_call_id, answered)
+
+      nil ->
+        state
+    end
   end
 
   # The structured answer carried in the tool result's `processed_content`.
@@ -306,11 +485,9 @@ defmodule Sagents.Middleware.AskUserQuestion do
 
   defp build_ask_user_tool(config) do
     Function.new!(%{
-      name: "ask_user",
-      description:
-        "Ask the user a structured question when you need their input to make a decision. " <>
-          "Use this for significant choices where multiple valid approaches exist.",
-      display_text: "Asking a question",
+      name: config.tool_name,
+      description: config.description,
+      display_text: config.display_text,
       parameters_schema: build_parameters_schema(config),
       function: fn args, _context ->
         execute_ask_user(args, config)
@@ -319,53 +496,13 @@ defmodule Sagents.Middleware.AskUserQuestion do
   end
 
   defp build_parameters_schema(config) do
-    response_types = config.response_types
-
-    base_properties = %{
-      question: %{type: "string", description: "The question to ask the user"},
-      response_type: %{
-        type: "string",
-        enum: Enum.map(response_types, &Atom.to_string/1),
-        description:
-          "The type of response expected: " <>
-            Enum.map_join(response_types, ", ", fn
-              :single_select -> "single_select (pick one)"
-              :multi_select -> "multi_select (pick one or more)"
-              :freeform -> "freeform (open text)"
-            end)
-      },
-      options: %{
-        type: "array",
-        description:
-          "Options for single_select or multi_select. Must have 2-10 items. Not used for freeform.",
-        items: %{
-          type: "object",
-          properties: %{
-            label: %{
-              type: "string",
-              description:
-                "The answer as the user would say it, on a single line. If the user picks " <>
-                  "this option, this text is returned to you as their answer, unless you set value."
-            },
-            value: %{
-              type: "string",
-              description:
-                "Optional. Omit it unless you need a clear, short key for this option. " <>
-                  "When omitted, the label is used."
-            },
-            description: %{
-              type: "string",
-              description: "Optional description with tradeoffs or details"
-            }
-          },
-          required: ["label"]
-        }
-      },
-      context: %{
-        type: "string",
-        description: "Additional context to help the user understand the decision"
+    base_properties =
+      %{
+        question: %{type: "string", description: "The question to ask the user"},
+        options: options_schema(config)
       }
-    }
+      |> maybe_put_response_type_property(config)
+      |> maybe_put_context_property(config)
 
     # A forced flag is dropped from the schema so the LLM can't (and isn't asked
     # to) set it. An unforced flag (nil) is exposed as today.
@@ -383,8 +520,95 @@ defmodule Sagents.Middleware.AskUserQuestion do
     %{
       type: "object",
       properties: properties,
-      required: ["question", "response_type"]
+      required: required_properties(config)
     }
+  end
+
+  # With a single enabled response type there is nothing for the LLM to choose,
+  # so `response_type` is left out of the schema and inferred.
+  defp maybe_put_response_type_property(properties, %{response_types: [_single]}),
+    do: properties
+
+  defp maybe_put_response_type_property(properties, %{response_types: response_types}) do
+    Map.put(properties, :response_type, %{
+      type: "string",
+      enum: Enum.map(response_types, &Atom.to_string/1),
+      description:
+        "The type of response expected: " <>
+          Enum.map_join(response_types, ", ", fn
+            :single_select -> "single_select (pick one)"
+            :multi_select -> "multi_select (pick one or more)"
+            :freeform -> "freeform (open text)"
+          end)
+    })
+  end
+
+  defp required_properties(%{response_types: [_single]}), do: ["question"]
+  defp required_properties(_config), do: ["question", "response_type"]
+
+  defp maybe_put_context_property(properties, %{context_field: false}), do: properties
+
+  defp maybe_put_context_property(properties, _config) do
+    Map.put(properties, :context, %{
+      type: "string",
+      description: "Additional context to help the user understand the decision"
+    })
+  end
+
+  defp options_schema(config) do
+    %{
+      type: "array",
+      description: options_description(config),
+      minItems: config.min_options,
+      maxItems: config.max_options,
+      items: %{
+        type: "object",
+        properties: option_item_properties(config),
+        required: ["label"]
+      }
+    }
+  end
+
+  defp options_description(%{response_types: [_single]} = config) do
+    "The options to choose from. Must have #{config.min_options}-#{config.max_options} items."
+  end
+
+  defp options_description(config) do
+    "Options for single_select or multi_select. " <>
+      "Must have #{config.min_options}-#{config.max_options} items. Not used for freeform."
+  end
+
+  defp option_item_properties(config) do
+    label = %{
+      type: "string",
+      description:
+        "The answer as the user would say it, on a single line. If the user picks " <>
+          if(config.option_values,
+            do:
+              "this option, this text is returned to you as their answer, unless you set value.",
+            else: "this option, this text is returned to you as their answer."
+          )
+    }
+
+    description = %{
+      type: "string",
+      description: "Optional description with tradeoffs or details"
+    }
+
+    if config.option_values do
+      %{
+        label: label,
+        value: %{
+          type: "string",
+          description:
+            "Optional. Omit it unless you need a clear, short key for this option. " <>
+              "When omitted, the label is used."
+        },
+        description: description
+      }
+    else
+      %{label: label, description: description}
+    end
   end
 
   defp maybe_put_flag_property(properties, _key, forced, _schema) when is_boolean(forced),
@@ -398,7 +622,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
   defp execute_ask_user(args, config) do
     with {:ok, question} <- validate_question(args),
          {:ok, response_type} <- validate_response_type(args, config.response_types),
-         {:ok, options} <- validate_options(args, response_type) do
+         {:ok, options} <- validate_options(args, response_type, config) do
       question_data = %{
         type: :ask_user_question,
         question: question,
@@ -406,7 +630,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
         options: options,
         allow_other: resolve_flag(config.forced_allow_other, args, "allow_other", false),
         allow_cancel: resolve_flag(config.forced_allow_cancel, args, "allow_cancel", true),
-        context: Map.get(args, "context")
+        context: if(config.context_field, do: Map.get(args, "context"))
       }
 
       {:interrupt, "Waiting for user response...", question_data}
@@ -426,11 +650,14 @@ defmodule Sagents.Middleware.AskUserQuestion do
   end
 
   defp validate_response_type(args, enabled_types) do
-    case Map.get(args, "response_type") do
-      nil ->
+    case {Map.get(args, "response_type"), enabled_types} do
+      {nil, [only_type]} ->
+        {:ok, only_type}
+
+      {nil, _enabled_types} ->
         {:error, "Missing required field: response_type"}
 
-      type_str when is_binary(type_str) ->
+      {type_str, _enabled_types} when is_binary(type_str) ->
         type_atom =
           try do
             String.to_existing_atom(type_str)
@@ -453,28 +680,30 @@ defmodule Sagents.Middleware.AskUserQuestion do
             {:ok, type_atom}
         end
 
-      _other ->
+      {_other, _enabled_types} ->
         {:error, "response_type must be a string"}
     end
   end
 
-  defp validate_options(args, response_type) do
+  defp validate_options(args, response_type, config) do
     options = Map.get(args, "options", [])
 
     case response_type do
-      type when type in [:single_select, :multi_select] ->
+      type when type in @select_types ->
         cond do
           not is_list(options) ->
             {:error, "Options must be an array for #{type}"}
 
-          length(options) < 2 ->
-            {:error, "#{type} requires at least 2 options, got #{length(options)}"}
+          length(options) < config.min_options ->
+            {:error,
+             "#{type} requires at least #{config.min_options} options, got #{length(options)}"}
 
-          length(options) > 10 ->
-            {:error, "#{type} allows at most 10 options, got #{length(options)}"}
+          length(options) > config.max_options ->
+            {:error,
+             "#{type} allows at most #{config.max_options} options, got #{length(options)}"}
 
           true ->
-            validate_option_items(options)
+            validate_option_items(options, config.option_values)
         end
 
       :freeform ->
@@ -491,12 +720,12 @@ defmodule Sagents.Middleware.AskUserQuestion do
   # Normalizes each option and checks that labels and values are unique. Both
   # checks run on the normalized form, so labels that differ only in line
   # breaks, or a label that equals another option's explicit value, collide.
-  defp validate_option_items(options) do
+  defp validate_option_items(options, option_values?) do
     result =
       Enum.reduce_while(options, {:ok, [], MapSet.new(), MapSet.new()}, fn opt,
                                                                            {:ok, acc, labels,
                                                                             values} ->
-        with {:ok, option} <- normalize_option(opt),
+        with {:ok, option} <- normalize_option(opt, option_values?),
              :ok <- check_unique(labels, option.label, "label"),
              :ok <- check_unique(values, option.value, "value") do
           {:cont,
@@ -513,7 +742,11 @@ defmodule Sagents.Middleware.AskUserQuestion do
     end
   end
 
-  defp normalize_option(%{} = opt) do
+  # With option values turned off, any `value` the LLM sends is ignored and
+  # every option's value is its label.
+  defp normalize_option(%{} = opt, option_values?) do
+    sent_value = if option_values?, do: Map.get(opt, "value")
+
     case normalize_label(Map.get(opt, "label")) do
       "" ->
         {:error, "Each option needs a non-empty 'label', e.g. #{@option_example}"}
@@ -522,13 +755,13 @@ defmodule Sagents.Middleware.AskUserQuestion do
         {:ok,
          %{
            label: label,
-           value: option_value(Map.get(opt, "value"), label),
+           value: option_value(sent_value, label),
            description: Map.get(opt, "description")
          }}
     end
   end
 
-  defp normalize_option(_opt) do
+  defp normalize_option(_opt, _option_values?) do
     {:error, "Each option must be an object, e.g. #{@option_example}"}
   end
 
@@ -799,55 +1032,84 @@ defmodule Sagents.Middleware.AskUserQuestion do
   # -- System prompt --
 
   defp build_system_prompt(config) do
-    response_types = config.response_types
-
-    type_instructions =
-      Enum.map_join(response_types, "\n", fn
-        :single_select ->
-          """
-          - **single_select**: Use when the user should pick exactly one option from a list.
-            Provide 2-5 clear, distinct options with brief descriptions explaining tradeoffs.
-          """
-
-        :multi_select ->
-          """
-          - **multi_select**: Use when the user can pick one or more options from a list.
-            Provide 2-5 options. Good for feature selections, technology stacks, etc.
-          """
-
-        :freeform ->
-          """
-          - **freeform**: Use when you need open-ended text input.
-            Good for naming things, getting specific requirements, or open feedback.
-            Do NOT provide options for freeform questions.
-          """
-      end)
+    name = config.tool_name
+    count = suggested_option_count(config)
 
     """
-    ## ask_user Tool
+    ## #{name} Tool
 
-    You have an `ask_user` tool for asking the user structured questions.
+    You have an `#{name}` tool for asking the user structured questions.
 
-    ### When to use ask_user:
+    ### When to use #{name}:
     - Multiple valid approaches exist and the choice significantly affects the outcome
     - You need the user's preference on a subjective decision
     - Requirements are ambiguous and you need clarification before proceeding
     - A decision would be difficult or costly to reverse
 
-    ### When NOT to use ask_user:
+    ### When NOT to use #{name}:
     - You have enough context to make a reasonable decision
     - The choice is minor and easily reversible
     - You can infer the answer from prior conversation context
 
-    ### Response types:
-    #{type_instructions}
+    #{response_type_section(config, count)}
     ### Best practices:
     - Keep questions concise and focused on the decision at hand
-    - Provide 2-5 distinct options with brief descriptions of tradeoffs
-    - Include relevant context to help the user make an informed decision
-    #{option_guidance(config)}#{flag_guidance(config)}
+    #{option_count_guidance(count)}#{context_guidance(config)}#{option_guidance(config)}#{flag_guidance(config)}
     """
   end
+
+  # The option count the prompt suggests: the configured minimum up to the
+  # smaller of the hard maximum and `@suggested_max_options`.
+  defp suggested_option_count(config) do
+    low = config.min_options
+    high = max(low, min(config.max_options, @suggested_max_options))
+    if low == high, do: "#{low}", else: "#{low}-#{high}"
+  end
+
+  # With one enabled type the LLM never names a response type, so its usage is
+  # given without the type's name.
+  defp response_type_section(%{response_types: [only_type]}, count) do
+    "### Questions:\n- " <> response_type_usage(only_type, count) <> "\n"
+  end
+
+  defp response_type_section(config, count) do
+    instructions =
+      Enum.map_join(config.response_types, "\n", fn type ->
+        "- **#{type}**: " <> response_type_usage(type, count) <> "\n"
+      end)
+
+    "### Response types:\n" <> instructions
+  end
+
+  defp response_type_usage(:single_select, count) do
+    """
+    Use when the user should pick exactly one option from a list.
+      Provide #{count} clear, distinct options with brief descriptions explaining tradeoffs.\
+    """
+  end
+
+  defp response_type_usage(:multi_select, count) do
+    """
+    Use when the user can pick one or more options from a list.
+      Provide #{count} options. Good for feature selections, technology stacks, etc.\
+    """
+  end
+
+  defp response_type_usage(:freeform, _count) do
+    """
+    Use when you need open-ended text input.
+      Good for naming things, getting specific requirements, or open feedback.
+      Do NOT provide options for freeform questions.\
+    """
+  end
+
+  defp option_count_guidance(count),
+    do: "- Provide #{count} distinct options with brief descriptions of tradeoffs\n"
+
+  defp context_guidance(%{context_field: true}),
+    do: "- Include relevant context to help the user make an informed decision\n"
+
+  defp context_guidance(_config), do: ""
 
   # Option-label guidance applies only when a select type is enabled. A
   # freeform-only configuration has no options.
