@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.21.1
+
+`AskUserQuestion` can be configured to offer a different question tool, so an app no longer needs its own tool that duplicates it. Options set the tool's name, description, display text, system prompt section, option count limits, and which arguments it takes. A resumed question's tool result is now named after the call it answers, rather than always `ask_user`.
+
+**One breaking change:** `AskUserQuestion` rejects option keys it does not recognize. A config with a misspelled or leftover key now fails in `Agent.new/2` instead of having the key silently ignored.
+
+### Upgrading from v0.21.0 - v0.21.1
+
+- Check every `AskUserQuestion` config for keys other than `:response_types`, `:allow_other`, `:allow_cancel`, the new options below, and `:id`. `Agent.new/2` returns an error naming any unknown key.
+- The tool schema changes, so expect one prompt-cache miss after upgrading. `options` now carries `minItems`/`maxItems`. With exactly one enabled response type, `response_type` is no longer in the schema. Calls that passed validation before still pass.
+- An app that wrote its own question tool raising `:ask_user_question` interrupts can replace it with a configured `AskUserQuestion`. Questions already pending under the old tool's name still resume, and their answers keep that name.
+
+### Added
+- `AskUserQuestion` options `:tool_name`, `:description`, `:display_text`, and `:system_prompt` (a string used verbatim, or `false` for no section). The built-in prompt section names the configured tool. https://github.com/sagents-ai/sagents/pull/241
+- `AskUserQuestion` options `:min_options` and `:max_options` (default 2 and 10). They are enforced when the tool runs, sent in the schema as `minItems`/`maxItems`, and used in the prompt's suggested option count. https://github.com/sagents-ai/sagents/pull/241
+- `AskUserQuestion` options `:option_values` and `:context_field`. Setting either to `false` removes `options[].value` or `context` from the tool, so a "pick one" tool can take only `question` and `options` with a `label` and `description`. https://github.com/sagents-ai/sagents/pull/241
+- The `AskUserQuestion` moduledoc has a "Customizing the tool" section with a full example. https://github.com/sagents-ai/sagents/pull/241
+
+### Changed
+- `AskUserQuestion.init/1` rejects unknown option keys. `:id` and the keys the agent injects are allowed. https://github.com/sagents-ai/sagents/pull/241
+- With exactly one enabled response type, `AskUserQuestion` leaves `response_type` out of the tool schema and infers it. A `response_type` the model sends anyway is accepted when it names the enabled type. https://github.com/sagents-ai/sagents/pull/241
+
+### Fixed
+- A resumed `:ask_user_question` interrupt fills the answer into the interrupt's placeholder tool result. The answered result keeps the name and display text of the call it answers, rather than being renamed `ask_user` and losing its display text. The `AgentServer` `:completed` tool event uses the same name. https://github.com/sagents-ai/sagents/pull/241
+
 ## v0.21.0
 
 Generated conversation lists show the most recently active conversation first. The persistence generator adds a `last_message_at` column to conversations, moves it forward every time a display message is added, and sorts `list_conversations/2` by it. The generated code sorted by `updated_at`, which messages never touch because they live in their own table, so the list came out in roughly creation order.
