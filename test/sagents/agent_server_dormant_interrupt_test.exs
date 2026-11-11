@@ -372,4 +372,60 @@ defmodule Sagents.AgentServerDormantInterruptTest do
       assert AgentServer.get_status(agent_id) == :interrupted
     end
   end
+
+  # ── Completing a question ────────────────────────────────────────
+
+  describe "the :completed tool event for an answered question" do
+    defp named_question_state(tool_name) do
+      data = %{type: :ask_user_question, question: "Continue?"}
+
+      State.new!(%{
+        messages: [
+          Message.new_user!("hi"),
+          Message.new_assistant!(%{
+            tool_calls: [ToolCall.new!(%{call_id: "call_1", name: tool_name, arguments: %{}})]
+          }),
+          Message.new_tool_result!(%{
+            content: nil,
+            tool_results: [
+              ToolResult.new!(%{
+                tool_call_id: "call_1",
+                name: tool_name,
+                content: "Waiting for user...",
+                is_interrupt: true,
+                interrupt_data: data
+              })
+            ]
+          })
+        ]
+      })
+    end
+
+    defp answer_and_collect_completed(tool_name) do
+      Agent
+      |> stub(:resume, fn _agent, state, _resume_data, _opts -> {:ok, state} end)
+
+      agent = ask_agent()
+
+      start_server(agent,
+        initial_state: named_question_state(tool_name),
+        initial_subscribers: [{:main, self()}]
+      )
+
+      assert_receive {:agent, {:status_changed, :interrupted, _data}}, 500
+      :ok = AgentServer.resume(agent.agent_id, %{type: :answer, selected: ["Yes"]})
+
+      assert_receive {:agent, {:tool_execution_update, :completed, info}}, 1_000
+      info
+    end
+
+    test "is named after the tool that asked" do
+      assert %{call_id: "call_1", name: "request_user_choice"} =
+               answer_and_collect_completed("request_user_choice")
+    end
+
+    test "keeps the default tool's name" do
+      assert %{call_id: "call_1", name: "ask_user"} = answer_and_collect_completed("ask_user")
+    end
+  end
 end

@@ -4286,7 +4286,7 @@ defmodule Sagents.AgentServer do
        ) do
     broadcast_tool_event(server_state, :completed, %{
       call_id: tool_call_id,
-      name: "ask_user",
+      name: answered_tool_name(server_state, tool_call_id),
       result: "Question answered"
     })
 
@@ -4324,6 +4324,18 @@ defmodule Sagents.AgentServer do
 
   # Not a recognized interrupt type -- no tool display update needed
   defp maybe_update_interrupt_tool_display(_server_state, _interrupt_data, _status), do: :ok
+
+  # The name of the tool that asked the question, read from its interrupt
+  # placeholder, so a question raised by a tool with a configured name reports
+  # completion under that name.
+  defp answered_tool_name(%ServerState{state: %State{} = state}, tool_call_id) do
+    case State.find_tool_result(state, tool_call_id) do
+      %{name: name} when is_binary(name) and name != "" -> name
+      _other -> "ask_user"
+    end
+  end
+
+  defp answered_tool_name(_server_state, _tool_call_id), do: "ask_user"
 
   # Emit `[:sagents, :agent, :halt]` telemetry for halt-typed interrupts.
   # Halts are gate decisions, so observability tooling typically wants to

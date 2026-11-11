@@ -421,6 +421,25 @@ defmodule Sagents.State do
     %{state | messages: updated_messages}
   end
 
+  @doc false
+  # The tool result for `tool_call_id`, searching the newest messages first.
+  # An interrupted call's placeholder result holds the name and display text
+  # of the tool that was called, which code resolving the interrupt reuses.
+  @spec find_tool_result(t(), String.t()) :: LangChain.Message.ToolResult.t() | nil
+  def find_tool_result(%State{messages: messages}, tool_call_id) when is_binary(tool_call_id) do
+    messages
+    |> Enum.reverse()
+    |> Enum.find_value(fn
+      %LangChain.Message{role: :tool, tool_results: results} when is_list(results) ->
+        Enum.find(results, &(&1.tool_call_id == tool_call_id))
+
+      _message ->
+        nil
+    end)
+  end
+
+  def find_tool_result(%State{}, _tool_call_id), do: nil
+
   @doc """
   Set metadata value.
   """
