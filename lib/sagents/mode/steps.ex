@@ -188,6 +188,11 @@ defmodule Sagents.Mode.Steps do
   - A later result from another tool keeps its content and its other state
     changes; only the set it named is removed from its delta.
 
+  When the switch that applies was requested by a tool other than
+  `switch_mode`, the target set's switch message is appended to that tool's
+  result, so the conversation records the switch in the words a `switch_mode`
+  call leaves.
+
   A call naming a tool the chain does not have gets LangChain's not-found
   error. When the tool belongs to a declared set, the error is rewritten to
   name the set: to retry on the next step when the batch's switch brings that
@@ -286,11 +291,38 @@ defmodule Sagents.Mode.Steps do
     end
   end
 
+  # The applied switch. A `switch_mode` result already carries the switch
+  # message; another tool's result gets it appended.
+  defp settle_result(
+         %ToolResult{name: name} = result,
+         index,
+         {index, target},
+         _chain,
+         %{config: config} = context
+       )
+       when name != config.tool_name do
+    message = AbilitySetSwitcher.switch_result_message(context, target)
+    %{result | content: append_text(result.content, message)}
+  end
+
   defp settle_result(result, _index, {_applied_index, target}, chain, context),
     do: hint_result(result, target, chain, context)
 
   defp settle_result(result, _index, nil, chain, context),
     do: hint_result(result, nil, chain, context)
+
+  # `text` as a text part of its own after a tool result's content. The tool's
+  # parts are left byte for byte as it returned them: a result may be JSON or
+  # other structured text that the application or the model parses, and
+  # joining a sentence onto it would break that.
+  defp append_text(content, text) when content in [nil, "", []],
+    do: [ContentPart.text!(text)]
+
+  defp append_text(content, text) when is_binary(content),
+    do: [ContentPart.text!(content), ContentPart.text!(text)]
+
+  defp append_text(content, text) when is_list(content),
+    do: content ++ [ContentPart.text!(text)]
 
   # A later tool's switch is not applied; the rest of its state changes are.
   defp drop_state_key(%ToolResult{processed_content: %State{} = delta} = result, state_key) do

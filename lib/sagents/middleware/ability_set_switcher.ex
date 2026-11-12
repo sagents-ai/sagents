@@ -74,8 +74,9 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   ## Switch messages
 
   A successful `switch_mode` call returns the target set's `:switch_message`
-  to the model. The default names the mode and points the model at its tool
-  definitions:
+  to the model, and a switch another tool requests appends it to that tool's
+  result (see "Switching from another tool"). The default names the mode and
+  points the model at its tool definitions:
 
       Switched to the Billing mode. Your tools now match this mode; use the tool definitions you have.
 
@@ -141,7 +142,7 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   ```elixir
   function: fn _args, context ->
     case AbilitySetSwitcher.request_mode_switch(context, "deployments") do
-      {:ok, switch} -> {:ok, "Deploy command activated.", switch}
+      {:ok, switch} -> {:ok, "Deploy started.", switch}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -155,6 +156,17 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   counts as the batch's one switch, so a `switch_mode` call earlier in the same
   batch wins over it. To return other state changes as well, combine them with
   `State.merge_states/2`.
+
+  When the switch applies, the target set's switch message (see "Switch
+  messages") is added to the tool's result as a text part of its own, after
+  the tool's content. The tool's own parts are not changed, so a result that
+  is JSON stays parseable. The tool's
+  result is the conversation's only record of the switch: without it the
+  model's tools change for no visible reason, and a model then calls
+  `switch_mode` for the mode it is already in. A request that does not apply,
+  because the set is already active or an earlier switch in the batch wins,
+  adds nothing. The tool's own text should say what the tool did, not that the
+  mode changed.
 
   ## The active set
 
@@ -254,36 +266,47 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   The switcher's prompt fragment for the given active set (`nil` for rails
   only).
 
-  The fragment lists every set with its "when to use" and names the current
-  mode. It is rebuilt with the rest of the system prompt whenever the active set
-  changes.
+  The fragment states the active mode first, then lists every set by name and
+  display name with its "when to use", marking the active one. The set's name
+  is what `switch_mode` takes; the display name is what switch messages and
+  tool hints say, so the list ties the two together. The fragment for each set
+  is built once, with the rest of that set's system prompt, in
+  `Sagents.Agent.new/2`.
   """
   @spec catalog_prompt(map(), String.t() | nil) :: String.t()
   def catalog_prompt(config, active) do
     catalog =
       config
       |> set_names()
-      |> Enum.map_join("\n", fn name -> "- #{name}: #{config.sets[name].when_to_use}" end)
+      |> Enum.map_join("\n", fn name ->
+        marker = if name == active, do: ", active", else: ""
 
-    current =
-      case active do
-        nil -> "Current mode: none. No mode is active, so only the general tools are available."
-        name -> "Current mode: #{name}."
-      end
+        "- #{name} (#{display_name(config, name)}#{marker}): #{config.sets[name].when_to_use}"
+      end)
 
     """
     ## Modes
 
     You work in modes. Each mode gives you the tools for one kind of task.
+
+    #{active_statement(config, active)}
+
     #{catalog}
 
-    #{current}
-
-    Call #{config.tool_name} only when the request needs tools the current mode lacks. \
+    Call #{config.tool_name} only when the request needs tools the active mode lacks. \
     Do not switch to look around. Call #{config.tool_name} by itself, with no other tool \
     calls in the same step: your tools change when it returns, so choose the next tools \
     after you see its result.\
     """
+  end
+
+  defp active_statement(_config, nil),
+    do: "Active mode: none. Only the general tools are available."
+
+  defp active_statement(config, active) do
+    "Active mode: #{active} (#{display_name(config, active)}). " <>
+      "Its tools are already in your tool definitions. " <>
+      "Do not call #{config.tool_name} for the active mode."
   end
 
   @doc """
@@ -386,17 +409,18 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
         {:error, unknown_mode_message(config, mode)}
 
       mode == current ->
-        {:error, "Already in the #{display_name(config, mode)} mode."}
+        {:error,
+         "Already in the #{display_name(config, mode)} mode. " <>
+           "Its tools are in your tool definitions; continue with them."}
 
       true ->
-        info = %{
-          from: current,
-          to: mode,
-          name: display_name(config, mode),
-          tools: tools_added(context, current, mode)
+        ability_sets = %{
+          active: current,
+          config: config,
+          tool_sets: context_tool_sets(context)
         }
 
-        {:ok, switch_message(config, info), mode_state(config, mode)}
+        {:ok, switch_result_message(ability_sets, mode), mode_state(config, mode)}
     end
   end
 
@@ -420,18 +444,45 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
 
   defp chain_active_set(config, _context), do: config.default
 
-  defp display_name(config, set), do: config.sets[set].name
+  # `init/1` gives every declared set a display name. A set the config does
+  # not declare is shown by its name rather than raising.
+  defp display_name(%{sets: sets}, set) do
+    case sets do
+      %{^set => %AbilitySet{name: name}} when is_binary(name) -> name
+      _sets -> set
+    end
+  end
 
-  # The target set's tools that the current set does not already provide. The
-  # chain context carries the tool-to-sets map; outside an agent chain there is
-  # none, and no tools are listed.
-  defp tools_added(%{ability_sets: %{tool_sets: tool_sets}}, current, mode)
-       when is_map(tool_sets) do
+  # The chain context carries the tool-to-sets map; outside an agent chain
+  # there is none.
+  defp context_tool_sets(%{ability_sets: %{tool_sets: tool_sets}}), do: tool_sets
+  defp context_tool_sets(_context), do: nil
+
+  @doc false
+  # The tool result text for a switch from `ability_sets.active` to `to`: the
+  # target set's `:switch_message` string, its callback's result, or the
+  # default. `ability_sets` is the chain context's `ability_sets` map; its
+  # `:tool_sets` may be `nil`, and then no added tools are listed. Both a
+  # `switch_mode` call and a switch another tool requests are reported with it.
+  @spec switch_result_message(map(), String.t()) :: String.t()
+  def switch_result_message(%{active: from, config: config} = ability_sets, to) do
+    info = %{
+      from: from,
+      to: to,
+      name: display_name(config, to),
+      tools: tools_added(Map.get(ability_sets, :tool_sets), from, to)
+    }
+
+    switch_message(config, info)
+  end
+
+  # The target set's tools that the current set does not already provide.
+  defp tools_added(tool_sets, current, mode) when is_map(tool_sets) do
     for({tool, sets} <- tool_sets, mode in sets, current not in sets, do: tool)
     |> Enum.sort()
   end
 
-  defp tools_added(_context, _current, _mode), do: []
+  defp tools_added(_tool_sets, _current, _mode), do: []
 
   defp switch_message(config, info) do
     case config.sets[info.to].switch_message do
