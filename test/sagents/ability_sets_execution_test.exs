@@ -34,15 +34,21 @@ defmodule Sagents.AbilitySetsExecutionTest do
   end
 
   defp new_agent!(opts \\ []) do
+    # `:devices` merges extra fields, such as `:switch_message`, into the
+    # devices set.
     sets = %{
-      "devices" => %{
-        name: "Devices",
-        when_to_use: "Device inventory, packages, and deployments to devices.",
-        middleware: [
-          mw("devices_mw", ["list_devices"], "Devices fragment."),
-          mw("deployments_mw", ["deploy_package"], "Deployments fragment.")
-        ]
-      },
+      "devices" =>
+        Map.merge(
+          %{
+            name: "Devices",
+            when_to_use: "Device inventory, packages, and deployments to devices.",
+            middleware: [
+              mw("devices_mw", ["list_devices"], "Devices fragment."),
+              mw("deployments_mw", ["deploy_package"], "Deployments fragment.")
+            ]
+          },
+          Keyword.get(opts, :devices, %{})
+        ),
       "billing" => %{
         name: "Billing",
         when_to_use: "Invoices, balances, and payment status.",
@@ -159,7 +165,7 @@ defmodule Sagents.AbilitySetsExecutionTest do
 
       prompt = system_text(messages)
       assert prompt =~ "Billing fragment."
-      assert prompt =~ "Current mode: billing."
+      assert prompt =~ "Active mode: billing (Billing)."
       refute prompt =~ "Devices fragment."
     end
 
@@ -169,7 +175,7 @@ defmodule Sagents.AbilitySetsExecutionTest do
       assert {:ok, _state} = Agent.execute(new_agent!(), state())
 
       assert [{messages, @rail_tools}] = received_llm_calls()
-      assert system_text(messages) =~ "Current mode: none."
+      assert system_text(messages) =~ "Active mode: none."
     end
 
     test "before_model and after_model run only for active entries" do
@@ -261,7 +267,7 @@ defmodule Sagents.AbilitySetsExecutionTest do
       assert first_tools == @rail_tools
       assert second_tools == @rail_tools ++ ["list_devices", "deploy_package"]
       assert system_text(second_messages) =~ "Devices fragment."
-      assert system_text(second_messages) =~ "Current mode: devices."
+      assert system_text(second_messages) =~ "Active mode: devices (Devices)."
 
       # The second chain holds the first chain's messages plus the switch call,
       # with its reasoning stripped, and the switch result.
@@ -512,7 +518,9 @@ defmodule Sagents.AbilitySetsExecutionTest do
       assert %ToolResult{is_error: true} =
                refused = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "s1"))
 
-      assert result_text(refused) == "Already in the Devices mode."
+      assert result_text(refused) ==
+               "Already in the Devices mode. Its tools are in your tool definitions; continue with them."
+
       assert [_first, _second] = received_llm_calls()
     end
 
@@ -534,7 +542,7 @@ defmodule Sagents.AbilitySetsExecutionTest do
 
       assert [{messages, tools}] = received_llm_calls()
       assert tools == @rail_tools ++ ["list_devices", "deploy_package"]
-      assert system_text(messages) =~ "Current mode: devices."
+      assert system_text(messages) =~ "Active mode: devices (Devices)."
       assert final_state.metadata["active_ability_set"] == "devices"
       assert_received {:tool_ran, "approve_me", _context}
     end
@@ -742,7 +750,7 @@ defmodule Sagents.AbilitySetsExecutionTest do
       assert [_first, {messages, tools}] = received_llm_calls()
       assert "list_devices" in tools
       assert "deploy_package" in tools
-      assert system_text(messages) =~ "Current mode: devices."
+      assert system_text(messages) =~ "Active mode: devices (Devices)."
       assert system_text(messages) =~ "Devices fragment."
 
       refute Enum.any?(messages, fn message ->
@@ -752,8 +760,13 @@ defmodule Sagents.AbilitySetsExecutionTest do
       assert_received {:before_model, "devices_mw"}
       assert final_state.metadata["active_ability_set"] == "devices"
 
+      # The switch is recorded once, in the words a switch_mode call leaves,
+      # though the batch is settled again on the chain built for devices.
       opened = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
-      assert result_text(opened) == "Devices command activated."
+
+      assert result_text(opened) ==
+               "Devices command activated.\n\nSwitched to the Devices mode. " <>
+                 "Your tools now match this mode; use the tool definitions you have."
 
       assert_received {:on_switch, %{from: nil, to: "devices"}}
       refute_received {:on_switch, _info}
@@ -810,6 +823,123 @@ defmodule Sagents.AbilitySetsExecutionTest do
 
       opened = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
       refute opened.is_error
+      assert result_text(opened) == "Devices command activated."
+    end
+
+    test "the switch message is a part of its own, leaving a JSON result parseable" do
+      json = Jason.encode!(%{"deploy_id" => 42, "status" => "started"})
+
+      start_deploy = fn context ->
+        {:ok, switch} = AbilitySetSwitcher.request_mode_switch(context, "devices")
+        {:ok, json, switch}
+      end
+
+      agent = new_agent!(rail_results: %{"start_deploy" => start_deploy})
+
+      expect_responses([
+        tool_calls_message([{"c1", "start_deploy", %{}}]),
+        Message.new_assistant!("Done")
+      ])
+
+      assert {:ok, final_state} = Agent.execute(agent, state())
+
+      started = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
+
+      assert [%ContentPart{type: :text, content: ^json}, %ContentPart{type: :text} = switched] =
+               started.content
+
+      assert {:ok, %{"deploy_id" => 42}} = Jason.decode(hd(started.content).content)
+      assert switched.content =~ "Switched to the Devices mode."
+    end
+
+    test "a request for the active set adds nothing and announces no switch" do
+      agent = new_agent!(rail_results: %{"open_devices" => &open_devices/1})
+
+      expect_responses([
+        tool_calls_message([{"c1", "open_devices", %{}}]),
+        Message.new_assistant!("Done")
+      ])
+
+      assert {:ok, final_state} =
+               Agent.execute(agent, state(%{"active_ability_set" => "devices"}))
+
+      opened = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
+      assert result_text(opened) == "Devices command activated."
+      refute_received {:switched, _measurements, _metadata}
+    end
+
+    test "the set's switch_message callback writes the appended text, with the added tools" do
+      test_pid = self()
+
+      switch_message = fn info ->
+        send(test_pid, {:switch_message, info})
+        "Now in #{info.name}."
+      end
+
+      agent =
+        new_agent!(
+          rail_results: %{"open_devices" => &open_devices/1},
+          devices: %{switch_message: switch_message}
+        )
+
+      expect_responses([
+        tool_calls_message([{"c1", "open_devices", %{}}]),
+        Message.new_assistant!("Done")
+      ])
+
+      assert {:ok, final_state} = Agent.execute(agent, state())
+
+      opened = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
+      assert result_text(opened) == "Devices command activated.\n\nNow in Devices."
+
+      assert_received {:switch_message,
+                       %{from: nil, to: "devices", tools: ["deploy_package", "list_devices"]}}
+
+      refute_received {:switch_message, _info}
+    end
+
+    test "a requesting tool before a switch_mode call wins, and switch_mode is told so" do
+      agent = new_agent!(rail_results: %{"open_devices" => &open_devices/1})
+
+      expect_responses([
+        tool_calls_message([{"c1", "open_devices", %{}}, switch_call("s1", "billing")]),
+        Message.new_assistant!("Done")
+      ])
+
+      assert {:ok, final_state} = Agent.execute(agent, state())
+      assert final_state.metadata["active_ability_set"] == "devices"
+
+      results = tool_results(final_state.messages)
+      opened = Enum.find(results, &(&1.tool_call_id == "c1"))
+      assert result_text(opened) =~ "Devices command activated.\n\nSwitched to the Devices mode."
+
+      switched = Enum.find(results, &(&1.tool_call_id == "s1"))
+      assert switched.is_error
+      assert result_text(switched) =~ "Only one mode switch per step"
+    end
+
+    test "a requested switch approved through HITL is reported after resume" do
+      agent =
+        new_agent!(
+          rail_results: %{"open_devices" => &open_devices/1},
+          interrupt_on: %{"open_devices" => true}
+        )
+
+      expect_responses([tool_calls_message([{"c1", "open_devices", %{}}])])
+
+      assert {:interrupt, interrupted_state, _data} = Agent.execute(agent, state())
+      assert [_first] = received_llm_calls()
+
+      expect_responses([Message.new_assistant!("Done")])
+
+      assert {:ok, final_state} = Agent.resume(agent, interrupted_state, [%{type: :approve}])
+      assert final_state.metadata["active_ability_set"] == "devices"
+
+      opened = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
+
+      assert result_text(opened) ==
+               "Devices command activated.\n\nSwitched to the Devices mode. " <>
+                 "Your tools now match this mode; use the tool definitions you have."
     end
   end
 

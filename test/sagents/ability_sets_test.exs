@@ -263,7 +263,7 @@ defmodule Sagents.AbilitySetsTest do
       assert ids(effective.middleware) == ["rail_mw", AbilitySetSwitcher, "trailing_mw"]
       assert tool_names(effective.tools) == ["whoami", "switch_mode"]
       refute effective.system_prompt =~ "Devices fragment."
-      assert effective.system_prompt =~ "Current mode: none."
+      assert effective.system_prompt =~ "Active mode: none."
     end
 
     test "rails plus the set's entries, in stack order" do
@@ -281,7 +281,7 @@ defmodule Sagents.AbilitySetsTest do
             "You are the IT operations assistant.",
             "Rail fragment.",
             "## Modes\n\nYou work in modes.",
-            "Current mode: devices.",
+            "Active mode: devices (Devices).",
             "Devices fragment.",
             "Deployments fragment.",
             "Trailing fragment."
@@ -466,13 +466,110 @@ defmodule Sagents.AbilitySetsTest do
       assert config.sets["tickets"].name == "Tickets"
     end
 
-    test "the catalog lists every set and names the current mode" do
+    test "the catalog states the active mode and marks it in the list" do
       prompt = AbilitySetSwitcher.catalog_prompt(switcher_config(), "billing")
 
-      assert prompt =~ "- billing: Invoices, balances, and payment status."
-      assert prompt =~ "- devices: Device inventory, packages, and deployments to devices."
-      assert prompt =~ "Current mode: billing."
-      assert prompt =~ "Call switch_mode only when"
+      assert prompt =~
+               "Active mode: billing (Billing). Its tools are already in your tool definitions. " <>
+                 "Do not call switch_mode for the active mode."
+
+      assert prompt =~ "- billing (Billing, active): Invoices, balances, and payment status."
+
+      assert prompt =~
+               "- devices (Devices): Device inventory, packages, and deployments to devices."
+
+      assert prompt =~ "Call switch_mode only when the request needs tools the active mode lacks."
+    end
+
+    test "the active statement comes before the list" do
+      prompt = AbilitySetSwitcher.catalog_prompt(switcher_config(), "devices")
+
+      {statement, _length} = :binary.match(prompt, "Active mode:")
+      {first_entry, _length} = :binary.match(prompt, "\n- ")
+      assert statement < first_entry
+    end
+
+    test "exactly the active set is marked active" do
+      config = switcher_config()
+
+      for {active, expected} <- [{nil, []}, {"devices", ["devices"]}, {"billing", ["billing"]}] do
+        marked =
+          config
+          |> AbilitySetSwitcher.catalog_prompt(active)
+          |> String.split("\n")
+          |> Enum.filter(&String.contains?(&1, ", active):"))
+          |> Enum.map(fn line -> line |> String.split(" ") |> Enum.at(1) end)
+
+        assert marked == expected
+      end
+    end
+
+    test "with no active set the catalog says only the general tools are available" do
+      prompt = AbilitySetSwitcher.catalog_prompt(switcher_config(), nil)
+
+      assert prompt =~ "Active mode: none. Only the general tools are available."
+      refute prompt =~ "Do not call switch_mode for the active mode."
+    end
+
+    test "the catalog uses a custom tool name throughout" do
+      prompt =
+        AbilitySetSwitcher.catalog_prompt(switcher_config(tool_name: "change_mode"), "devices")
+
+      assert prompt =~ "Do not call change_mode for the active mode."
+      assert prompt =~ "Call change_mode only when"
+      refute prompt =~ "switch_mode"
+    end
+
+    test "the catalog shows a display name that differs from the set name" do
+      config =
+        switcher_config(
+          sets: %{
+            "deploy" => %{name: "Deploy & Release", when_to_use: "Rolling out packages."},
+            "billing" => %{when_to_use: "Invoices."}
+          }
+        )
+
+      prompt = AbilitySetSwitcher.catalog_prompt(config, "deploy")
+
+      assert prompt =~ "Active mode: deploy (Deploy & Release)."
+      assert prompt =~ "- deploy (Deploy & Release, active): Rolling out packages."
+      assert prompt =~ "- billing (Billing): Invoices."
+    end
+
+    test "switch_result_message/2 matches what switch_mode returns" do
+      tool_sets = %{"list_devices" => ["devices"], "deploy_package" => ["devices"]}
+
+      callback = fn %{name: name, tools: tools} ->
+        "Now in #{name}, adding #{Enum.join(tools, ", ")}."
+      end
+
+      for switch_message <- [nil, "Custom devices message.", callback] do
+        devices = %{when_to_use: "Device inventory.", switch_message: switch_message}
+
+        config =
+          switcher_config(sets: %{"devices" => devices, "billing" => %{when_to_use: "Bills."}})
+
+        ability_sets = %{active: "billing", config: config, tool_sets: tool_sets}
+
+        assert {:ok, from_tool, _state} =
+                 switch_tool(config).function.(%{"mode" => "devices"}, %{
+                   ability_sets: ability_sets
+                 })
+
+        assert AbilitySetSwitcher.switch_result_message(ability_sets, "devices") == from_tool
+      end
+
+      ability_sets = %{
+        active: nil,
+        config:
+          switcher_config(
+            sets: %{"devices" => %{when_to_use: "Device inventory.", switch_message: callback}}
+          ),
+        tool_sets: tool_sets
+      }
+
+      assert AbilitySetSwitcher.switch_result_message(ability_sets, "devices") ==
+               "Now in Devices, adding deploy_package, list_devices."
     end
 
     test "the tool's mode parameter is an enum of the set names" do
@@ -679,7 +776,8 @@ defmodule Sagents.AbilitySetsTest do
       tool = switch_tool(switcher_config())
       context = %{ability_sets: %{active: "devices"}}
 
-      assert {:error, "Already in the Devices mode."} =
+      assert {:error,
+              "Already in the Devices mode. Its tools are in your tool definitions; continue with them."} =
                tool.function.(%{"mode" => "devices"}, context)
     end
 
@@ -719,7 +817,8 @@ defmodule Sagents.AbilitySetsTest do
       tool = switch_tool(switcher_config())
       context = %{state: State.new!(%{metadata: %{"active_ability_set" => "billing"}})}
 
-      assert {:error, "Already in the Billing mode."} =
+      assert {:error,
+              "Already in the Billing mode. Its tools are in your tool definitions; continue with them."} =
                tool.function.(%{"mode" => "billing"}, context)
     end
   end
