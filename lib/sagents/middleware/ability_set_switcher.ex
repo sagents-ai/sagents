@@ -166,7 +166,9 @@ defmodule Sagents.Middleware.AbilitySetSwitcher do
   `switch_mode` for the mode it is already in. A request that does not apply,
   because the set is already active or an earlier switch in the batch wins,
   adds nothing. The tool's own text should say what the tool did, not that the
-  mode changed.
+  mode changed. A tool that returns a `LangChain.MessageExpansion`, as one that
+  starts a skill or a command does, needs nothing more: the message is kept in
+  the trimmed result the model reads once the expansion is applied.
 
   ## The active set
 

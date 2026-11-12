@@ -12,6 +12,7 @@ defmodule Sagents.Mode.Steps do
   alias LangChain.Message
   alias LangChain.Message.ContentPart
   alias LangChain.Message.ToolResult
+  alias LangChain.MessageExpansion
   alias Sagents.AbilitySets
   alias Sagents.AbilitySets.Switch
   alias Sagents.Middleware.AbilitySetSwitcher
@@ -191,7 +192,9 @@ defmodule Sagents.Mode.Steps do
   When the switch that applies was requested by a tool other than
   `switch_mode`, the target set's switch message is appended to that tool's
   result, so the conversation records the switch in the words a `switch_mode`
-  call leaves.
+  call leaves. A result carrying a `LangChain.MessageExpansion` gets the
+  message in the expansion's `result_content` too, so it survives when the
+  expansion is applied and the result is trimmed to that content.
 
   A call naming a tool the chain does not have gets LangChain's not-found
   error. When the tool belongs to a declared set, the error is rewritten to
@@ -292,7 +295,8 @@ defmodule Sagents.Mode.Steps do
   end
 
   # The applied switch. A `switch_mode` result already carries the switch
-  # message; another tool's result gets it appended.
+  # message; another tool's result gets it appended, to its content and to
+  # the trimmed form its message expansion keeps.
   defp settle_result(
          %ToolResult{name: name} = result,
          index,
@@ -302,7 +306,9 @@ defmodule Sagents.Mode.Steps do
        )
        when name != config.tool_name do
     message = AbilitySetSwitcher.switch_result_message(context, target)
+
     %{result | content: append_text(result.content, message)}
+    |> append_to_expansion(message)
   end
 
   defp settle_result(result, _index, {_applied_index, target}, chain, context),
@@ -321,8 +327,29 @@ defmodule Sagents.Mode.Steps do
   defp append_text(content, text) when is_binary(content),
     do: [ContentPart.text!(content), ContentPart.text!(text)]
 
+  defp append_text(%ContentPart{} = part, text), do: [part, ContentPart.text!(text)]
+
   defp append_text(content, text) when is_list(content),
     do: content ++ [ContentPart.text!(text)]
+
+  # A result carrying a message expansion describes itself twice: `content`
+  # until the expansion is applied, and the expansion's `result_content`
+  # after, when the result is trimmed to it. The message goes in both, so the
+  # model reads it whichever one survives.
+  #
+  # A `nil` `result_content` means "keep `content`", which already carries the
+  # message. Appending to it would turn that into "replace the content with the
+  # message alone", dropping the tool's own text when the expansion is applied.
+  defp append_to_expansion(
+         %ToolResult{message_expansion: %MessageExpansion{result_content: kept} = expansion} =
+           result,
+         text
+       )
+       when not is_nil(kept) do
+    %{result | message_expansion: %{expansion | result_content: append_text(kept, text)}}
+  end
+
+  defp append_to_expansion(result, _text), do: result
 
   # A later tool's switch is not applied; the rest of its state changes are.
   defp drop_state_key(%ToolResult{processed_content: %State{} = delta} = result, state_key) do
