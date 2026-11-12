@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.21.2
+
+Mode switches made by tools other than `switch_mode` are now recorded in the conversation. When a tool's `AbilitySetSwitcher.request_mode_switch/2` switch applies, the target mode's switch message is added to that tool's result, in the same words a `switch_mode` call leaves. Without it, the model's tools changed for no visible reason and models called `switch_mode` for the mode they were already in. The system prompt's `## Modes` section also states the active mode up front and marks it in the list.
+
+**No breaking changes.** No API or option changes, and no code changes are needed. The text the model sees is different, so tests that assert on the old prompt or error wording need updating.
+
+### Upgrading from v0.21.1 - v0.21.2
+
+- Tests asserting on `Current mode: <set>.` should look for `Active mode: <set> (<Name>).`, or `Active mode: none.` with no set active. Mode list entries read `- <set> (<Name>): ...`, with `, active` inside the parentheses for the active set.
+- A tool that calls `request_mode_switch/2` no longer needs to describe the switch in its own result. A tool that already does will now say it twice; drop its own sentence.
+- A set's `:switch_message` callback now also runs for switches requested by other tools.
+- The system prompt changes for every agent with an `AbilitySetSwitcher`, so expect one prompt-cache miss per mode after upgrading.
+
+### Changed
+- When a tool other than `switch_mode` requests a switch that applies, the target set's switch message (its `:switch_message`, or the default) is added to that tool's result as a separate text part. The tool's own content is unchanged, so a JSON result stays parseable. A request that does not apply (the set is already active, or an earlier switch in the batch wins) adds nothing. Calls approved through HITL get the same treatment on resume. https://github.com/sagents-ai/sagents/pull/243
+- The `## Modes` section of the system prompt opens with an `Active mode:` statement saying the active mode's tools are already available and not to switch to it. Each mode in the list shows its display name, and the active one is marked. https://github.com/sagents-ai/sagents/pull/243
+- `switch_mode` for the mode already active returns `Already in the <Name> mode. Its tools are in your tool definitions; continue with them.` https://github.com/sagents-ai/sagents/pull/243
+
 ## v0.21.1
 
 `AskUserQuestion` can be configured to offer a different question tool, so an app no longer needs its own tool that duplicates it. Options set the tool's name, description, display text, system prompt section, option count limits, and which arguments it takes. A resumed question's tool result is now named after the call it answers, rather than always `ask_user`.
