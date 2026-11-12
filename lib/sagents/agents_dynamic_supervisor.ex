@@ -251,8 +251,28 @@ defmodule Sagents.AgentsDynamicSupervisor do
   - `agent_id` - Agent identifier
   - `opts` - Options (optional)
     - `:supervisor` - Supervisor reference (defaults to `__MODULE__`)
-    - `:reason` - Shutdown reason (defaults to `:normal`)
-    - `:timeout` - Shutdown timeout in milliseconds (defaults to `:infinity`)
+    - `:reason` - Exit reason used when the agent is stopped directly rather
+      than through the supervisor (defaults to `:normal`). See below.
+    - `:timeout` - Shutdown timeout in milliseconds for that direct stop
+      (defaults to `:infinity`)
+
+  ## Returns
+
+  - `:ok` - The agent is no longer running
+  - `{:error, :not_found}` - No agent is registered under `agent_id`
+  - `{:error, :registry_unavailable}` - This node's registry is shutting down
+  - `{:error, reason}` - The direct stop failed, for example on `:timeout`
+
+  ## Stopping an agent placed on another node
+
+  Under the `:horde` distribution backend, the registry and the supervisor
+  replicate their state separately. Shortly after an agent starts on another
+  node, this node's registry can already name its `AgentSupervisor` while this
+  node's supervisor does not yet hold it as a child, and
+  `Horde.DynamicSupervisor.terminate_child/2` answers `{:error, :not_found}`.
+  When that happens the `AgentSupervisor` is stopped directly by pid with
+  `Supervisor.stop/3`, which works across nodes. The child is `:transient`, so
+  its supervisor does not restart it after a `:normal` or `:shutdown` exit.
 
   ## Examples
 
@@ -260,19 +280,42 @@ defmodule Sagents.AgentsDynamicSupervisor do
       :ok = AgentsDynamicSupervisor.stop_agent("conversation-123", reason: :shutdown, timeout: 5000)
   """
   @spec stop_agent(String.t(), keyword()) ::
-          :ok | {:error, :not_found | :registry_unavailable}
+          :ok | {:error, :not_found | :registry_unavailable | term()}
   def stop_agent(agent_id, opts \\ []) when is_binary(agent_id) do
     supervisor = Keyword.get(opts, :supervisor, __MODULE__)
 
-    case AgentSupervisor.get_pid(agent_id) do
-      {:ok, pid} ->
-        Sagents.ProcessSupervisor.terminate_child(supervisor, pid)
-        Logger.debug("Stopped AgentSupervisor for agent_id=#{agent_id}")
+    with {:ok, pid} <- AgentSupervisor.get_pid(agent_id),
+         :ok <- terminate_agent_supervisor(supervisor, pid, opts) do
+      Logger.debug("Stopped AgentSupervisor for agent_id=#{agent_id}")
+      :ok
+    end
+  end
+
+  defp terminate_agent_supervisor(supervisor, pid, opts) do
+    case Sagents.ProcessSupervisor.terminate_child(supervisor, pid) do
+      :ok ->
         :ok
 
-      {:error, _reason} = error ->
-        error
+      # The registry names the pid but this node's supervisor does not hold it
+      # as a child, which under Horde means the process CRDT has not synced it
+      # here yet. Stop it directly instead.
+      {:error, :not_found} ->
+        stop_directly(
+          pid,
+          Keyword.get(opts, :reason, :normal),
+          Keyword.get(opts, :timeout, :infinity)
+        )
     end
+  end
+
+  defp stop_directly(pid, reason, timeout) do
+    Supervisor.stop(pid, reason, timeout)
+  catch
+    # Gone between the lookup and the stop. The caller asked for it not to be
+    # running, and it is not.
+    :exit, :noproc -> :ok
+    :exit, {:noproc, _call} -> :ok
+    :exit, reason -> {:error, reason}
   end
 
   @doc """
