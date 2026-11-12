@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.21.3
+
+A mode switch requested by a tool that returns a `LangChain.MessageExpansion` is now recorded in the conversation. This is the usual shape for a tool that starts a skill or slash command. In v0.21.2 the switch message was added only to the tool's fallback content, which the expansion replaces with its trimmed `result_content`, so the model never saw the switch.
+
+**No breaking changes.** No code changes are needed.
+
+### Upgrading from v0.21.2 - v0.21.3
+
+- A tool that returns a `MessageExpansion` and requests a switch now reads `<result_content>` followed by the switch message once the expansion is applied. If you added switch wording to `result_content` yourself to work around this, remove it, or it will appear twice.
+
+### Fixed
+- When a tool's requested mode switch applies and its result carries a `MessageExpansion` with a `result_content`, the switch message is now added to `result_content` as well as to the fallback content, so the model reads it whether or not the expansion is applied. This includes the default `result_content` that `MessageExpansion.expand/3` sets. The tool's own text is unchanged, and a `nil` `result_content` (keep the content) is left alone. https://github.com/sagents-ai/sagents/pull/246
+
 ## v0.21.2
 
 Mode switches made by tools other than `switch_mode` are now recorded in the conversation. When a tool's `AbilitySetSwitcher.request_mode_switch/2` switch applies, the target mode's switch message is added to that tool's result, in the same words a `switch_mode` call leaves. Without it, the model's tools changed for no visible reason and models called `switch_mode` for the mode they were already in. The system prompt's `## Modes` section also states the active mode up front and marks it in the list.
