@@ -774,23 +774,37 @@ defmodule Sagents.AbilitySetsExecutionTest do
       refute_received {:switched, _measurements, _metadata}
     end
 
-    test "the tool's message expansion arrives on the first call after the switch" do
-      material = "Device fleet: 12 gateways, 3 offline."
+    @fleet "Device fleet: 12 gateways, 3 offline."
 
-      load_devices = fn context ->
-        {:ok, switch} = AbilitySetSwitcher.request_mode_switch(context, "devices")
+    @devices_note "Switched to the Devices mode. " <>
+                    "Your tools now match this mode; use the tool definitions you have."
+
+    # A tool that requests a switch to `set` and expands into one user message
+    # carrying the fleet material. `result_content` is passed as given, `nil`
+    # included.
+    defp load_fleet(result_content, set \\ "devices") do
+      fn context ->
+        {:ok, switch} = AbilitySetSwitcher.request_mode_switch(context, set)
 
         {:ok, result} =
           LangChain.MessageExpansion.expand(
-            "Loaded the fleet.\n\n" <> material,
-            [Message.new_user!(material)],
-            result_content: "Loaded the fleet."
+            "Loaded the fleet.\n\n" <> @fleet,
+            [Message.new_user!(@fleet)],
+            result_content: result_content
           )
 
         {:ok, %ToolResult{result | processed_content: switch}}
       end
+    end
 
-      agent = new_agent!(rail_results: %{"load_devices" => load_devices})
+    defp fleet_inserted?(messages) do
+      Enum.any?(messages, fn message ->
+        message.role == :user and ContentPart.content_to_string(message.content) == @fleet
+      end)
+    end
+
+    test "the tool's message expansion arrives on the first call after the switch, with the switch message" do
+      agent = new_agent!(rail_results: %{"load_devices" => load_fleet("Loaded the fleet.")})
 
       expect_responses([
         tool_calls_message([{"c1", "load_devices", %{}}]),
@@ -801,13 +815,126 @@ defmodule Sagents.AbilitySetsExecutionTest do
 
       assert [_first, {messages, tools}] = received_llm_calls()
       assert "list_devices" in tools
-
-      assert Enum.any?(messages, fn message ->
-               message.role == :user and
-                 ContentPart.content_to_string(message.content) == material
-             end)
-
+      assert fleet_inserted?(messages)
       assert final_state.metadata["active_ability_set"] == "devices"
+
+      # The result is trimmed to its result_content, and the switch message
+      # survives the trim, once, both in what the model reads and in the
+      # final state.
+      expected = "Loaded the fleet.\n\n" <> @devices_note
+
+      sent = Enum.find(tool_results(messages), &(&1.tool_call_id == "c1"))
+      assert result_text(sent) == expected
+
+      loaded = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
+      assert result_text(loaded) == expected
+      assert is_nil(loaded.message_expansion)
+    end
+
+    test "an expansion keeping its content has the switch message once, after that content" do
+      agent = new_agent!(rail_results: %{"load_devices" => load_fleet(nil)})
+
+      expect_responses([
+        tool_calls_message([{"c1", "load_devices", %{}}]),
+        Message.new_assistant!("Done")
+      ])
+
+      assert {:ok, final_state} = Agent.execute(agent, state())
+      assert [_first, {messages, _tools}] = received_llm_calls()
+      assert fleet_inserted?(messages)
+
+      loaded = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
+      assert result_text(loaded) == "Loaded the fleet.\n\n" <> @fleet <> "\n\n" <> @devices_note
+    end
+
+    test "an expansion trimmed to a single content part keeps that part, then the switch message" do
+      kept = ContentPart.text!("Loaded the fleet.")
+      agent = new_agent!(rail_results: %{"load_devices" => load_fleet(kept)})
+
+      expect_responses([
+        tool_calls_message([{"c1", "load_devices", %{}}]),
+        Message.new_assistant!("Done")
+      ])
+
+      assert {:ok, final_state} = Agent.execute(agent, state())
+
+      loaded = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
+
+      assert [^kept, %ContentPart{type: :text, content: @devices_note}] = loaded.content
+    end
+
+    test "an expansion whose switch is for the active set is trimmed with no switch message" do
+      agent = new_agent!(rail_results: %{"load_devices" => load_fleet("Loaded the fleet.")})
+
+      expect_responses([
+        tool_calls_message([{"c1", "load_devices", %{}}]),
+        Message.new_assistant!("Done")
+      ])
+
+      assert {:ok, final_state} =
+               Agent.execute(agent, state(%{"active_ability_set" => "devices"}))
+
+      assert [_first, {messages, _tools}] = received_llm_calls()
+      assert fleet_inserted?(messages)
+
+      loaded = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
+      assert result_text(loaded) == "Loaded the fleet."
+    end
+
+    test "an expansion whose switch loses to an earlier switch_mode is trimmed with no switch message" do
+      agent = new_agent!(rail_results: %{"load_devices" => load_fleet("Loaded the fleet.")})
+
+      expect_responses([
+        tool_calls_message([switch_call("s1", "billing"), {"c1", "load_devices", %{}}]),
+        Message.new_assistant!("Done")
+      ])
+
+      assert {:ok, final_state} = Agent.execute(agent, state())
+      assert final_state.metadata["active_ability_set"] == "billing"
+
+      loaded = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
+      assert result_text(loaded) == "Loaded the fleet."
+    end
+
+    test "an expansion in a batch that stops on until_tool keeps its content and the switch message" do
+      agent = new_agent!(rail_results: %{"load_devices" => load_fleet("Loaded the fleet.")})
+
+      expect_responses([tool_calls_message([{"c1", "load_devices", %{}}])])
+
+      assert {:ok, final_state, %ToolResult{name: "load_devices"}} =
+               Agent.execute(agent, state(), until_tool: "load_devices")
+
+      assert [_only_call] = received_llm_calls()
+      assert final_state.metadata["active_ability_set"] == "devices"
+      refute fleet_inserted?(final_state.messages)
+
+      # The expansion is not applied, so the model would read the fallback.
+      loaded = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
+      assert result_text(loaded) == "Loaded the fleet.\n\n" <> @fleet <> "\n\n" <> @devices_note
+    end
+
+    test "an expansion approved through HITL keeps the switch message after resume" do
+      agent =
+        new_agent!(
+          rail_results: %{"load_devices" => load_fleet("Loaded the fleet.")},
+          interrupt_on: %{"load_devices" => true}
+        )
+
+      expect_responses([tool_calls_message([{"c1", "load_devices", %{}}])])
+
+      assert {:interrupt, interrupted_state, _data} = Agent.execute(agent, state())
+      assert [_first] = received_llm_calls()
+
+      expect_responses([Message.new_assistant!("Done")])
+
+      assert {:ok, final_state} = Agent.resume(agent, interrupted_state, [%{type: :approve}])
+      assert final_state.metadata["active_ability_set"] == "devices"
+
+      assert [{messages, _tools}] = received_llm_calls()
+      assert fleet_inserted?(messages)
+
+      loaded = Enum.find(tool_results(final_state.messages), &(&1.tool_call_id == "c1"))
+      assert result_text(loaded) == "Loaded the fleet.\n\n" <> @devices_note
     end
 
     test "a switch_mode call earlier in the batch wins over it" do
