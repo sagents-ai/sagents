@@ -261,6 +261,39 @@ defmodule Sagents.SessionTest do
       refute Keyword.has_key?(built, :pending_resume)
     end
 
+    test "under :horde, leaves the built agent and state for the hosting node to build" do
+      _fake_pid = stub_supervisor_ok(self())
+      stub(Sagents.ProcessSupervisor, :distribution_type, fn -> :horde end)
+
+      assert {:ok, _info} = Session.start(base_config(), 3, scope: :s)
+
+      # Built once in the caller, so router and factory errors still reach it.
+      assert_receive {:factory_called, "conversation-3", _config}
+      assert_receive {:supervisor_config, opts}
+
+      refute Keyword.has_key?(opts, :agent)
+      refute Keyword.has_key?(opts, :initial_state)
+      assert {Session, :build_start_opts, [build_args]} = opts[:builder]
+      assert opts[:agent_id] == "conversation-3"
+      assert opts[:agent_persistence] == StubPersistence
+
+      # The builder supplies what the start options leave out.
+      assert {:ok, built} = Session.build_start_opts(build_args)
+      assert %Sagents.Agent{agent_id: "conversation-3"} = built[:agent]
+      assert %Sagents.State{} = built[:initial_state]
+    end
+
+    test "under :local, starts from the agent and state already built" do
+      _fake_pid = stub_supervisor_ok(self())
+      stub(Sagents.ProcessSupervisor, :distribution_type, fn -> :local end)
+
+      assert {:ok, _info} = Session.start(base_config(), 4, scope: :s)
+
+      assert_receive {:supervisor_config, opts}
+      assert %Sagents.Agent{agent_id: "conversation-4"} = opts[:agent]
+      assert %Sagents.State{} = opts[:initial_state]
+    end
+
     test "raises with a clear migration error when factory uses legacy create_agent/1" do
       _fake_pid = stub_supervisor_ok(self())
 
