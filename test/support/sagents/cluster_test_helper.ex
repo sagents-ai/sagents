@@ -264,9 +264,11 @@ defmodule Sagents.ClusterTestHelper do
   @doc """
   Start a minimal agent on this node through the real supervisor path.
 
-  Uses a stub chat model config; nothing here makes an API call.
+  Uses a stub chat model config; nothing here makes an API call. `start_fun`
+  is `:start_agent_sync` (the default) or `:start_agent`, which returns without
+  waiting for the AgentServer to register.
   """
-  def start_agent(agent_id) do
+  def start_agent(agent_id, start_fun \\ :start_agent_sync) do
     agent =
       Sagents.Agent.new!(
         %{
@@ -282,11 +284,37 @@ defmodule Sagents.ClusterTestHelper do
         replace_default_middleware: true
       )
 
-    Sagents.AgentsDynamicSupervisor.start_agent_sync(
-      agent_id: agent_id,
-      agent: agent,
-      initial_state: Sagents.State.new!(%{})
-    )
+    apply(Sagents.AgentsDynamicSupervisor, start_fun, [
+      [agent_id: agent_id, agent: agent, initial_state: Sagents.State.new!(%{})]
+    ])
+  end
+
+  @doc """
+  Wait until this node's registry names `agent_id`'s AgentSupervisor, then stop
+  it with `Sagents.AgentsDynamicSupervisor.stop_agent/1` straight away.
+
+  Runs the wait on this node so the stop lands as soon as the registry replica
+  has the entry, which can be before this node's supervisor CRDT holds the
+  child. Returns `{stop_result, pid}`.
+  """
+  def stop_agent_when_visible(agent_id, timeout \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_stop_agent_when_visible(agent_id, deadline)
+  end
+
+  defp do_stop_agent_when_visible(agent_id, deadline) do
+    case Sagents.AgentSupervisor.get_pid(agent_id) do
+      {:ok, pid} ->
+        {Sagents.AgentsDynamicSupervisor.stop_agent(agent_id), pid}
+
+      {:error, _reason} = error ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(1)
+          do_stop_agent_when_visible(agent_id, deadline)
+        else
+          {error, nil}
+        end
+    end
   end
 
   # ---------------------------------------------------------------------------

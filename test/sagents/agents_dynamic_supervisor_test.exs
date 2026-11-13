@@ -1,11 +1,11 @@
 defmodule Sagents.AgentsDynamicSupervisorTest do
   @moduledoc """
-  Unit tests for the registration-timeout resilience added to
-  `Sagents.AgentsDynamicSupervisor`.
+  Unit tests for `Sagents.AgentsDynamicSupervisor`'s handling of registration
+  timeouts on start and of children its supervisor does not hold on stop.
 
-  These tests stub `Sagents.ProcessSupervisor.start_child/2` and the registry
-  lookup with Mimic so the recovery/retry logic can be exercised without a real
-  Horde cluster.
+  These tests stub `Sagents.ProcessSupervisor` and the registry lookup with
+  Mimic so the recovery/retry logic can be exercised without a real Horde
+  cluster.
   """
   use ExUnit.Case, async: true
   use Mimic
@@ -93,6 +93,71 @@ defmodule Sagents.AgentsDynamicSupervisorTest do
                  registration_retries: 2,
                  registration_retry_backoff: 0
                )
+    end
+  end
+
+  describe "stop_agent/2" do
+    # Stands in for an AgentSupervisor: a real supervisor process the registry
+    # can name, unlinked so stopping it does not take the test down.
+    defp start_standin_supervisor do
+      {:ok, pid} = Supervisor.start_link([], strategy: :one_for_one)
+      Process.unlink(pid)
+      pid
+    end
+
+    test "stops the agent through its supervisor when the supervisor holds it" do
+      pid = start_standin_supervisor()
+      on_exit(fn -> Process.exit(pid, :kill) end)
+
+      stub(AgentSupervisor, :get_pid, fn "conversation-held" -> {:ok, pid} end)
+      expect(ProcessSupervisor, :terminate_child, fn _sup, ^pid -> :ok end)
+
+      assert :ok = AgentsDynamicSupervisor.stop_agent("conversation-held")
+
+      # terminate_child/2 is stubbed, so the process is untouched: nothing else
+      # stopped it.
+      assert Process.alive?(pid)
+    end
+
+    test "stops the agent directly when its supervisor does not hold it yet" do
+      pid = start_standin_supervisor()
+      ref = Process.monitor(pid)
+
+      stub(AgentSupervisor, :get_pid, fn "conversation-unsynced" -> {:ok, pid} end)
+      expect(ProcessSupervisor, :terminate_child, fn _sup, ^pid -> {:error, :not_found} end)
+
+      assert :ok = AgentsDynamicSupervisor.stop_agent("conversation-unsynced")
+      assert_received {:DOWN, ^ref, :process, ^pid, :normal}
+    end
+
+    test "uses the :reason option for a direct stop" do
+      pid = start_standin_supervisor()
+      ref = Process.monitor(pid)
+
+      stub(AgentSupervisor, :get_pid, fn "conversation-reason" -> {:ok, pid} end)
+      stub(ProcessSupervisor, :terminate_child, fn _sup, ^pid -> {:error, :not_found} end)
+
+      assert :ok = AgentsDynamicSupervisor.stop_agent("conversation-reason", reason: :shutdown)
+      assert_received {:DOWN, ^ref, :process, ^pid, :shutdown}
+    end
+
+    test "returns :ok when the agent exits before the direct stop reaches it" do
+      pid = start_standin_supervisor()
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+
+      stub(AgentSupervisor, :get_pid, fn "conversation-gone" -> {:ok, pid} end)
+      stub(ProcessSupervisor, :terminate_child, fn _sup, ^pid -> {:error, :not_found} end)
+
+      assert :ok = AgentsDynamicSupervisor.stop_agent("conversation-gone")
+    end
+
+    test "returns the lookup error when no agent is registered" do
+      stub(AgentSupervisor, :get_pid, fn "conversation-missing" -> {:error, :not_found} end)
+      reject(&ProcessSupervisor.terminate_child/2)
+
+      assert {:error, :not_found} = AgentsDynamicSupervisor.stop_agent("conversation-missing")
     end
   end
 end
