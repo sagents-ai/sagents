@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.21.4
+
+Two fixes for the `:horde` distribution backend. `stop_agent/2` now stops an agent even when this node's supervisor does not hold it yet, and idle agents no longer replicate their full agent and state to every node on each sync.
+
+**No breaking changes.** No code changes are needed.
+
+### Upgrading from v0.21.3 - v0.21.4
+
+- `AgentsDynamicSupervisor.stop_agent/2` can now return `{:error, reason}` (for example on a `:timeout`) where it returned `:ok` before. The `:reason` and `:timeout` options are now applied.
+- Under `:horde`, a start through `Sagents.Session` runs the router, factory, and `State.load_or_new` twice: once in the caller and once on the hosting node. Starts already placed on another node did this.
+- If you call `start_agent/1` with your own builder under `:horde`, leave `:agent` and `:initial_state` out of the start options and let the builder supply them. See `docs/clustering.md`.
+
+### Fixed
+- Under `:horde`, `stop_agent/2` returned `:ok` while the agent kept running when the registry named an `AgentSupervisor` that this node's supervisor CRDT did not hold yet. It now stops that supervisor directly by pid, and returns errors from the stop instead of swallowing them. https://github.com/sagents-ai/sagents/pull/245
+- Under `:horde`, `Session` no longer puts the built `%Agent{}` and loaded `State` in the Horde child spec. Horde resends those options to every member on each sync tick, so idle agents cost tens of kilobytes each of continuous CPU and network per node. The hosting node now builds from the builder. https://github.com/sagents-ai/sagents/pull/248
+
 ## v0.21.3
 
 A mode switch requested by a tool that returns a `LangChain.MessageExpansion` is now recorded in the conversation. This is the usual shape for a tool that starts a skill or slash command. In v0.21.2 the switch message was added only to the tool's fallback content, which the expansion replaces with its trimmed `result_content`, so the model never saw the switch.
