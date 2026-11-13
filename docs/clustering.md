@@ -238,11 +238,11 @@ somewhere on your behalf.
 
 ### A moved agent is built by the node that runs it
 
-A handed-over agent is restarted from the options of its original start. Those
-options include the `%Sagents.Agent{}` built by the node that requested the
-start, and during a rolling deploy the survivor is often running the next build.
-Horde can also place a direct start on another member, so the same mismatch
-applies to a start requested during a deploy.
+A handed-over agent is restarted from the options of its original start. When
+those options include a `%Sagents.Agent{}`, it was built by the node that
+requested the start, and during a rolling deploy the survivor is often running
+the next build. Horde can also place a direct start on another member, so the
+same mismatch applies to a start requested during a deploy.
 
 An agent built by another build is wrong in two ways:
 
@@ -256,14 +256,27 @@ An agent built by another build is wrong in two ways:
   tool result.
 
 `Sagents.Session` avoids both. It starts every agent with a `:builder` that
-re-runs your `Sagents.FactoryRouter` and `Sagents.Factory`, and
-`Sagents.AgentSupervisor.start_link/1` uses it whenever the agent is about to
-run somewhere other than the node run that built it. The moved agent is then
-built by the code that runs it, with its persisted state restored, and
-`[:sagents, :agent, :built]` is emitted with `%{count: 1}` and
-`%{agent_id: _, reason: _, node: _}`. A start that stays on the node that
-requested it uses the agent that node already built, so the factory runs once
-per start in the common case.
+re-runs your `Sagents.FactoryRouter` and `Sagents.Factory`, and leaves the
+built agent and its loaded state out of the start options.
+`Sagents.AgentSupervisor.start_link/1` runs the builder on whichever node hosts
+the agent, so the agent is always built by the code that runs it, with its
+persisted state restored. Each build emits `[:sagents, :agent, :built]` with
+`%{count: 1}` and `%{agent_id: _, reason: _, node: _}`.
+
+`Sagents.Session` also builds the agent once in the calling process before the
+start, so router and factory errors are returned to the caller. A start
+therefore runs the router, the factory, and the state load twice: once in the
+caller and once on the hosting node.
+
+#### Why the start options stay small
+
+Horde stores each child's start options in a DeltaCrdt replicated to every
+member, and each sync interval (300 ms by default) resends the values it holds,
+changed or not. Options carrying an `%Agent{}` (its tools, middleware config,
+and system prompt) and a conversation's loaded state run to tens of kilobytes,
+so a cluster of idle agents holding them spends CPU and network on every node
+continuously, in proportion to their size. Options holding only a builder and
+plain configuration keep that cost small.
 
 This makes the router and factory part of the restart path. They may run inside
 a supervisor on another node rather than in the process that called
@@ -272,8 +285,9 @@ dictionary, `self()`, or Logger and tracing context set by the caller. Inputs
 belong in the scope and `:request_opts`, which travel with the start.
 
 If you start agents with `Sagents.AgentsDynamicSupervisor.start_agent/1`
-directly, pass your own `:builder`. See `Sagents.AgentSupervisor.start_link/1`
-for its contract.
+directly, pass your own `:builder`, and leave out `:agent` and `:initial_state`
+when it returns them. See `Sagents.AgentSupervisor.start_link/1` for its
+contract.
 
 #### Without a builder
 

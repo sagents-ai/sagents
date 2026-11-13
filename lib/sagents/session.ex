@@ -52,6 +52,14 @@ defmodule Sagents.Session do
   or moves the agent onto a node other than the one that built it, that node
   builds the agent again from its own code. The router and factory therefore
   have to work outside the calling process; see `Sagents.Factory`.
+
+  Under the `:horde` backend the built agent and its loaded state are not part
+  of the start options Horde stores. Horde replicates those options to every
+  node and resends them on each sync, so an idle agent's cost grows with their
+  size. The node hosting the agent always builds it, including when that is the
+  calling node, which runs the router, the factory, and the state load a second
+  time. The build in the calling process still runs first, so its errors are
+  returned to the caller.
   """
 
   require Logger
@@ -570,6 +578,7 @@ defmodule Sagents.Session do
     with {:ok, start_opts} <- build_start_opts(build_args) do
       supervisor_config =
         start_opts
+        |> drop_replicated_build()
         |> Keyword.put(:builder, {__MODULE__, :build_start_opts, [build_args]})
         |> Keyword.put(:initial_subscribers, Keyword.get(opts, :initial_subscribers, []))
         |> Keyword.put(:pending_resume, Keyword.get(opts, :pending_resume))
@@ -583,6 +592,19 @@ defmodule Sagents.Session do
           Logger.error("Failed to start agent session: #{inspect(reason)}")
           {:error, reason}
       end
+    end
+  end
+
+  # Under Horde the start options become the child spec, which every node holds
+  # a replica of. DeltaCrdt resends the values of unchanged keys on every sync
+  # interval, so the cost of an idle agent grows with the size of its spec. The
+  # agent and its loaded state are the large parts, and the builder returns
+  # both, so they are left out and the hosting node builds them. The local
+  # backend keeps no replicas and starts from the build already made.
+  defp drop_replicated_build(start_opts) do
+    case Sagents.ProcessSupervisor.distribution_type() do
+      :horde -> Keyword.drop(start_opts, [:agent, :initial_state])
+      :local -> start_opts
     end
   end
 
