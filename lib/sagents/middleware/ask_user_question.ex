@@ -149,6 +149,7 @@ defmodule Sagents.Middleware.AskUserQuestion do
   alias Sagents.AgentServer
   alias Sagents.State
   alias LangChain.Function
+  alias LangChain.Message.ContentPart
   alias LangChain.Message.ToolResult
 
   @all_response_types [:single_select, :multi_select, :freeform]
@@ -418,12 +419,17 @@ defmodule Sagents.Middleware.AskUserQuestion do
   # was built from the tool that was called, so the answered result keeps that
   # call's name and display text whatever this middleware's tool is named. A
   # state without the placeholder is returned unchanged.
-  defp answer_question(state, question_data, response, content) do
+  #
+  # The struct is updated directly, which skips the changeset that turns a
+  # string into content parts, so the text is wrapped here. A bare string
+  # reaches the chat model's encoder as the tool result's content, and an
+  # encoder that only takes content parts (Chat Completions) crashes on it.
+  defp answer_question(state, question_data, response, text) do
     case State.find_tool_result(state, question_data.tool_call_id) do
       %ToolResult{} = placeholder ->
         answered = %ToolResult{
           placeholder
-          | content: content,
+          | content: [ContentPart.text!(text)],
             processed_content: answer_data(response, question_data),
             is_interrupt: false,
             interrupt_data: nil

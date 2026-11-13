@@ -6,9 +6,9 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
   alias Sagents.State
   alias Sagents.Agent
 
-  # ToolResult.content may be a string or a list of ContentParts
-  defp content_text(content) when is_binary(content), do: content
-
+  # Answered tool results carry a list of ContentParts. There is deliberately
+  # no clause for a bare string: chat model encoders reject one, so a string
+  # reaching here fails every test that reads the result.
   defp content_text(content) when is_list(content) do
     Enum.map_join(content, "", fn
       %{content: text} -> text
@@ -637,6 +637,26 @@ defmodule Sagents.Middleware.AskUserQuestionTest do
       assert tool_result.tool_call_id == "call_123"
       assert content_text(tool_result.content) =~ "postgresql"
       refute tool_result.is_interrupt
+    end
+
+    test "the answer is content parts, which every chat model can encode", %{
+      config: config,
+      state: state
+    } do
+      response = %{type: :answer, selected: ["postgresql"]}
+
+      assert {:ok, updated_state} =
+               AskUserQuestion.handle_resume(nil, state, response, config, [])
+
+      [tool_result] = List.last(updated_state.messages).tool_results
+      assert [%LangChain.Message.ContentPart{type: :text}] = tool_result.content
+
+      # The Chat Completions encoder accepts only content parts. A bare string
+      # here raises a FunctionClauseError when the conversation is next sent.
+      message = List.last(updated_state.messages)
+
+      assert [%{"role" => :tool, "content" => [%{"type" => "text"}]}] =
+               LangChain.ChatModels.ChatCompletionsFormat.messages_for_api([message], [])
     end
 
     test "cancel response returns {:ok, state} with cancellation message", %{
