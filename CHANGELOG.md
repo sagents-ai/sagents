@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.21.5
+
+Answering an `AskUserQuestion` question no longer crashes the next LLM request on models that use the Chat Completions format (OpenAI-compatible providers). This regression shipped in v0.21.1 and affected every answer and cancel. Anthropic models were not affected.
+
+**No breaking changes.** No code changes are needed.
+
+### Upgrading from v0.21.4 - v0.21.5
+
+- No migration is needed. A conversation saved with an answered question from v0.21.1 through v0.21.4 is converted when it loads, so an agent stuck on that error works again once it restarts on v0.21.5.
+
+### Fixed
+- `AskUserQuestion` stored an answered question's tool result `content` as a bare string instead of a list of content parts, and the Chat Completions encoder raised a `FunctionClauseError` on the next request. The answer is now a text content part. https://github.com/sagents-ai/sagents/pull/250
+
 ## v0.21.4
 
 Two fixes for the `:horde` distribution backend. `stop_agent/2` now stops an agent even when this node's supervisor does not hold it yet, and idle agents no longer replicate their full agent and state to every node on each sync.
