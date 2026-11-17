@@ -83,15 +83,53 @@ defmodule Sagents.Middleware.ProcessContext do
   snapshot in the agent's `state.runtime` and is used for every subsequent
   boundary crossing.
 
+  ## Where the capture runs
+
+  The capture runs in whatever process calls `Sagents.Agent.new/2`, which for
+  an agent started through `Sagents.Session` is the `Sagents.Factory`. That is
+  the calling process in the common case. Under the `:horde` distribution the
+  factory also runs, in the agent's `Sagents.AgentSupervisor` process, when
+  Horde places the agent on a node other than the caller's, hands it over to
+  another node, or a supervisor restarts it. There the process dictionary holds
+  none of the caller's keys, and a capture function sees the supervisor's
+  context, not the request's.
+
+  For context that has to be right on those paths too, such as a tenant,
+  derive it from the agent's scope or the session's `:request_opts` in the
+  factory and pass it to a propagator, rather than capturing it from the
+  process dictionary:
+
+      def create_agent(agent_id, %MyConfig{scope: scope} = config) do
+        org_id = scope.organization_id
+
+        {:ok, agent} =
+          Sagents.Agent.new(%{
+            agent_id: agent_id,
+            model: config.model,
+            middleware: [
+              {Sagents.Middleware.ProcessContext,
+                keys: [:sentry_context],
+                propagators: [
+                  {fn -> org_id end, &MyApp.Repo.put_org_id/1}
+                ]}
+            ]
+          })
+
+        {:ok, agent, []}
+      end
+
+  Request-scoped context (Sentry tags, the request's trace span) cannot be
+  rebuilt that way. After a move or a restart it is absent until the next
+  `update/1`.
+
   ## Snapshot lives in `state.runtime`
 
   The captured snapshot intentionally contains non-serializable values
   (closures, OTel context tokens, PIDs, tuples). It is therefore stored under
   `state.runtime[ProcessContext]`, a virtual field that `StateSerializer`
-  never persists. After process restart the snapshot is gone and
-  `on_server_start/2` re-captures from the new caller process — which is the
-  correct semantic, since a stale OTel/Sentry/tenant token would be wrong to
-  re-apply anyway.
+  never persists. When the AgentServer starts, including a restart by its
+  supervisor, `on_server_start/2` starts from the snapshot captured when the
+  agent was built, not from any `update/1` made since.
 
       # In a LiveView, before relaying a new user message to the agent:
       Sagents.Middleware.ProcessContext.update(agent_id)

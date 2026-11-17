@@ -78,6 +78,7 @@ defmodule Sagents.AgentSupervisor do
 
   alias Sagents.Agent
   alias Sagents.AgentServer
+  alias Sagents.BuildHandoff
   alias Sagents.Closures
   alias Sagents.ProcessRegistry
   alias Sagents.SubAgentsDynamicSupervisor
@@ -185,11 +186,22 @@ defmodule Sagents.AgentSupervisor do
     node (`Sagents.AgentsDynamicSupervisor.start_agent/1` records which), or
   - the options hold an anonymous function this node cannot call.
 
+  The builder runs in the new `AgentSupervisor` process, during its `init/1`,
+  so anything it leaves in the process dictionary stays with this agent. It
+  does not run in the calling process, so it cannot rely on that process's
+  dictionary, `self()`, or context.
+
   The builder returns `{:ok, opts}` or `{:error, reason}`. The returned options
   replace those of the original start, and options it does not return are kept,
   so a builder returns everything it is responsible for (normally `:agent`,
   `:initial_state`, and any configuration derived alongside them). An error is
   returned from `start_link/1`, and on a handover the agent is not started.
+
+  `Sagents.Session` leaves `:agent` out of the options under `:horde` and hands
+  the agent it built to the start through a table on its own node. A start that
+  Horde places on that node, by the same run, starts from that agent without
+  calling the builder. A start placed on another node, a handover, and a
+  restart by a supervisor find nothing there and call the builder.
 
   Store only modules and plain data in `args`. They travel with the options, so
   an anonymous function in `args` has the same problem the builder exists to
@@ -238,13 +250,7 @@ defmodule Sagents.AgentSupervisor do
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(config) do
     {name, config} = Keyword.pop(config, :name, __MODULE__)
-
-    # This runs in the placing supervisor on the node that will host the agent,
-    # so the build and the check both happen against the code that will run it.
-    with {:ok, config} <- prepare_config(config),
-         :ok <- check_closures(config) do
-      Supervisor.start_link(__MODULE__, config, name: name)
-    end
+    Supervisor.start_link(__MODULE__, config, name: name)
   end
 
   @doc false
@@ -257,6 +263,8 @@ defmodule Sagents.AgentSupervisor do
   defp prepare_config(config) do
     {builder, config} = Keyword.pop(config, :builder)
     {origin, config} = Keyword.pop(config, :origin)
+    {handoff, config} = Keyword.pop(config, :build_handoff)
+    config = take_handed_off_build(config, handoff, origin)
 
     case builder do
       nil ->
@@ -271,6 +279,28 @@ defmodule Sagents.AgentSupervisor do
       other ->
         raise ArgumentError,
               "`:builder` must be a {module, function, args} tuple, got: #{inspect(other)}"
+    end
+  end
+
+  # A start whose options leave out the built agent can carry a key to it in
+  # this node's build handoff table (see `Sagents.Session`). The entry exists
+  # only on the node and run that requested the start, and only until it is
+  # taken, so a start Horde placed elsewhere, a handover, and a restart by a
+  # supervisor all find nothing and fall through to the builder.
+  defp take_handed_off_build(config, nil, _origin), do: config
+
+  defp take_handed_off_build(config, handoff, origin) do
+    with false <- Keyword.has_key?(config, :agent),
+         true <- origin == incarnation(),
+         {:ok, build} <- BuildHandoff.take(handoff) do
+      Logger.debug(
+        "Starting agent #{inspect(Keyword.get(config, :agent_id))} on #{node()} " <>
+          "from the build made by the process that requested the start"
+      )
+
+      Keyword.merge(config, build)
+    else
+      _no_build -> config
     end
   end
 
@@ -446,6 +476,29 @@ defmodule Sagents.AgentSupervisor do
 
   @impl true
   def init(config) do
+    # The build and the closure check run here, in this agent's own supervisor
+    # process on the node that hosts it, so both happen against the code that
+    # will run the agent. Anything a router or factory leaves in the process
+    # dictionary stays with this agent rather than in the placing supervisor,
+    # which every agent on the node shares. The placing supervisor still waits
+    # for init/1 to return before it handles its next request.
+    #
+    # A builder error is thrown rather than returned. `:supervisor` accepts only
+    # `{:ok, spec}` or `:ignore` from this callback, but the gen_server running
+    # it treats a value thrown from init as its result, and `{:error, reason}`
+    # there ends the start without a crash: the name is released, the process
+    # exits `:normal` (so a linked caller is not taken down), and start_link/1
+    # returns `{:error, reason}`.
+    with {:ok, config} <- prepare_config(config),
+         :ok <- check_closures(config) do
+      init_children(config)
+    else
+      {:error, _reason} = error -> throw(error)
+      :ignore -> :ignore
+    end
+  end
+
+  defp init_children(config) do
     # Extract and validate agent first (before accessing agent_id)
     agent = Keyword.fetch!(config, :agent)
 

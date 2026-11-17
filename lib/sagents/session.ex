@@ -49,17 +49,24 @@ defmodule Sagents.Session do
   Every agent is started with a `:builder` (see
   `Sagents.AgentSupervisor.start_link/1`) that repeats the router and factory
   calls from the scope, conversation id, and `:request_opts`. When Horde places
-  or moves the agent onto a node other than the one that built it, that node
-  builds the agent again from its own code. The router and factory therefore
-  have to work outside the calling process; see `Sagents.Factory`.
+  or moves the agent onto a node other than the one that built it, or a
+  supervisor restarts it, the hosting node builds the agent again from its own
+  code. The router and factory therefore have to work outside the calling
+  process; see `Sagents.Factory`.
 
-  Under the `:horde` backend the built agent and its loaded state are not part
-  of the start options Horde stores. Horde replicates those options to every
-  node and resends them on each sync, so an idle agent's cost grows with their
-  size. The node hosting the agent always builds it, including when that is the
-  calling node, which runs the router, the factory, and the state load a second
-  time. The build in the calling process still runs first, so its errors are
-  returned to the caller.
+  The agent is first built in the calling process, so router and factory
+  errors are returned to the caller. Under the `:horde` backend that agent and
+  its initial state are not part of the start options Horde stores: Horde
+  replicates those options to every node and resends them on each sync, so an
+  idle agent's cost would grow with their size. They are handed to the start
+  through a table on the calling node instead. When Horde places the agent on
+  that node, it starts from the caller's build, and the router and factory run
+  once, in the calling process. When Horde places it on another node, that node
+  builds it.
+
+  The build does not read the persisted conversation. The `Sagents.AgentServer`
+  reads it when it starts, and uses the initial state only when nothing is
+  persisted.
   """
 
   require Logger
@@ -69,6 +76,7 @@ defmodule Sagents.Session do
     AgentSupervisor,
     AgentsDynamicSupervisor,
     AgentUtils,
+    BuildHandoff,
     Publisher,
     State,
     Subscriber
@@ -574,23 +582,30 @@ defmodule Sagents.Session do
 
     # The first build runs here, in the caller, so router and factory errors
     # reach the caller directly. The builder repeats it on the hosting node when
-    # Horde places or moves the agent onto a node this build did not come from.
+    # that node has no build from this caller to start from.
     with {:ok, start_opts} <- build_start_opts(build_args) do
+      {start_opts, handoff} = hand_off_build(start_opts)
+
       supervisor_config =
         start_opts
-        |> drop_replicated_build()
         |> Keyword.put(:builder, {__MODULE__, :build_start_opts, [build_args]})
         |> Keyword.put(:initial_subscribers, Keyword.get(opts, :initial_subscribers, []))
         |> Keyword.put(:pending_resume, Keyword.get(opts, :pending_resume))
         |> Keyword.put(:pending_resume_for, Keyword.get(opts, :pending_resume_for))
 
-      case AgentsDynamicSupervisor.start_agent_sync(supervisor_config) do
-        {:ok, _supervisor_pid} ->
-          session_info(agent_id, conversation_id)
+      try do
+        case AgentsDynamicSupervisor.start_agent_sync(supervisor_config) do
+          {:ok, _supervisor_pid} ->
+            session_info(agent_id, conversation_id)
 
-        {:error, reason} ->
-          Logger.error("Failed to start agent session: #{inspect(reason)}")
-          {:error, reason}
+          {:error, reason} ->
+            Logger.error("Failed to start agent session: #{inspect(reason)}")
+            {:error, reason}
+        end
+      after
+        # Unused when Horde placed the agent on another node or it was already
+        # running. Used or not, it is not needed past this point.
+        BuildHandoff.delete(handoff)
       end
     end
   end
@@ -598,13 +613,26 @@ defmodule Sagents.Session do
   # Under Horde the start options become the child spec, which every node holds
   # a replica of. DeltaCrdt resends the values of unchanged keys on every sync
   # interval, so the cost of an idle agent grows with the size of its spec. The
-  # agent and its loaded state are the large parts, and the builder returns
-  # both, so they are left out and the hosting node builds them. The local
-  # backend keeps no replicas and starts from the build already made.
-  defp drop_replicated_build(start_opts) do
+  # agent and its loaded state are the large parts, so they are left out of it.
+  #
+  # They go into this node's build handoff table instead, and the start options
+  # carry only its key. When Horde places the agent on this node,
+  # `AgentSupervisor.init/1` starts from this build, made in the calling process
+  # with its context. On any other node, or on a restart, the key finds nothing
+  # and the builder runs there. The local backend keeps no replicas and starts
+  # from the build in the options.
+  defp hand_off_build(start_opts) do
     case Sagents.ProcessSupervisor.distribution_type() do
-      :horde -> Keyword.drop(start_opts, [:agent, :initial_state])
-      :local -> start_opts
+      :horde ->
+        {build, start_opts} = Keyword.split(start_opts, [:agent, :initial_state])
+
+        case BuildHandoff.put(build) do
+          nil -> {start_opts, nil}
+          handoff -> {Keyword.put(start_opts, :build_handoff, handoff), handoff}
+        end
+
+      :local ->
+        {start_opts, nil}
     end
   end
 
@@ -626,13 +654,11 @@ defmodule Sagents.Session do
            build_args.factory_router.resolve(scope, conversation_id, request_opts),
          {:ok, agent, session_opts} <-
            invoke_factory(factory_module, factory_config, agent_id) do
-      {:ok, state} =
-        State.load_or_new(
-          build_args.agent_persistence,
-          scope,
-          %{agent_id: agent_id, conversation_id: conversation_id},
-          fresh_state_attrs: derive_fresh_state_attrs(session_opts)
-        )
+      # The AgentServer reads the persisted conversation itself on every start,
+      # and uses `:initial_state` only when nothing is persisted. So the build
+      # supplies just that fallback, and the conversation is read once per
+      # start, by the process that runs it.
+      state = State.new!(derive_fresh_state_attrs(session_opts))
 
       {:ok,
        build_supervisor_config(

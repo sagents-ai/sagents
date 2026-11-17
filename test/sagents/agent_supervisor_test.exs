@@ -132,6 +132,14 @@ defmodule Sagents.AgentSupervisorTest do
 
     def build_error(_test_pid, _agent_id), do: {:error, :nope}
 
+    def build_raise(_test_pid, _agent_id), do: raise("factory failed")
+
+    def build_reporting_process(test_pid, agent_id) do
+      send(test_pid, {:built_in, self()})
+      Process.put(:left_by_builder, agent_id)
+      build_agent(test_pid, agent_id)
+    end
+
     defp builder(agent_id, function \\ :build_agent),
       do: {__MODULE__, function, [self(), agent_id]}
 
@@ -235,6 +243,135 @@ defmodule Sagents.AgentSupervisorTest do
                )
 
       assert {:error, :not_found} = AgentSupervisor.get_pid(agent_id)
+    end
+
+    test "returns an error when the builder raises, and starts nothing" do
+      agent_id = generate_test_agent_id()
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%RuntimeError{message: "factory failed"}, _stacktrace}} =
+               AgentSupervisor.start_link(
+                 agent_id: agent_id,
+                 builder: builder(agent_id, :build_raise),
+                 name: AgentSupervisor.get_name(agent_id)
+               )
+
+      assert {:error, :not_found} = AgentSupervisor.get_pid(agent_id)
+    end
+
+    test "runs the builder in the agent's own supervisor process" do
+      agent_id = generate_test_agent_id()
+
+      assert {:ok, sup_pid} =
+               AgentSupervisor.start_link_sync(
+                 agent_id: agent_id,
+                 builder: builder(agent_id, :build_reporting_process)
+               )
+
+      assert_received {:built_in, ^sup_pid}
+      assert {:dictionary, dictionary} = Process.info(sup_pid, :dictionary)
+      assert {:left_by_builder, agent_id} in dictionary
+    end
+
+    test "a builder under AgentsDynamicSupervisor leaves nothing in the placing supervisor" do
+      agent_id = generate_test_agent_id()
+
+      assert {:ok, sup_pid} =
+               Sagents.AgentsDynamicSupervisor.start_agent_sync(
+                 agent_id: agent_id,
+                 builder: builder(agent_id, :build_reporting_process)
+               )
+
+      assert_received {:built_in, ^sup_pid}
+
+      placing = Process.whereis(Sagents.AgentsDynamicSupervisor)
+      assert {:dictionary, dictionary} = Process.info(placing, :dictionary)
+      refute Keyword.has_key?(dictionary, :left_by_builder)
+
+      Sagents.AgentsDynamicSupervisor.stop_agent(agent_id)
+    end
+
+    test "starts from a handed-off build when this node and run requested the start" do
+      agent_id = generate_test_agent_id()
+      handed = create_test_agent(agent_id: agent_id, base_system_prompt: "handed off")
+      handoff = Sagents.BuildHandoff.put(agent: handed)
+
+      assert {:ok, _sup_pid} =
+               AgentSupervisor.start_link_sync(
+                 agent_id: agent_id,
+                 builder: builder(agent_id),
+                 build_handoff: handoff,
+                 origin: AgentSupervisor.incarnation()
+               )
+
+      refute_received {:builder_called, _agent_id}
+      assert "handed off" == prompt_of(agent_id)
+      assert :error = Sagents.BuildHandoff.take(handoff)
+    end
+
+    test "builds, and leaves the handed-off build alone, when another node requested the start" do
+      agent_id = generate_test_agent_id()
+      handoff = Sagents.BuildHandoff.put(agent: create_test_agent(agent_id: agent_id))
+      on_exit(fn -> Sagents.BuildHandoff.delete(handoff) end)
+
+      assert {:ok, _sup_pid} =
+               AgentSupervisor.start_link_sync(
+                 agent_id: agent_id,
+                 builder: builder(agent_id),
+                 build_handoff: handoff,
+                 origin: {:other@host, 1}
+               )
+
+      assert_received {:builder_called, ^agent_id}
+      assert "built" == prompt_of(agent_id)
+      assert {:ok, _build} = Sagents.BuildHandoff.take(handoff)
+    end
+
+    test "builds when the handed-off build is gone" do
+      agent_id = generate_test_agent_id()
+
+      assert {:ok, _sup_pid} =
+               AgentSupervisor.start_link_sync(
+                 agent_id: agent_id,
+                 builder: builder(agent_id),
+                 build_handoff: make_ref(),
+                 origin: AgentSupervisor.incarnation()
+               )
+
+      assert_received {:builder_called, ^agent_id}
+      assert "built" == prompt_of(agent_id)
+    end
+
+    test "a supervisor restart builds, because the first start took the handed-off build" do
+      agent_id = generate_test_agent_id()
+      handed = create_test_agent(agent_id: agent_id, base_system_prompt: "handed off")
+
+      assert {:ok, sup_pid} =
+               Sagents.AgentsDynamicSupervisor.start_agent_sync(
+                 agent_id: agent_id,
+                 builder: builder(agent_id),
+                 build_handoff: Sagents.BuildHandoff.put(agent: handed)
+               )
+
+      refute_received {:builder_called, _agent_id}
+      assert "handed off" == prompt_of(agent_id)
+
+      # An abnormal exit after its children have stopped, so the transient
+      # child is restarted without racing its old AgentServer's name.
+      :ok = Supervisor.stop(sup_pid, :crashed)
+
+      assert_receive {:builder_called, ^agent_id}, 2_000
+
+      # The restarted supervisor registers its name before init/1 runs, and a
+      # call to it is answered only once init/1, which starts the AgentServer,
+      # has returned.
+      assert {:ok, restarted} = AgentSupervisor.get_pid(agent_id)
+      assert restarted != sup_pid
+      _children = Supervisor.which_children(restarted)
+
+      assert "built" == prompt_of(agent_id)
+
+      Sagents.AgentsDynamicSupervisor.stop_agent(agent_id)
     end
 
     test "AgentsDynamicSupervisor records the requesting node, so a local start keeps :agent" do
