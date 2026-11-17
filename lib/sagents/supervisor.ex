@@ -56,6 +56,9 @@ defmodule Sagents.Supervisor do
     `Horde.Registry`)
   - Agents dynamic supervisor — For managing `AgentSupervisor` instances
   - Filesystem dynamic supervisor — For managing `FileSystemServer` instances
+  - A node-local build handoff table, through which `Sagents.Session` hands the
+    agent it built to the `AgentSupervisor` that starts it on the same node
+    under `:horde`.
 
   The backend (local vs Horde) is determined by application config:
 
@@ -127,7 +130,14 @@ defmodule Sagents.Supervisor do
           Sagents.RegistryWatcher,
           Sagents.ProcessSupervisor.agents_supervisor_child_spec([]),
           Sagents.ProcessSupervisor.filesystem_supervisor_child_spec([])
-        ] ++ membership_children()
+        ] ++
+        membership_children() ++
+        [
+          # Last, so its own failure restarts nothing else. Nothing depends on
+          # it: an entry it loses only means the agent being started at that
+          # moment builds on the hosting node instead.
+          Sagents.BuildHandoff
+        ]
 
     # :rest_for_one because everything after the registry holds `:via`
     # registrations in it that are established once at start. A registry

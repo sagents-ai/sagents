@@ -527,6 +527,37 @@ Two configuration options, both optional, freely combined:
 
 The propagator pairs are read like English at the call site: `{&OpenTelemetry.get_current/0, &OpenTelemetry.attach/1}` says "capture the current OTel context, re-apply it on the other side." There is no hidden behavior — the middleware does exactly what the pair specifies.
 
+### Agents built outside the calling process
+
+The capture runs wherever `Sagents.Agent.new/2` runs, which for an agent started through `Sagents.Session` is your `Sagents.Factory`. Usually that is the calling process. Under the `:horde` distribution the factory also runs in the agent's `Sagents.AgentSupervisor` process when Horde places the agent on another node, hands it over during a deploy or node loss, or a supervisor restarts it (see `docs/clustering.md`). That process has none of the caller's process dictionary and none of its tracing context.
+
+Split what you propagate by where it comes from:
+
+- **Derivable from the agent's inputs** (tenant, organization, actor): compute it from the scope or `:request_opts` in the factory and capture that value, so every build produces the right one.
+- **Request-scoped** (Sentry tags, the request's trace span): capture it with `:keys` or a propagator as above. After a move or restart it is absent until the next `update/1`, which is what the next request boundary calls anyway.
+
+```elixir
+def create_agent(agent_id, %MyConfig{scope: scope} = config) do
+  org_id = scope.organization_id
+
+  {:ok, agent} =
+    Sagents.Agent.new(%{
+      agent_id: agent_id,
+      model: config.model,
+      middleware: [
+        {Sagents.Middleware.ProcessContext,
+          keys: [:sentry_context],
+          propagators: [
+            {&OpenTelemetry.get_current/0, &OpenTelemetry.attach/1},
+            {fn -> org_id end, &MyApp.Repo.put_org_id/1}
+          ]}
+      ]
+    })
+
+  {:ok, agent, []}
+end
+```
+
 ### Refreshing the snapshot for long-lived agents
 
 `init/1` captures once, at agent construction time. For agents that handle a single request and are then discarded — a fresh agent per LiveView mount, per Coordinator session, per Oban job — that one capture is the only one you need.

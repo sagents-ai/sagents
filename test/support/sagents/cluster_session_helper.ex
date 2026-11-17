@@ -18,8 +18,8 @@ defmodule Sagents.ClusterSessionHelper do
     @behaviour Sagents.FactoryRouter
 
     @impl true
-    def resolve(_scope, _conversation_id, _request_opts) do
-      {:ok, Sagents.ClusterSessionHelper.Factory, %{}}
+    def resolve(_scope, _conversation_id, request_opts) do
+      {:ok, Sagents.ClusterSessionHelper.Factory, %{request_opts: request_opts}}
     end
   end
 
@@ -27,8 +27,22 @@ defmodule Sagents.ClusterSessionHelper do
     @moduledoc false
     @behaviour Sagents.Factory
 
+    # With `report_to: {name, node}` in the request options, reports each run:
+    # the node and process it ran in, and the caller marker it found there.
     @impl true
-    def create_agent(agent_id, _config) do
+    def create_agent(agent_id, %{request_opts: request_opts}) do
+      case Keyword.get(request_opts, :report_to) do
+        nil ->
+          :ok
+
+        report_to ->
+          send(
+            report_to,
+            {:factory_ran, agent_id, node(), self(),
+             Process.get(Sagents.ClusterSessionHelper.marker_key())}
+          )
+      end
+
       {:ok, Sagents.ClusterSessionHelper.build_agent(agent_id), []}
     end
   end
@@ -70,11 +84,14 @@ defmodule Sagents.ClusterSessionHelper do
         agent_id: agent_id,
         model: ChatAnthropic.new!(%{model: "claude-sonnet-4-5-20250929", api_key: "test_key"}),
         base_system_prompt: String.duplicate("x", @prompt_bytes),
-        middleware: []
+        middleware: [{Sagents.Middleware.ProcessContext, keys: [marker_key()]}]
       },
       replace_default_middleware: true
     )
   end
+
+  @doc "The process-dictionary key a caller marks itself with."
+  def marker_key, do: :cluster_session_caller_marker
 
   @doc false
   def saved_todo, do: %Sagents.Todo{content: "from persistence", status: :pending}
@@ -93,7 +110,9 @@ defmodule Sagents.ClusterSessionHelper do
   Start the agent for `conversation_id` through `Sagents.Session.start/3` on
   this node.
   """
-  def start_session(conversation_id) do
+  def start_session(conversation_id, request_opts \\ [], marker \\ nil) do
+    if marker, do: Process.put(marker_key(), marker)
+
     config = %{
       factory_router: Router,
       agent_persistence: Persistence,
@@ -104,7 +123,10 @@ defmodule Sagents.ClusterSessionHelper do
       agent_id_fun: &"cluster-session-#{&1}"
     }
 
-    Sagents.Session.start(config, conversation_id, scope: :cluster_scope)
+    Sagents.Session.start(config, conversation_id,
+      scope: :cluster_scope,
+      request_opts: request_opts
+    )
   end
 
   @doc """
@@ -123,6 +145,16 @@ defmodule Sagents.ClusterSessionHelper do
         nil
     end)
   end
+
+  @doc "The caller marker in the running AgentServer's process dictionary."
+  def agent_server_marker(agent_id) do
+    {:ok, pid} = Sagents.AgentServer.fetch_pid(agent_id)
+    {:dictionary, dictionary} = Process.info(pid, :dictionary)
+    Keyword.get(dictionary, marker_key())
+  end
+
+  @doc "The number of builds waiting in this node's build handoff table."
+  def handoff_entries, do: :ets.info(Sagents.BuildHandoff, :size)
 
   @doc "The running agent's system prompt size and todos, read on this node."
   def running_agent_summary(agent_id) do

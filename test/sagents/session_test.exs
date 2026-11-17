@@ -81,6 +81,25 @@ defmodule Sagents.SessionTest do
     end
   end
 
+  # Every conversation has the same saved state, holding one todo. Usable from
+  # any process, unlike StubPersistence, so a real AgentServer can load it.
+  defmodule SavedConversationPersistence do
+    @behaviour Sagents.AgentPersistence
+
+    @impl true
+    def persist_state(_scope, _state, _ctx), do: :ok
+
+    @impl true
+    def load_state(_scope, _ctx) do
+      state =
+        Sagents.State.new!(%{
+          todos: [%Sagents.Todo{id: "saved", content: "saved", status: :pending}]
+        })
+
+      {:ok, %{"state" => Sagents.Persistence.StateSerializer.serialize_state(state)}}
+    end
+  end
+
   defmodule HappyFactory do
     @behaviour Sagents.Factory
 
@@ -261,7 +280,7 @@ defmodule Sagents.SessionTest do
       refute Keyword.has_key?(built, :pending_resume)
     end
 
-    test "under :horde, leaves the built agent and state for the hosting node to build" do
+    test "under :horde, keeps the built agent and state out of the start options" do
       _fake_pid = stub_supervisor_ok(self())
       stub(Sagents.ProcessSupervisor, :distribution_type, fn -> :horde end)
 
@@ -273,6 +292,7 @@ defmodule Sagents.SessionTest do
 
       refute Keyword.has_key?(opts, :agent)
       refute Keyword.has_key?(opts, :initial_state)
+      assert is_reference(opts[:build_handoff])
       assert {Session, :build_start_opts, [build_args]} = opts[:builder]
       assert opts[:agent_id] == "conversation-3"
       assert opts[:agent_persistence] == StubPersistence
@@ -281,6 +301,62 @@ defmodule Sagents.SessionTest do
       assert {:ok, built} = Session.build_start_opts(build_args)
       assert %Sagents.Agent{agent_id: "conversation-3"} = built[:agent]
       assert %Sagents.State{} = built[:initial_state]
+    end
+
+    test "under :horde, hands the caller's build to the start and removes it afterwards" do
+      _fake_pid = stub_supervisor_ok(self())
+      stub(Sagents.ProcessSupervisor, :distribution_type, fn -> :horde end)
+      test_pid = self()
+
+      # Stands in for AgentSupervisor.init/1 on this node: the entry is there
+      # for the start to take.
+      stub(AgentsDynamicSupervisor, :start_agent_sync, fn opts ->
+        send(test_pid, {:handed_off, Sagents.BuildHandoff.take(opts[:build_handoff])})
+        stub(AgentServer, :fetch_pid, fn _agent_id -> {:ok, self()} end)
+        {:ok, self()}
+      end)
+
+      assert {:ok, _info} = Session.start(base_config(), 5, scope: :s)
+
+      assert_receive {:handed_off, {:ok, build}}
+      assert %Sagents.Agent{agent_id: "conversation-5"} = build[:agent]
+      assert %Sagents.State{} = build[:initial_state]
+      assert Keyword.keys(build) |> Enum.sort() == [:agent, :initial_state]
+    end
+
+    test "under :horde, removes an entry the start did not take" do
+      stub(Sagents.ProcessSupervisor, :distribution_type, fn -> :horde end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:error, :not_running} end)
+      test_pid = self()
+
+      # Horde placed the agent on another node, which did not take the entry.
+      stub(AgentsDynamicSupervisor, :start_agent_sync, fn opts ->
+        send(test_pid, {:handoff, opts[:build_handoff]})
+        {:error, :boom}
+      end)
+
+      assert {:error, :boom} = Session.start(base_config(), 6, scope: :s)
+
+      assert_receive {:handoff, handoff}
+      assert :error = Sagents.BuildHandoff.take(handoff)
+    end
+
+    test "under :horde, removes the entry when the start raises" do
+      stub(Sagents.ProcessSupervisor, :distribution_type, fn -> :horde end)
+      stub(AgentServer, :fetch_pid, fn _agent_id -> {:error, :not_running} end)
+      test_pid = self()
+
+      stub(AgentsDynamicSupervisor, :start_agent_sync, fn opts ->
+        send(test_pid, {:handoff, opts[:build_handoff]})
+        raise "start failed"
+      end)
+
+      assert_raise RuntimeError, "start failed", fn ->
+        Session.start(base_config(), 7, scope: :s)
+      end
+
+      assert_receive {:handoff, handoff}
+      assert :error = Sagents.BuildHandoff.take(handoff)
     end
 
     test "under :local, starts from the agent and state already built" do
@@ -292,6 +368,7 @@ defmodule Sagents.SessionTest do
       assert_receive {:supervisor_config, opts}
       assert %Sagents.Agent{agent_id: "conversation-4"} = opts[:agent]
       assert %Sagents.State{} = opts[:initial_state]
+      refute Keyword.has_key?(opts, :build_handoff)
     end
 
     test "raises with a clear migration error when factory uses legacy create_agent/1" do
@@ -350,26 +427,40 @@ defmodule Sagents.SessionTest do
       assert initial_state.todos == todos
     end
 
-    test "ignores session_opts[:fresh_state_attrs] when restoring saved state" do
-      ref = self()
-      _fake_pid = stub_supervisor_ok(ref)
+    test "builds without reading the persisted conversation" do
+      _fake_pid = stub_supervisor_ok(self())
 
       original = Sagents.State.new!(%{todos: []})
       serialized = Sagents.Persistence.StateSerializer.serialize_state(original)
       Process.put(:stub_load_response, {:ok, %{"state" => serialized}})
+
+      seed = [%Sagents.Todo{id: "seed", content: "x", status: :pending}]
+      Process.put(:happy_factory_session_opts, fresh_state_attrs: %{todos: seed})
+
+      assert {:ok, _info} = Session.start(base_config(), 5, scope: :s)
+
+      # The AgentServer reads it when it starts. The build supplies only the
+      # state used when nothing is persisted.
+      refute_received {:load_state_called, _ctx}
+      assert_receive {:supervisor_config, supervisor_opts}
+      assert Keyword.fetch!(supervisor_opts, :initial_state).todos == seed
+    end
+
+    test "a started agent restores the saved conversation over :fresh_state_attrs" do
+      stub(Sagents.ProcessSupervisor, :distribution_type, fn -> :local end)
 
       Process.put(
         :happy_factory_session_opts,
         fresh_state_attrs: %{todos: [%Sagents.Todo{id: "seed", content: "x", status: :pending}]}
       )
 
-      config = base_config()
+      config =
+        base_config(%{agent_persistence: SavedConversationPersistence, presence_module: nil})
 
-      assert {:ok, _info} = Session.start(config, 5, scope: :s)
+      assert {:ok, %{agent_id: agent_id}} = Session.start(config, 11, scope: :s)
+      on_exit(fn -> AgentsDynamicSupervisor.stop_agent(agent_id) end)
 
-      assert_receive {:supervisor_config, supervisor_opts}
-      initial_state = Keyword.fetch!(supervisor_opts, :initial_state)
-      assert initial_state.todos == []
+      assert [%Sagents.Todo{content: "saved"}] = AgentServer.get_state(agent_id).todos
     end
 
     test "wires presence, pubsub, and persistence config into the supervisor" do

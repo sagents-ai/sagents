@@ -111,11 +111,15 @@ defmodule Sagents.Horde.NodeTransferTest do
     do_wait_for_agent(node, agent_id, deadline, 100)
   end
 
+  # Waits for the AgentServer, then returns its AgentSupervisor. The supervisor
+  # registers its name before init/1, which builds the agent when it has a
+  # builder, so a registered supervisor does not yet mean a running agent.
   defp do_wait_for_agent(node, agent_id, deadline, delay) do
-    case :rpc.call(node, Sagents.AgentSupervisor, :get_pid, [agent_id]) do
-      {:ok, pid} when is_pid(pid) ->
-        {:ok, pid}
-
+    with {:ok, _server} <- :rpc.call(node, Sagents.AgentServer, :fetch_pid, [agent_id]),
+         {:ok, pid} when is_pid(pid) <-
+           :rpc.call(node, Sagents.AgentSupervisor, :get_pid, [agent_id]) do
+      {:ok, pid}
+    else
       _other ->
         if System.monotonic_time(:millisecond) < deadline do
           Process.sleep(delay)

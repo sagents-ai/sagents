@@ -257,16 +257,35 @@ An agent built by another build is wrong in two ways:
 
 `Sagents.Session` avoids both. It starts every agent with a `:builder` that
 re-runs your `Sagents.FactoryRouter` and `Sagents.Factory`, and leaves the
-built agent and its loaded state out of the start options.
-`Sagents.AgentSupervisor.start_link/1` runs the builder on whichever node hosts
-the agent, so the agent is always built by the code that runs it, with its
-persisted state restored. Each build emits `[:sagents, :agent, :built]` with
-`%{count: 1}` and `%{agent_id: _, reason: _, node: _}`.
+built agent and its initial state out of the start options. The agent is
+always built by the code that runs it:
 
-`Sagents.Session` also builds the agent once in the calling process before the
-start, so router and factory errors are returned to the caller. A start
-therefore runs the router, the factory, and the state load twice: once in the
-caller and once on the hosting node.
+- `Sagents.Session` builds the agent in the calling process first, so router
+  and factory errors are returned to the caller. It hands that build to the
+  start through a table on the calling node, and the start options carry only
+  its key.
+- When Horde places the agent on the calling node, the start uses that build.
+  The router and factory run once, in the calling process, with its process
+  dictionary and context.
+- When Horde places the agent on another node, hands it over to another node,
+  or a supervisor restarts it, the key finds nothing and
+  `Sagents.AgentSupervisor` runs the builder on the hosting node, in the
+  agent's own supervisor process. Each such build emits
+  `[:sagents, :agent, :built]` with `%{count: 1}` and
+  `%{agent_id: _, reason: _, node: _}`.
+
+Neither build reads the persisted conversation. The `Sagents.AgentServer`
+reads it when it starts, on every start, and uses the initial state only when
+nothing is persisted.
+
+Horde's default `Horde.UniformDistribution` places each start by hashing its
+child spec, so in a cluster of N nodes about one start in N lands on the
+calling node. The others build twice: once in the caller and once on the
+hosting node.
+
+A build on the hosting node runs while that node's Horde supervisor waits for
+the new `AgentSupervisor` to finish starting, so a slow router or factory also
+delays the other starts and stops that node's supervisor is handling.
 
 #### Why the start options stay small
 
@@ -282,7 +301,10 @@ This makes the router and factory part of the restart path. They may run inside
 a supervisor on another node rather than in the process that called
 `Sagents.Session`, so they must not depend on that process: its process
 dictionary, `self()`, or Logger and tracing context set by the caller. Inputs
-belong in the scope and `:request_opts`, which travel with the start.
+belong in the scope and `:request_opts`, which travel with the start. The same
+holds for what `Sagents.Middleware.ProcessContext` captures, since it captures
+when the factory builds the agent: see "Where the capture runs" in its
+documentation.
 
 If you start agents with `Sagents.AgentsDynamicSupervisor.start_agent/1`
 directly, pass your own `:builder`, and leave out `:agent` and `:initial_state`
