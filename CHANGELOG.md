@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.21.6
+
+Under `:horde`, an agent that Horde places on the node that requested its start is now built once, in the calling process. Since v0.21.4, every start through `Sagents.Session` built the agent a second time inside Horde's shared supervisor process. That second build broke test suites and evals: it ran outside the test's Ecto sandbox, without its Mimic stubs, and without the caller's `ProcessContext` (Sentry, OpenTelemetry, tenancy). It also made every other start and stop on the node wait for it. The Horde child spec still carries no agent or state.
+
+**No breaking changes.** No code changes are needed.
+
+### Upgrading from v0.21.5 - v0.21.6
+
+- `Sagents.AgentSupervisor.get_pid/1` can now find a supervisor whose agent is still being built, because the build runs in the supervisor's `init/1`, after its name is registered. Before using the agent, wait for the `AgentServer`: use `Sagents.AgentServer.fetch_pid/1`, `Sagents.Session.fetch_running/2`, or the return of `start_agent_sync/1`. `Session` and `start_agent_sync/1` already do this.
+- `[:sagents, :agent, :built]` fires only when a hosting node builds the agent: a start placed on another node, a handover, or a supervisor restart. On v0.21.4 and v0.21.5 it fired for every `:horde` start through `Session`, so adjust any alerts or dashboards built on that rate.
+- A persistence `load_state/2` error during a `Session` start now returns `{:error, reason}`, with `{:load_failed, reason}` from the `AgentServer` inside it. It used to raise a `CaseClauseError` in the caller.
+- On a cluster of N nodes, Horde places about 1 start in N on the calling node. The other starts still run the router and factory twice, once in the caller and once on the hosting node. The factory and router must still not depend on the calling process. Derive context such as a tenant from the scope or `:request_opts`; see "Where the capture runs" in `Sagents.Middleware.ProcessContext`.
+
+### Changed
+- A build on the hosting node runs in the agent's own `AgentSupervisor` process, during `init/1`, not in Horde's shared supervisor process. The router's and factory's process-dictionary writes stay with that agent. https://github.com/sagents-ai/sagents/pull/252
+- `Session` no longer reads the persisted conversation while building. The `AgentServer` reads it when it starts, so a start reads it once. Under `:horde` it used to be read three times. https://github.com/sagents-ai/sagents/pull/252
+
+### Fixed
+- Under `:horde`, a `Session` start that Horde places on the calling node uses the agent and state built in the caller, handed over through a node-local table. It is no longer rebuilt in Horde's `ProcessesSupervisor`, a shared process outside any test's sandbox that blocked the node's other starts and stops for the length of each build. https://github.com/sagents-ai/sagents/pull/252
+
 ## v0.21.5
 
 Answering an `AskUserQuestion` question no longer crashes the next LLM request on models that use the Chat Completions format (OpenAI-compatible providers). This regression shipped in v0.21.1 and affected every answer and cancel. Anthropic models were not affected.
