@@ -33,7 +33,8 @@ defmodule Sagents.SubAgent.Task do
     boilerplate (no user questions, complete-or-fail, etc.) is supplied
     by `Sagents.SubAgent.task_subagent_boilerplate/0`.
   - `display_text/0` — *optional.* Human-facing status string shown in
-    the host UI while this task is running. If not implemented, the
+    the host UI while this task is running. A `title` the model gives the
+    `task` call takes priority over it. If neither is present, the
     middleware falls back to a generic `"Running task"` label (see
     `Sagents.Middleware.SubAgent`); host compilers may instead derive
     a humanized form of `task_name/0`.

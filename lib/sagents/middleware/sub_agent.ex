@@ -269,7 +269,6 @@ defmodule Sagents.Middleware.SubAgent do
   alias Sagents.SubAgent
   alias Sagents.SubAgentServer
   alias Sagents.SubAgentsDynamicSupervisor
-  alias LangChain.Callbacks
   alias LangChain.Function
   alias LangChain.Message.ToolResult
 
@@ -333,8 +332,8 @@ defmodule Sagents.Middleware.SubAgent do
               do: cfg.name
 
         # Build display_texts map: %{task_name => display_text}.
-        # Used by the :on_tool_call_identified callback to re-label the
-        # `task` tool call in the UI based on which subagent was picked.
+        # The `task` tool labels a call with the sub-agent's display_text when
+        # the model gives no usable `title`.
         display_texts_map =
           for cfg <- subagents,
               text = Map.get(cfg, :display_text),
@@ -404,6 +403,12 @@ defmodule Sagents.Middleware.SubAgent do
 
     SubAgents have their own conversation context and will work independently
     to complete the task. You will receive only their final result.
+
+    Give every `task` call a `title`: a short phrase, starting with a verb, that
+    tells the user what this SubAgent is doing, such as "Investigate device
+    state". The user sees the title, not your instructions. When you start
+    several SubAgents in one turn, give each one a title that tells them apart,
+    such as "Investigate DESKTOP-01 state" and "Investigate DESKTOP-02 state".
     """
 
     base
@@ -489,20 +494,10 @@ defmodule Sagents.Middleware.SubAgent do
     end
   end
 
+  # The `task` tool labels its calls through `display_text_from_args`, so this
+  # middleware adds no chain callbacks.
   @impl true
-  def callbacks(config) do
-    display_texts_map = Map.get(config, :display_texts_map, %{})
-
-    if map_size(display_texts_map) == 0 do
-      %{}
-    else
-      %{
-        on_tool_call_identified: fn chain, tool_call, _function ->
-          maybe_refire_with_subagent_display_text(chain, tool_call, display_texts_map)
-        end
-      }
-    end
-  end
+  def callbacks(_config), do: %{}
 
   @impl true
   def debug_summary(config) do
@@ -534,42 +529,6 @@ defmodule Sagents.Middleware.SubAgent do
 
   defp has_use_instructions?(_other), do: false
 
-  # When the `task` tool call is identified, the chain augments it with the
-  # tool's static display_text ("Running task"). If the parent picked a
-  # task_name with its own `display_text`, re-fire the callback with the
-  # overridden ToolCall so downstream observers (UI) can re-label the running
-  # tool call.
-  defp maybe_refire_with_subagent_display_text(chain, %{name: "task"} = tool_call, display_texts) do
-    case Map.get(tool_call, :arguments) do
-      args when is_map(args) ->
-        task_name = Map.get(args, "task_name")
-
-        case Map.get(display_texts, task_name) do
-          nil ->
-            :ok
-
-          override when is_binary(override) ->
-            if tool_call.display_text != override do
-              updated_call = %{tool_call | display_text: override}
-              func = chain._tool_map[tool_call.name]
-
-              Callbacks.fire(chain.callbacks, :on_tool_call_identified, [
-                chain,
-                updated_call,
-                func
-              ])
-            end
-
-            :ok
-        end
-
-      _other ->
-        :ok
-    end
-  end
-
-  defp maybe_refire_with_subagent_display_text(_chain, _tool_call, _display_texts), do: :ok
-
   ## Private Functions - Tool Building
 
   defp general_purpose_description([]) do
@@ -588,6 +547,7 @@ defmodule Sagents.Middleware.SubAgent do
   defp build_task_tool(config) do
     # Get list of available subagent names from the lookup map
     task_names = config.agent_map |> Map.keys()
+    display_texts_map = Map.get(config, :display_texts_map, %{})
 
     Function.new!(%{
       name: "task",
@@ -614,16 +574,86 @@ defmodule Sagents.Middleware.SubAgent do
                 "Optional custom system prompt to define how the SubAgent should behave. " <>
                   "Only applicable for 'general-purpose' type. Defines role, capabilities, and constraints. " <>
                   "If omitted, a default general-purpose prompt will be used."
+            },
+            "title" => %{
+              type: "string",
+              description:
+                "A short title for this work, shown to the user while it runs. 2 to 5 words, " <>
+                  "starting with a verb and naming the subject, in sentence case with no ending " <>
+                  "punctuation. Describe the work, not the tool or mode: \"Investigate device state\", " <>
+                  "\"Review deployment failures\", \"Compare installer options\". Leave out IDs, " <>
+                  "secrets and anything the user shouldn't see in the interface."
             }
           }
           |> put_mode_property(config)
       },
+      # The call's label: the model's title, else the chosen sub-agent's
+      # display_text, else "Running task".
+      display_text_from_args: &task_display_text(&1, display_texts_map),
       function: fn args, context ->
         execute_task(args, context, config)
       end,
       # Allow multiple SubAgents to run in parallel
       async: true
     })
+  end
+
+  @title_max_length 60
+
+  # The label for a `task` call: its sanitized `title` when that leaves any
+  # text, otherwise the chosen sub-agent's configured display_text, otherwise
+  # nil (the tool's static "Running task").
+  @spec task_display_text(map(), %{String.t() => String.t()}) :: String.t() | nil
+  defp task_display_text(args, display_texts_map) do
+    case sanitize_title(Map.get(args, "title")) do
+      nil -> Map.get(display_texts_map, Map.get(args, "task_name"))
+      title -> title
+    end
+  end
+
+  # The label of the `task` call that started a sub-agent, from the call's
+  # arguments and the middleware config.
+  defp task_label(args, config),
+    do: task_display_text(args, Map.get(config, :display_texts_map, %{}))
+
+  # A `:subagent_hitl` interrupt carries the `task` call's label as
+  # `:display_text` so the parent's approval updates show it. A call with no
+  # label has no key, and the updates use their generic text.
+  defp put_label(interrupt, label) when is_binary(label),
+    do: Map.put(interrupt, :display_text, label)
+
+  defp put_label(interrupt, _label), do: interrupt
+
+  # A title is a single-line UI label: whitespace runs (newlines included)
+  # collapse to one space, and a long title is cut at the last word boundary
+  # within the limit, or hard at the limit when it has no space there.
+  @spec sanitize_title(any()) :: String.t() | nil
+  defp sanitize_title(title) when is_binary(title) do
+    case title |> String.replace(~r/\s+/u, " ") |> String.trim() do
+      "" -> nil
+      collapsed -> truncate_title(collapsed)
+    end
+  end
+
+  defp sanitize_title(_title), do: nil
+
+  defp truncate_title(title) do
+    if String.length(title) <= @title_max_length do
+      title
+    else
+      cut = String.slice(title, 0, @title_max_length)
+
+      # When the character after the cut is a space, the cut already ends on a
+      # word boundary.
+      if String.at(title, @title_max_length) == " " do
+        String.trim_trailing(cut)
+      else
+        case cut |> String.split(" ") |> Enum.drop(-1) do
+          [] -> cut
+          words -> words |> Enum.join(" ") |> String.trim_trailing()
+        end
+      end
+    end
   end
 
   # A general-purpose sub-agent can start in any mode the parent's switcher
@@ -729,6 +759,8 @@ defmodule Sagents.Middleware.SubAgent do
     - `"mode"` (optional) - For general-purpose SubAgents of a parent with an
       ability set switcher: the set the SubAgent starts in instead of the
       parent's current one
+    - `"title"` (optional) - A short label for the work, shown to the user. It
+      is a UI label only and is not passed to the SubAgent
 
   - `context` - Tool execution context map containing:
     - `:agent_id` - Parent agent ID
@@ -864,7 +896,7 @@ defmodule Sagents.Middleware.SubAgent do
          instructions,
          task_name,
          agent_config,
-         _args,
+         args,
          context,
          config,
          per_call_initial
@@ -953,7 +985,7 @@ defmodule Sagents.Middleware.SubAgent do
       case DynamicSupervisor.start_child(supervisor_name, child_spec) do
         {:ok, _pid} ->
           # Execute SubAgent synchronously (blocks until complete or interrupt)
-          execute_subagent(subagent.id, task_name)
+          execute_subagent(subagent.id, task_name, task_label(args, config))
 
         # A duplicate subagent.id should be impossible by construction
         # (fresh UUID per spawn). Surface it as a distinct error so the
@@ -1049,7 +1081,7 @@ defmodule Sagents.Middleware.SubAgent do
       try do
         case DynamicSupervisor.start_child(supervisor_name, child_spec) do
           {:ok, _pid} ->
-            execute_subagent(subagent.id, "general-purpose")
+            execute_subagent(subagent.id, "general-purpose", task_label(args, config))
 
           # See start_pre_configured_subagent/7 above — duplicate ids
           # are impossible by construction, so surface explicitly.
@@ -1195,7 +1227,7 @@ defmodule Sagents.Middleware.SubAgent do
     end)
   end
 
-  defp execute_subagent(sub_agent_id, task_name) do
+  defp execute_subagent(sub_agent_id, task_name, label) do
     Logger.debug("Executing SubAgent: #{sub_agent_id}")
 
     case SubAgentServer.execute(sub_agent_id) do
@@ -1220,12 +1252,15 @@ defmodule Sagents.Middleware.SubAgent do
             # Return 3-tuple that LangChain.execute_tool_call recognizes
             # Keep alive — needs resume later
             {:interrupt, "'#{task_name}' requires human approval.",
-             %{
-               type: :subagent_hitl,
-               sub_agent_id: sub_agent_id,
-               task_name: task_name,
-               interrupt_data: interrupt_data
-             }}
+             put_label(
+               %{
+                 type: :subagent_hitl,
+                 sub_agent_id: sub_agent_id,
+                 task_name: task_name,
+                 interrupt_data: interrupt_data
+               },
+               label
+             )}
 
           halt ->
             propagate_halt(halt, sub_agent_id, task_name)
@@ -1329,13 +1364,17 @@ defmodule Sagents.Middleware.SubAgent do
         {:ok, patched_state}
 
       {:interrupt, new_inner_interrupt_data} ->
-        updated_interrupt = %{
-          type: :subagent_hitl,
-          sub_agent_id: sub_agent_id,
-          task_name: task_name,
-          tool_call_id: tool_call_id,
-          interrupt_data: new_inner_interrupt_data
-        }
+        updated_interrupt =
+          put_label(
+            %{
+              type: :subagent_hitl,
+              sub_agent_id: sub_agent_id,
+              task_name: task_name,
+              tool_call_id: tool_call_id,
+              interrupt_data: new_inner_interrupt_data
+            },
+            Map.get(data, :display_text)
+          )
 
         {:interrupt, %{state | interrupt_data: updated_interrupt}, updated_interrupt}
 
@@ -1365,6 +1404,7 @@ defmodule Sagents.Middleware.SubAgent do
 
     decisions = Map.get(context.resume_info, :decisions, [])
     task_name = Map.get(context.resume_info, :task_name, "unknown")
+    label = Map.get(context.resume_info, :display_text)
 
     case SubAgentServer.resume(sub_agent_id, decisions) do
       {:ok, final_result} ->
@@ -1385,12 +1425,15 @@ defmodule Sagents.Middleware.SubAgent do
             # Return 3-tuple that LangChain.execute_tool_call recognizes
             # Keep alive — needs resume later
             {:interrupt, "'#{task_name}' requires human approval.",
-             %{
-               type: :subagent_hitl,
-               sub_agent_id: sub_agent_id,
-               task_name: task_name,
-               interrupt_data: interrupt_data
-             }}
+             put_label(
+               %{
+                 type: :subagent_hitl,
+                 sub_agent_id: sub_agent_id,
+                 task_name: task_name,
+                 interrupt_data: interrupt_data
+               },
+               label
+             )}
 
           halt ->
             propagate_halt(halt, sub_agent_id, task_name)
