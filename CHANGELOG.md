@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.21.7
+
+The model can now title each sub-agent it starts. While a sub-agent runs, its `task` call shows a short label such as "Investigate DESKTOP-01 state" instead of "Running task", so several sub-agents started in one turn can be told apart. Approval prompts raised inside a sub-agent carry the same label.
+
+**No breaking changes.** No code changes are needed.
+
+### Upgrading from v0.21.6 - v0.21.7
+
+- sagents now requires `langchain` 0.15.9 or later, the first release with `Function.display_text_from_args`. Run `mix deps.update langchain` if your lock file has an older version.
+- The `:interrupted` and `:completed` tool updates for a sub-agent approval now carry the `task` call's label as `display_text` when it has one. When it has none, they still say "Task awaiting approval" and "Task completed". If your UI matched on those exact strings, match on the event's status instead.
+- A `:subagent_hitl` interrupt has a new `:display_text` key when the `task` call has a label. It is absent otherwise.
+
+### Added
+- The `task` tool takes an optional `title` argument, and the system prompt asks the model to give one on every call. The title becomes the call's label and is never passed to the sub-agent. A title is collapsed to one line and cut at a word boundary within 60 characters. Without a title, the sub-agent's configured `display_text` is used, then "Running task". https://github.com/sagents-ai/sagents/pull/254
+
+### Changed
+- The `task` call is labelled through langchain's `Function.display_text_from_args`. `Sagents.Middleware.SubAgent.callbacks/1` now returns no callbacks, and the middleware no longer fires `:on_tool_call_identified` itself. https://github.com/sagents-ai/sagents/pull/254
+- Updated `sobelow` to 0.19 (dev and test only). https://github.com/sagents-ai/sagents/pull/254
+
+### Fixed
+- The interrupt type table in the `Sagents.Middleware` docs lists the keys a `:subagent_hitl` interrupt actually has. https://github.com/sagents-ai/sagents/pull/254
+
 ## v0.21.6
 
 Under `:horde`, an agent that Horde places on the node that requested its start is now built once, in the calling process. Since v0.21.4, every start through `Sagents.Session` built the agent a second time inside Horde's shared supervisor process. That second build broke test suites and evals: it ran outside the test's Ecto sandbox, without its Mimic stubs, and without the caller's `ProcessContext` (Sentry, OpenTelemetry, tenancy). It also made every other start and stop on the node wait for it. The Horde child spec still carries no agent or state.
