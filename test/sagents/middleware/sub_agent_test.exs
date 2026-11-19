@@ -2774,47 +2774,198 @@ defmodule Sagents.Middleware.SubAgentTest do
     end
   end
 
-  describe "display_text callback" do
-    test "callbacks/1 returns empty map when no display_text is configured" do
-      cfg =
-        SubAgent.Config.new!(%{
-          name: "plain",
-          description: "Plain",
-          tools: [test_tool()],
-          system_prompt: "x"
-        })
-
-      {:ok, middleware_config} =
-        SubAgentMiddleware.init(
-          agent_id: "parent",
-          model: test_model(),
-          middleware: [],
-          subagents: [cfg]
-        )
-
-      assert SubAgentMiddleware.callbacks(middleware_config) == %{}
+  describe "task titles" do
+    defp kb_config do
+      SubAgent.Config.new!(%{
+        name: "kb",
+        description: "KB",
+        tools: [test_tool()],
+        instructions: "x",
+        display_text: "Drafting KB article"
+      })
     end
 
-    test "callbacks/1 registers on_tool_call_identified when display_text is set" do
-      cfg =
-        SubAgent.Config.new!(%{
-          name: "kb",
-          description: "KB",
-          tools: [test_tool()],
-          instructions: "x",
-          display_text: "Drafting KB article"
-        })
+    defp task_tool_for(opts) do
+      {:ok, config} =
+        SubAgentMiddleware.init([agent_id: "parent", model: test_model(), middleware: []] ++ opts)
+
+      [task_tool | _other_tools] = SubAgentMiddleware.tools(config)
+      {config, task_tool}
+    end
+
+    defp label(task_tool, args), do: task_tool.display_text_from_args.(args)
+
+    test "the task schema offers an optional title" do
+      for opts <- [[subagents: []], [subagents: [], ability_set_modes: ["devices"]]] do
+        {_config, task_tool} = task_tool_for(opts)
+
+        assert %{type: "string", description: description} =
+                 task_tool.parameters_schema.properties["title"]
+
+        assert description =~ "starting with a verb"
+        assert task_tool.parameters_schema.required == ["instructions", "task_name"]
+      end
+    end
+
+    test "the system prompt asks for a title, with and without the task list" do
+      for include <- [true, false] do
+        {config, _task_tool} = task_tool_for(subagents: [], include_task_list: include)
+        prompt = SubAgentMiddleware.system_prompt(config)
+
+        assert prompt =~ "Give every `task` call a `title`"
+        assert prompt =~ "give each one a title that tells them apart"
+      end
+    end
+
+    test "a title labels the call" do
+      {_config, task_tool} = task_tool_for(subagents: [])
+
+      assert label(task_tool, %{
+               "task_name" => "general-purpose",
+               "title" => "Investigate device state"
+             }) == "Investigate device state"
+    end
+
+    test "a title takes priority over the sub-agent's display_text" do
+      {_config, task_tool} = task_tool_for(subagents: [kb_config()])
+
+      assert label(task_tool, %{"task_name" => "kb", "title" => "Draft the VPN article"}) ==
+               "Draft the VPN article"
+    end
+
+    test "without a usable title the sub-agent's display_text labels the call" do
+      {_config, task_tool} = task_tool_for(subagents: [kb_config()])
+
+      for title <- [:missing, nil, "", "   \n\t ", 42, %{"text" => "x"}] do
+        args =
+          case title do
+            :missing -> %{"task_name" => "kb"}
+            value -> %{"task_name" => "kb", "title" => value}
+          end
+
+        assert label(task_tool, args) == "Drafting KB article"
+      end
+    end
+
+    test "without a title or a configured display_text the static label stays" do
+      {_config, task_tool} = task_tool_for(subagents: [kb_config()])
+
+      assert label(task_tool, %{"task_name" => "general-purpose"}) == nil
+      assert label(task_tool, %{"task_name" => "general-purpose", "title" => " "}) == nil
+      assert task_tool.display_text == "Running task"
+    end
+
+    test "a multi-line title is collapsed to one line" do
+      {_config, task_tool} = task_tool_for(subagents: [])
+
+      assert label(task_tool, %{
+               "task_name" => "general-purpose",
+               "title" => "  Investigate\n  device\t\tstate  "
+             }) == "Investigate device state"
+    end
+
+    test "a long title is cut at a word boundary within 60 characters" do
+      {_config, task_tool} = task_tool_for(subagents: [])
+      title = String.duplicate("Investigate device state ", 8)
+
+      result = label(task_tool, %{"task_name" => "general-purpose", "title" => title})
+
+      assert String.length(result) <= 60
+      # The third "Investigate" would end at character 61, so it is dropped.
+      assert result == "Investigate device state Investigate device state"
+    end
+
+    test "a long title cut exactly at a word boundary keeps its last word" do
+      {_config, task_tool} = task_tool_for(subagents: [])
+      # 60 characters, then a space, then more.
+      title = String.duplicate("a", 30) <> " " <> String.duplicate("b", 29) <> " tail"
+
+      assert label(task_tool, %{"task_name" => "general-purpose", "title" => title}) ==
+               String.duplicate("a", 30) <> " " <> String.duplicate("b", 29)
+    end
+
+    test "a long title with no spaces is cut at 60 characters" do
+      {_config, task_tool} = task_tool_for(subagents: [])
+      title = String.duplicate("x", 100)
+
+      assert label(task_tool, %{"task_name" => "general-purpose", "title" => title}) ==
+               String.duplicate("x", 60)
+    end
+
+    test "callbacks/1 adds no chain callbacks, with or without a display_text" do
+      for subagents <- [[build_subagent_config("plain", "Plain")], [kb_config()]] do
+        {config, _task_tool} = task_tool_for(subagents: subagents)
+        assert SubAgentMiddleware.callbacks(config) == %{}
+      end
+    end
+  end
+
+  describe "task titles do not reach the sub-agent" do
+    setup do
+      agent_id = "parent-#{System.unique_integer([:positive])}"
+      {:ok, _sup} = start_supervised({SubAgentsDynamicSupervisor, agent_id: agent_id})
 
       {:ok, middleware_config} =
         SubAgentMiddleware.init(
-          agent_id: "parent",
+          agent_id: agent_id,
           model: test_model(),
           middleware: [],
-          subagents: [cfg]
+          subagents: [build_subagent_config("researcher", "Research topics")]
         )
 
-      cbs = SubAgentMiddleware.callbacks(middleware_config)
-      assert is_function(cbs.on_tool_call_identified, 3)
+      context = %{
+        agent_id: agent_id,
+        state: State.new!(%{messages: []}),
+        parent_middleware: []
+      }
+
+      test_pid = self()
+      answer = Message.new_assistant!(%{content: "Done"})
+
+      LLMChain
+      |> stub(:run, fn chain, _opts ->
+        send(test_pid, {:sub_messages, chain.messages})
+
+        {:ok,
+         Map.merge(chain, %{
+           messages: chain.messages ++ [answer],
+           last_message: answer,
+           needs_response: false
+         })}
+      end)
+
+      %{middleware_config: middleware_config, context: context}
+    end
+
+    for task_name <- ["researcher", "general-purpose"] do
+      test "the #{task_name} sub-agent never sees the title", %{
+        middleware_config: config,
+        context: context
+      } do
+        task_name = unquote(task_name)
+
+        args = %{
+          "instructions" => "Research quantum computing",
+          "task_name" => task_name,
+          "title" => "Secret-looking title marker"
+        }
+
+        assert {:ok, "Done"} =
+                 SubAgentMiddleware.start_subagent(
+                   "Research quantum computing",
+                   task_name,
+                   args,
+                   context,
+                   config
+                 )
+
+        assert_received {:sub_messages, messages}
+
+        for message <- messages do
+          refute LangChain.Message.ContentPart.content_to_string(message.content) =~
+                   "Secret-looking title marker"
+        end
+      end
     end
   end
 

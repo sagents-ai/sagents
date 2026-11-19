@@ -42,6 +42,19 @@ defmodule Sagents.StreamingSessionTest do
       assert second.display_text == "Reading"
     end
 
+    test "a second identification of the same call relabels it" do
+      state = %{streaming_delta: nil}
+      first = %{call_id: "abc", name: "task", display_text: "Running task"}
+      relabelled = %{first | display_text: "Investigate device state"}
+
+      %{streaming_delta: delta} = StreamingSession.handle_tool_call_identified(state, first)
+
+      assert %{streaming_delta: %MessageDelta{tool_calls: [tc]}} =
+               StreamingSession.handle_tool_call_identified(%{streaming_delta: delta}, relabelled)
+
+      assert %ToolCall{call_id: "abc", display_text: "Investigate device state"} = tc
+    end
+
     test "returns empty changes when call_id is nil" do
       assert %{} ==
                StreamingSession.handle_tool_call_identified(%{streaming_delta: nil}, %{

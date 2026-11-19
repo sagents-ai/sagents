@@ -4227,27 +4227,30 @@ defmodule Sagents.AgentServer do
   # Handles subagent HITL, ask_user questions, and multiple_interrupts.
 
   # --- SubAgent HITL ---
+  # The interrupt carries the `task` call's label (the model's title or the
+  # sub-agent's display_text) when it has one. The update keeps that label on
+  # the card; the call's status says that it is waiting or done.
   defp maybe_update_interrupt_tool_display(
          server_state,
-         %{type: :subagent_hitl, tool_call_id: tool_call_id},
+         %{type: :subagent_hitl, tool_call_id: tool_call_id} = data,
          :interrupted
        ) do
     broadcast_tool_event(server_state, :interrupted, %{
       call_id: tool_call_id,
-      display_text: "Task awaiting approval"
+      display_text: Map.get(data, :display_text) || "Task awaiting approval"
     })
   end
 
   defp maybe_update_interrupt_tool_display(
          server_state,
-         %{type: :subagent_hitl, tool_call_id: tool_call_id},
+         %{type: :subagent_hitl, tool_call_id: tool_call_id} = data,
          :completed
        ) do
     broadcast_tool_event(server_state, :completed, %{
       call_id: tool_call_id,
       name: "task",
       result: "Task completed",
-      display_text: "Task completed"
+      display_text: Map.get(data, :display_text) || "Task completed"
     })
 
     maybe_resolve_tool_result(server_state, tool_call_id, "Task completed")
