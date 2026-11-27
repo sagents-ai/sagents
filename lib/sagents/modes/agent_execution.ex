@@ -197,18 +197,14 @@ defmodule Sagents.Modes.AgentExecution do
   defp continue_execution({:continue, chain}, opts), do: do_run(chain, opts)
   defp continue_execution(terminal, _opts), do: terminal
 
+  # LangChain's `check_until_tool/2` reads `:require_tool_success` from opts:
+  # when true, only a successful result from the target tool ends the run;
+  # otherwise any call to it does.
   defp maybe_check_until_tool(pipeline_result, opts) do
-    cond do
-      not Keyword.get(opts, :until_tool_active, false) ->
-        pipeline_result
-
-      # require success — terminate only on a successful matching result.
-      Keyword.get(opts, :require_tool_success, false) ->
-        check_until_tool_success(pipeline_result, opts)
-
-      # any call to the target tool ends the run.
-      true ->
-        check_until_tool(pipeline_result, opts)
+    if Keyword.get(opts, :until_tool_active, false) do
+      check_until_tool(pipeline_result, opts)
+    else
+      pipeline_result
     end
   end
 
