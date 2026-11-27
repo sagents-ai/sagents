@@ -50,7 +50,7 @@ defmodule Sagents.MixProject do
   defp deps do
     [
       # Core dependency - the LangChain library
-      {:langchain, ">= 0.15.9"},
+      {:langchain, ">= 0.16.0"},
       # {:langchain, path: "../my_langchain"},
 
       # Required dependencies
